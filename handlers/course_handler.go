@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"itii-assist/models"
 	"itii-assist/repositories"
 	"itii-assist/utils"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
+	"gorm.io/gorm"
 )
 
 // =============================================================================
@@ -678,8 +680,14 @@ func AddTAHandler(c fiber.Ctx) error {
 	actorID := c.Locals("user_id").(uint)
 	actorRole := c.Locals("user_role").(string)
 
-	if actorRole != "admin" && !repositories.IsUserCourseInstructor(courseID, actorID) {
-		return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์เพิ่มผู้ช่วยสอนในรายวิชานี้"})
+	if actorRole != "admin" {
+		hasPermission, err := repositories.HasCoursePermission(courseID, actorID, actorRole, repositories.PermissionManagePeople)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to resolve permissions"})
+		}
+		if !hasPermission {
+			return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์เพิ่มผู้ช่วยสอนในรายวิชานี้"})
+		}
 	}
 
 	var input struct {
@@ -705,8 +713,14 @@ func BulkAddTAsHandler(c fiber.Ctx) error {
 	actorID := c.Locals("user_id").(uint)
 	actorRole := c.Locals("user_role").(string)
 
-	if actorRole != "admin" && !repositories.IsUserCourseInstructor(courseID, actorID) {
-		return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์เพิ่มผู้ช่วยสอนในรายวิชานี้"})
+	if actorRole != "admin" {
+		hasPermission, err := repositories.HasCoursePermission(courseID, actorID, actorRole, repositories.PermissionManagePeople)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to resolve permissions"})
+		}
+		if !hasPermission {
+			return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์เพิ่มผู้ช่วยสอนในรายวิชานี้"})
+		}
 	}
 
 	rawBody := append([]byte(nil), c.Body()...)
@@ -745,8 +759,18 @@ func RemoveTAHandler(c fiber.Ctx) error {
 	actorID := c.Locals("user_id").(uint)
 	actorRole := c.Locals("user_role").(string)
 
-	if actorRole != "admin" && !repositories.IsUserCourseInstructor(courseID, actorID) {
-		return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์นำผู้ช่วยสอนออก"})
+	if uint(userID) == actorID {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไม่สามารถนำตัวเองออกจากรายวิชาได้"})
+	}
+
+	if actorRole != "admin" {
+		hasPermission, err := repositories.HasCoursePermission(courseID, actorID, actorRole, repositories.PermissionManagePeople)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to resolve permissions"})
+		}
+		if !hasPermission {
+			return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์นำผู้ช่วยสอนออก"})
+		}
 	}
 
 	if !repositories.RemoveCourseTA(courseID, uint(userID)) {
@@ -765,8 +789,18 @@ func AddInstructorHandler(c fiber.Ctx) error {
 	actorID := c.Locals("user_id").(uint)
 	actorRole := c.Locals("user_role").(string)
 
-	if actorRole != "admin" && !repositories.IsUserCourseInstructor(courseID, actorID) {
-		return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์เพิ่มอาจารย์ในรายวิชานี้"})
+	if actorRole == "ta" {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "ผู้ช่วยสอนไม่สามารถเพิ่มอาจารย์ได้"})
+	}
+
+	if actorRole != "admin" {
+		hasPermission, err := repositories.HasCoursePermission(courseID, actorID, actorRole, repositories.PermissionManagePeople)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to resolve permissions"})
+		}
+		if !hasPermission {
+			return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์เพิ่มอาจารย์ในรายวิชานี้"})
+		}
 	}
 
 	var input struct {
@@ -792,8 +826,18 @@ func BulkAddInstructorsHandler(c fiber.Ctx) error {
 	actorID := c.Locals("user_id").(uint)
 	actorRole := c.Locals("user_role").(string)
 
-	if actorRole != "admin" && !repositories.IsUserCourseInstructor(courseID, actorID) {
-		return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์เพิ่มอาจารย์ในรายวิชานี้"})
+	if actorRole == "ta" {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "ผู้ช่วยสอนไม่สามารถเพิ่มอาจารย์ได้"})
+	}
+
+	if actorRole != "admin" {
+		hasPermission, err := repositories.HasCoursePermission(courseID, actorID, actorRole, repositories.PermissionManagePeople)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to resolve permissions"})
+		}
+		if !hasPermission {
+			return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์เพิ่มอาจารย์ในรายวิชานี้"})
+		}
 	}
 
 	var input struct {
@@ -824,8 +868,14 @@ func RemoveInstructorHandler(c fiber.Ctx) error {
 	actorID := c.Locals("user_id").(uint)
 	actorRole := c.Locals("user_role").(string)
 
-	if actorRole != "admin" && !repositories.IsUserCourseInstructor(courseID, actorID) {
-		return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์นำอาจารย์ออก"})
+	if actorRole != "admin" {
+		hasPermission, err := repositories.HasCoursePermission(courseID, actorID, actorRole, repositories.PermissionManagePeople)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to resolve permissions"})
+		}
+		if !hasPermission {
+			return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์นำอาจารย์ออก"})
+		}
 	}
 
 	// Prevent removing self (non-admin)
@@ -846,6 +896,59 @@ func RemoveInstructorHandler(c fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบอาจารย์ในรายวิชานี้"})
 	}
 	return c.JSON(fiber.Map{"success": true, "message": "นำอาจารย์ออกสำเร็จ"})
+}
+
+// PATCH /api/courses/:id/tas/:userId/permissions
+func UpdateTAPermissionsHandler(c fiber.Ctx) error {
+	courseID := c.Params("id")
+	userID, _ := strconv.ParseUint(c.Params("userId"), 10, 64)
+	actorID := c.Locals("user_id").(uint)
+	actorRole := c.Locals("user_role").(string)
+
+	if actorRole == "ta" && uint(userID) == actorID {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "ผู้ช่วยสอนไม่สามารถแก้สิทธิ์ของตัวเองได้"})
+	}
+
+	var input struct {
+		Permissions repositories.CourseMemberPermissions `json:"permissions"`
+	}
+	if err := c.Bind().JSON(&input); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลสิทธิ์ไม่ถูกต้อง"})
+	}
+
+	if err := repositories.UpdateCourseTAPermissions(courseID, uint(userID), &input.Permissions); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบผู้ช่วยสอนในรายวิชานี้"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึกสิทธิ์ผู้ช่วยสอนไม่สำเร็จ"})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "message": "อัปเดตสิทธิ์ผู้ช่วยสอนสำเร็จ"})
+}
+
+// PATCH /api/courses/:id/instructors/:userId/permissions
+func UpdateInstructorPermissionsHandler(c fiber.Ctx) error {
+	courseID := c.Params("id")
+	userID, _ := strconv.ParseUint(c.Params("userId"), 10, 64)
+
+	var input struct {
+		Permissions repositories.CourseMemberPermissions `json:"permissions"`
+	}
+	if err := c.Bind().JSON(&input); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลสิทธิ์ไม่ถูกต้อง"})
+	}
+
+	if err := repositories.UpdateCourseInstructorPermissions(courseID, uint(userID), &input.Permissions); err != nil {
+		if errors.Is(err, repositories.ErrPrimaryInstructorPermissionsImmutable) {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "อาจารย์เจ้าของวิชาต้องมีสิทธิ์เต็มเสมอ"})
+		}
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบอาจารย์ในรายวิชานี้"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึกสิทธิ์อาจารย์ไม่สำเร็จ"})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "message": "อัปเดตสิทธิ์อาจารย์สำเร็จ"})
 }
 
 // =============================================================================
@@ -951,10 +1054,73 @@ func RemoveStudentFromSectionHandler(c fiber.Ctx) error {
 		return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์เข้าถึงรายวิชานี้"})
 	}
 
-	if !repositories.RemoveStudentFromSection(uint(sectionID), uint(studentID)) {
+	removed, restoreUntil, err := repositories.ArchiveAndRemoveStudentFromSection(uint(sectionID), uint(studentID), actorID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "นำนักศึกษาออกไม่สำเร็จ"})
+	}
+
+	if !removed {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบนักศึกษาในกลุ่มเรียนนี้"})
 	}
-	return c.JSON(fiber.Map{"success": true, "message": "นำนักศึกษาออกสำเร็จ"})
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "นำนักศึกษาออกสำเร็จ (กู้คืนได้ภายใน 10 วัน)",
+		"data": fiber.Map{
+			"restore_until": restoreUntil,
+		},
+	})
+}
+
+// GET /api/courses/:id/students/removed
+func GetRemovedStudentsHandler(c fiber.Ctx) error {
+	courseID := c.Params("id")
+	actorID := c.Locals("user_id").(uint)
+	actorRole := c.Locals("user_role").(string)
+
+	if !hasCourseAccess(courseID, actorID, actorRole) {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์เข้าถึงรายวิชานี้"})
+	}
+
+	var sectionIDPtr *uint
+	if sectionIDRaw := strings.TrimSpace(c.Query("section_id")); sectionIDRaw != "" {
+		parsed, err := strconv.ParseUint(sectionIDRaw, 10, 64)
+		if err != nil || parsed == 0 {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "section_id ไม่ถูกต้อง"})
+		}
+		parsedSectionID := uint(parsed)
+		sectionIDPtr = &parsedSectionID
+	}
+
+	rows, err := repositories.GetRestorableRemovedStudents(courseID, sectionIDPtr)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ดึงรายการกู้คืนไม่สำเร็จ"})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "data": rows})
+}
+
+// POST /api/courses/:id/sections/:sectionId/students/:studentId/restore
+func RestoreStudentToSectionHandler(c fiber.Ctx) error {
+	courseID := c.Params("id")
+	sectionID, _ := strconv.ParseUint(c.Params("sectionId"), 10, 64)
+	studentID, _ := strconv.ParseUint(c.Params("studentId"), 10, 64)
+	actorID := c.Locals("user_id").(uint)
+	actorRole := c.Locals("user_role").(string)
+
+	if !hasCourseAccess(courseID, actorID, actorRole) {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์เข้าถึงรายวิชานี้"})
+	}
+
+	restored, err := repositories.RestoreStudentToSection(uint(sectionID), uint(studentID))
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "กู้คืนนักศึกษาไม่สำเร็จ"})
+	}
+	if !restored {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบรายการที่สามารถกู้คืนได้ หรือพ้นกำหนดเวลาแล้ว"})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "message": "กู้คืนนักศึกษาสำเร็จ"})
 }
 
 // =============================================================================

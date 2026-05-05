@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"itii-assist/config"
 	"itii-assist/models"
+	"itii-assist/realtime"
 	"itii-assist/repositories"
 	"strconv"
 	"strings"
@@ -248,6 +249,7 @@ func CreateBookingHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
 	writeCourseActivityLog(session.CourseID, c.Locals("user_id").(uint), "create_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"queue_session_id": booking.QueueSessionID, "student_id": booking.StudentID, "desk_number": booking.DeskNumber, "booking_type": booking.BookingType})
+	emitQueueBookingChanged(sessionID, "new-booking", booking)
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": booking})
 }
 
@@ -292,6 +294,7 @@ func CancelBookingHandler(c fiber.Ctx) error {
 		if session, sessionErr := repositories.GetQueueSessionByID(booking.QueueSessionID); sessionErr == nil {
 			writeCourseActivityLog(session.CourseID, studentID, "cancel_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"booking_type": booking.BookingType, "desk_number": booking.DeskNumber})
 		}
+		emitQueueBookingChanged(booking.QueueSessionID, "booking-cancelled", booking)
 	}
 	return c.JSON(fiber.Map{"success": true, "message": "Booking cancelled"})
 }
@@ -324,6 +327,7 @@ func WorkerJoinHandler(c fiber.Ctx) error {
 	if session, sessionErr := repositories.GetQueueSessionByID(sessionID); sessionErr == nil {
 		writeCourseActivityLog(session.CourseID, userID, "join_queue_worker", "queue", "queue_session", session.ID, session.Title, fiber.Map{"accept_grading": input.AcceptGrading, "accept_help": input.AcceptHelp})
 	}
+	realtime.EmitToQueue(sessionID, "worker-joined", fiber.Map{"worker": worker, "timestamp": time.Now().UnixMilli()})
 	return c.JSON(fiber.Map{"success": true, "data": worker})
 }
 
@@ -367,6 +371,7 @@ func WorkerLeaveHandler(c fiber.Ctx) error {
 	if session, sessionErr := repositories.GetQueueSessionByID(sessionID); sessionErr == nil {
 		writeCourseActivityLog(session.CourseID, userID, "leave_queue_worker", "queue", "queue_session", session.ID, session.Title, fiber.Map{"status": newStatus})
 	}
+	realtime.EmitToQueue(sessionID, "worker-left", fiber.Map{"worker_id": userID, "status": newStatus, "timestamp": time.Now().UnixMilli()})
 
 	return c.JSON(fiber.Map{"success": true, "message": message, "data": fiber.Map{"status": newStatus}})
 }
@@ -423,6 +428,7 @@ func WorkerBookingActionHandler(c fiber.Ctx) error {
 	if session, sessionErr := repositories.GetQueueSessionByID(booking.QueueSessionID); sessionErr == nil {
 		writeCourseActivityLog(session.CourseID, workerID, "update_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"action": input.Action, "score": input.Score, "booking_type": booking.BookingType})
 	}
+	emitQueueActionChanged(booking, input.Action)
 	return c.JSON(fiber.Map{"success": true, "data": booking})
 }
 
@@ -459,6 +465,9 @@ func CompleteQueueBookingCompatHandler(c fiber.Ctx) error {
 	if session, sessionErr := repositories.GetQueueSessionByID(booking.QueueSessionID); sessionErr == nil {
 		writeCourseActivityLog(session.CourseID, workerID, "complete_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"booking_type": booking.BookingType, "score": input.Score})
 	}
+	emitQueueBookingChanged(booking.QueueSessionID, "booking-completed", booking)
+	realtime.EmitToBooking(booking.ID, "your-booking-completed", fiber.Map{"booking": booking, "timestamp": time.Now().UnixMilli()})
+	realtime.EmitToQueue(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
 
 	return c.JSON(fiber.Map{"success": true, "data": booking})
 }
@@ -486,6 +495,8 @@ func SkipQueueBookingCompatHandler(c fiber.Ctx) error {
 	if session, sessionErr := repositories.GetQueueSessionByID(booking.QueueSessionID); sessionErr == nil {
 		writeCourseActivityLog(session.CourseID, workerID, "skip_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"booking_type": booking.BookingType, "reason": input.Reason})
 	}
+	emitQueueBookingChanged(booking.QueueSessionID, "booking-skipped", booking)
+	realtime.EmitToQueue(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
 
 	return c.JSON(fiber.Map{"success": true, "message": "ข้ามคิวสำเร็จ"})
 }
@@ -1427,6 +1438,7 @@ func CreateQueueBookingPublicHandler(c fiber.Ctx) error {
 	if err != nil {
 		return queueLegacyError(c, 400, err.Error())
 	}
+	emitQueueBookingChanged(session.ID, "new-booking", booking)
 
 	return c.Status(201).JSON(fiber.Map{
 		"success": true,
@@ -1598,6 +1610,8 @@ func CancelQueueBookingPublicHandler(c fiber.Ctx) error {
 
 	booking.Status = "cancelled"
 	booking.CompletedAt = &now
+	emitQueueBookingChanged(booking.QueueSessionID, "booking-cancelled", booking)
+	realtime.EmitToQueue(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
 
 	return c.JSON(fiber.Map{
 		"success": true,
@@ -1811,6 +1825,7 @@ func UpdateQueueSessionStatusPublicHandler(c fiber.Ctx) error {
 	if actorID, ok := queueOptionalActorID(c); ok {
 		writeCourseActivityLog(updatedSession.CourseID, actorID, "update_queue_session_status", "queue", "queue_session", updatedSession.ID, updatedSession.Title, fiber.Map{"status": updatedSession.Status, "source": "projector"})
 	}
+	realtime.EmitToQueue(updatedSession.ID, "session-status-changed", fiber.Map{"status": updatedSession.Status, "session": updatedSession, "timestamp": time.Now().UnixMilli()})
 
 	return c.JSON(fiber.Map{"success": true, "data": updatedSession})
 }
@@ -1843,6 +1858,7 @@ func UpdateQueueSessionStatusCompatHandler(c fiber.Ctx) error {
 	if err != nil {
 		return queueLegacyError(c, 500, err.Error())
 	}
+	realtime.EmitToQueue(updatedSession.ID, "session-status-changed", fiber.Map{"status": updatedSession.Status, "session": updatedSession, "timestamp": time.Now().UnixMilli()})
 
 	return c.JSON(fiber.Map{"success": true, "data": updatedSession})
 }
@@ -1873,4 +1889,36 @@ func RegenerateQueuePINHandler(c fiber.Ctx) error {
 			"pin_code": pinCode,
 		},
 	})
+}
+
+func emitQueueBookingChanged(sessionID string, event string, booking *models.QueueBooking) {
+	if booking == nil {
+		return
+	}
+	payload := fiber.Map{"booking": booking, "booking_id": booking.ID, "timestamp": time.Now().UnixMilli()}
+	realtime.EmitToQueue(sessionID, event, payload)
+	realtime.EmitToBooking(booking.ID, event, payload)
+	realtime.EmitDataUpdate("queue", "update", booking.ID, payload)
+}
+
+func emitQueueActionChanged(booking *models.QueueBooking, action string) {
+	if booking == nil {
+		return
+	}
+	switch action {
+	case "start":
+		emitQueueBookingChanged(booking.QueueSessionID, "booking-assigned", booking)
+		if booking.AssignedWorkerID != nil {
+			realtime.EmitToWorker(*booking.AssignedWorkerID, "booking-assigned", fiber.Map{"booking": booking, "timestamp": time.Now().UnixMilli()})
+		}
+	case "complete":
+		emitQueueBookingChanged(booking.QueueSessionID, "booking-completed", booking)
+		realtime.EmitToBooking(booking.ID, "your-booking-completed", fiber.Map{"booking": booking, "timestamp": time.Now().UnixMilli()})
+		realtime.EmitToQueue(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
+	case "no_show":
+		emitQueueBookingChanged(booking.QueueSessionID, "booking-skipped", booking)
+		realtime.EmitToQueue(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
+	default:
+		emitQueueBookingChanged(booking.QueueSessionID, "booking-assigned", booking)
+	}
 }

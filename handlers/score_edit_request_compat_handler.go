@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"itii-assist/config"
 	"itii-assist/models"
@@ -55,6 +56,7 @@ type scoreEditRequestContextRow struct {
 	CurrentScore       float64  `gorm:"column:current_score"`
 	AssignmentMaxScore float64  `gorm:"column:assignment_max_score"`
 	SubItemID          *uint    `gorm:"column:sub_item_id"`
+	SubItemName        *string  `gorm:"column:sub_item_name"`
 	SubItemMaxScore    *float64 `gorm:"column:sub_item_max_score"`
 }
 
@@ -80,6 +82,7 @@ func loadScoreEditRequestContext(scoreID uint) (*scoreEditRequestContextRow, err
 		       s.score AS current_score,
 		       a.max_score AS assignment_max_score,
 		       s.sub_item_id,
+		       asi.name AS sub_item_name,
 		       asi.max_score AS sub_item_max_score
 		FROM scores s
 		JOIN assignments a ON a.id = s.assignment_id
@@ -110,6 +113,7 @@ func loadScoreEditRequestContexts(scoreIDs []uint) ([]scoreEditRequestContextRow
 		       s.score AS current_score,
 		       a.max_score AS assignment_max_score,
 		       s.sub_item_id,
+		       asi.name AS sub_item_name,
 		       asi.max_score AS sub_item_max_score
 		FROM scores s
 		JOIN assignments a ON a.id = s.assignment_id
@@ -119,15 +123,17 @@ func loadScoreEditRequestContexts(scoreIDs []uint) ([]scoreEditRequestContextRow
 	return rows, err
 }
 
-func findPendingScoreEditRequest(assignmentID uint, studentID uint) (*models.ScoreEditRequest, error) {
+func findPendingScoreEditRequestByScoreID(scoreID uint) (*models.ScoreEditRequest, error) {
 	var request models.ScoreEditRequest
 	err := config.DB.Table("score_edit_requests AS ser").
 		Select("ser.*").
-		Joins("JOIN scores s ON s.id = ser.score_id").
-		Where("ser.status = ? AND s.assignment_id = ? AND s.student_id = ?", "pending", assignmentID, studentID).
+		Where("ser.status = ? AND ser.score_id = ?", "pending", scoreID).
 		Order("ser.created_at DESC").
 		First(&request).Error
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	return &request, nil
@@ -251,6 +257,43 @@ func parseBatchScoreEditRequestInput(c fiber.Ctx) ([]uint, float64, string, data
 		return nil, 0, "", nil, nil, fmt.Errorf("score_ids array is required and must not be empty")
 	}
 	return uniqueScoreUintValues(input.ScoreIDs), input.NewScore, input.Reason, nil, nil, nil
+}
+
+type detailedScoreEditItem struct {
+	ScoreID  uint    `json:"score_id"`
+	NewScore float64 `json:"new_score"`
+}
+
+func parseBatchDetailedScoreEditRequestInput(c fiber.Ctx) ([]detailedScoreEditItem, string, datatypes.JSON, []string, error) {
+	contentType := strings.ToLower(c.Get("Content-Type"))
+	if strings.HasPrefix(contentType, "multipart/form-data") {
+		rawEdits := strings.TrimSpace(c.FormValue("edits"))
+		if rawEdits == "" {
+			return nil, "", nil, nil, fmt.Errorf("edits array is required and must not be empty")
+		}
+
+		var edits []detailedScoreEditItem
+		if err := json.Unmarshal([]byte(rawEdits), &edits); err != nil || len(edits) == 0 {
+			return nil, "", nil, nil, fmt.Errorf("invalid edits format")
+		}
+
+		paths, err := saveScoreEditRequestImages(c)
+		if err != nil {
+			return nil, "", nil, nil, err
+		}
+
+		return edits, c.FormValue("reason"), imagesJSON(paths), paths, nil
+	}
+
+	var input struct {
+		Edits  []detailedScoreEditItem `json:"edits"`
+		Reason string                  `json:"reason"`
+	}
+	if err := c.Bind().JSON(&input); err != nil || len(input.Edits) == 0 {
+		return nil, "", nil, nil, fmt.Errorf("edits array is required and must not be empty")
+	}
+
+	return input.Edits, input.Reason, nil, nil, nil
 }
 
 func loadScoreEditRequests(courseID string, status string, userID uint, isInstructor bool) ([]scoreEditRequestListRow, error) {
@@ -412,13 +455,16 @@ func GetScoreEditRequestsCompatHandler(c fiber.Ctx) error {
 
 	userID := c.Locals("user_id").(uint)
 	role := c.Locals("user_role").(string)
-	isInstructor := role == "admin" || role == "instructor"
+	canReviewAll, err := repositories.CanReviewAllCourseScoreRequests(courseID, userID, role)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to resolve permissions"})
+	}
 
-	rows, err := loadScoreEditRequests(courseID, c.Query("status"), userID, isInstructor)
+	rows, err := loadScoreEditRequests(courseID, c.Query("status"), userID, canReviewAll)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch edit requests"})
 	}
-	counts, err := loadScoreEditRequestCounts(courseID, userID, isInstructor)
+	counts, err := loadScoreEditRequestCounts(courseID, userID, canReviewAll)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch edit requests"})
 	}
@@ -466,7 +512,7 @@ func GetScoreEditRequestsCompatHandler(c fiber.Ctx) error {
 	}
 
 	return c.JSON(fiber.Map{"success": true, "data": formatted, "counts": counts, "role": func() string {
-		if isInstructor {
+		if canReviewAll {
 			return "instructor"
 		}
 		return "ta"
@@ -492,10 +538,8 @@ func CreateScoreEditRequestCompatHandler(c fiber.Ctx) error {
 	if newScore < 0 || newScore > maxScore {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": fmt.Sprintf("Score must be between 0 and %.2f", maxScore)})
 	}
-	if context.StudentID != nil {
-		if existing, pendingErr := findPendingScoreEditRequest(context.AssignmentID, *context.StudentID); pendingErr == nil && existing != nil {
-			return c.Status(400).JSON(fiber.Map{"success": false, "message": "มีคำร้องแก้ไขคะแนนที่รออนุมัติอยู่แล้ว"})
-		}
+	if existing, pendingErr := findPendingScoreEditRequestByScoreID(scoreID); pendingErr == nil && existing != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "รายการคะแนนนี้มีคำร้องแก้ไขที่รออนุมัติอยู่แล้ว"})
 	}
 
 	userID := c.Locals("user_id").(uint)
@@ -554,23 +598,31 @@ func CreateBatchScoreEditRequestCompatHandler(c fiber.Ctx) error {
 	// Check for duplicate pending requests — skip those, continue with the rest
 	var contextsToProcess []scoreEditRequestContextRow
 	skippedNames := []string{}
+	type skippedItem struct {
+		ScoreID     uint    `json:"score_id"`
+		StudentName string  `json:"student_name"`
+		SubItemName *string `json:"sub_item_name,omitempty"`
+	}
+	skippedItems := make([]skippedItem, 0)
 	for _, context := range contexts {
 		if context.AssignmentID != assignmentID {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "All score_ids must belong to the same assignment"})
 		}
-		if context.StudentID != nil {
-			if existing, pendingErr := findPendingScoreEditRequest(context.AssignmentID, *context.StudentID); pendingErr == nil && existing != nil {
-				// Get student name for the skip message
-				var st struct {
-					FullName string `gorm:"column:full_name"`
-				}
-				studentName := fmt.Sprintf("student_id:%d", *context.StudentID)
+		if existing, pendingErr := findPendingScoreEditRequestByScoreID(context.ScoreID); pendingErr == nil && existing != nil {
+			// Get student name for the skip message
+			var st struct {
+				FullName string `gorm:"column:full_name"`
+			}
+			studentName := "unknown"
+			if context.StudentID != nil {
+				studentName = fmt.Sprintf("student_id:%d", *context.StudentID)
 				if err := config.DB.Raw("SELECT full_name FROM students WHERE id = ? LIMIT 1", *context.StudentID).Scan(&st).Error; err == nil && st.FullName != "" {
 					studentName = st.FullName
 				}
-				skippedNames = append(skippedNames, studentName)
-				continue
 			}
+			skippedNames = append(skippedNames, studentName)
+			skippedItems = append(skippedItems, skippedItem{ScoreID: context.ScoreID, StudentName: studentName, SubItemName: context.SubItemName})
+			continue
 		}
 		contextsToProcess = append(contextsToProcess, context)
 	}
@@ -623,9 +675,179 @@ func CreateBatchScoreEditRequestCompatHandler(c fiber.Ctx) error {
 			"count":         len(createdRequests),
 			"skipped":       len(skippedNames),
 			"skipped_names": skippedNames,
+			"skipped_items": skippedItems,
 			"requests":      requests,
 		},
 	})
+}
+
+// POST /api/score-edit-requests/batch-detailed
+func CreateBatchDetailedScoreEditRequestCompatHandler(c fiber.Ctx) error {
+	edits, reason, images, imagePaths, err := parseBatchDetailedScoreEditRequestInput(c)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
+	}
+
+	scoreIDToNewScore := map[uint]float64{}
+	scoreIDs := make([]uint, 0, len(edits))
+	for _, edit := range edits {
+		if edit.ScoreID == 0 {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "score_id is required"})
+		}
+		if _, exists := scoreIDToNewScore[edit.ScoreID]; exists {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": fmt.Sprintf("duplicate score_id: %d", edit.ScoreID)})
+		}
+		scoreIDToNewScore[edit.ScoreID] = edit.NewScore
+		scoreIDs = append(scoreIDs, edit.ScoreID)
+	}
+
+	contexts, err := loadScoreEditRequestContexts(scoreIDs)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load scores"})
+	}
+	if len(contexts) == 0 {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "No scores found"})
+	}
+
+	contextByScoreID := map[uint]scoreEditRequestContextRow{}
+	for _, context := range contexts {
+		contextByScoreID[context.ScoreID] = context
+	}
+
+	assignmentID := contexts[0].AssignmentID
+	courseID := contexts[0].CourseID
+	assignmentName := contexts[0].AssignmentName
+
+	studentNameMap := map[uint]string{}
+	studentIDs := make([]uint, 0)
+	for _, context := range contexts {
+		if context.StudentID != nil {
+			studentIDs = append(studentIDs, *context.StudentID)
+		}
+	}
+	studentIDs = uniqueScoreUintValues(studentIDs)
+	if len(studentIDs) > 0 {
+		var rows []struct {
+			ID       uint   `gorm:"column:id"`
+			FullName string `gorm:"column:full_name"`
+		}
+		if err := config.DB.Raw("SELECT id, full_name FROM students WHERE id IN ?", studentIDs).Scan(&rows).Error; err == nil {
+			for _, row := range rows {
+				studentNameMap[row.ID] = row.FullName
+			}
+		}
+	}
+
+	contextsToProcess := make([]scoreEditRequestContextRow, 0, len(edits))
+	skippedNames := make([]string, 0)
+	type skippedItem struct {
+		ScoreID     uint    `json:"score_id"`
+		StudentName string  `json:"student_name"`
+		SubItemName *string `json:"sub_item_name,omitempty"`
+	}
+	skippedItems := make([]skippedItem, 0)
+	for _, edit := range edits {
+		context, exists := contextByScoreID[edit.ScoreID]
+		if !exists {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": fmt.Sprintf("score_id %d not found", edit.ScoreID)})
+		}
+
+		if context.AssignmentID != assignmentID || context.CourseID != courseID {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "all edits must belong to the same assignment/course"})
+		}
+
+		maxScore := context.AssignmentMaxScore
+		if context.SubItemMaxScore != nil {
+			maxScore = *context.SubItemMaxScore
+		}
+		if edit.NewScore < 0 || edit.NewScore > maxScore {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": fmt.Sprintf("score for score_id %d must be between 0 and %.2f", edit.ScoreID, maxScore)})
+		}
+
+		if existing, pendingErr := findPendingScoreEditRequestByScoreID(edit.ScoreID); pendingErr == nil && existing != nil {
+			studentName := "unknown"
+			if context.StudentID != nil {
+				if name, ok := studentNameMap[*context.StudentID]; ok && strings.TrimSpace(name) != "" {
+					studentName = name
+				} else {
+					studentName = fmt.Sprintf("student_id:%d", *context.StudentID)
+				}
+			}
+			skippedNames = append(skippedNames, studentName)
+			continue
+		}
+
+		contextsToProcess = append(contextsToProcess, context)
+	}
+
+	if len(contextsToProcess) == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": fmt.Sprintf("มีคำร้องแก้ไขคะแนนที่รออนุมัติอยู่แล้ว: %s", strings.Join(skippedNames, ", "))})
+	}
+
+	userID := c.Locals("user_id").(uint)
+	createdRequests := make([]models.ScoreEditRequest, 0, len(contextsToProcess))
+	err = config.DB.Transaction(func(tx *gorm.DB) error {
+		for _, context := range contextsToProcess {
+			newScore := scoreIDToNewScore[context.ScoreID]
+			request := models.ScoreEditRequest{
+				ScoreID:     context.ScoreID,
+				OldScore:    &context.CurrentScore,
+				NewScore:    newScore,
+				Reason:      reason,
+				RequestedBy: userID,
+				Status:      "pending",
+				Images:      images,
+			}
+			if err := tx.Create(&request).Error; err != nil {
+				return err
+			}
+			createdRequests = append(createdRequests, request)
+		}
+		return nil
+	})
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to create detailed batch edit requests"})
+	}
+
+	writeCourseActivityLog(courseID, userID, "create_detailed_batch_score_edit_request", "score", "assignment", assignmentID, assignmentName, fiber.Map{"count": len(createdRequests), "image_count": len(imagePaths)})
+
+	requests := make([]fiber.Map, 0, len(createdRequests))
+	for _, request := range createdRequests {
+		requests = append(requests, fiber.Map{"id": request.ID, "score_id": request.ScoreID, "status": request.Status, "images": scoreEditRequestImagesValue(request.Images)})
+	}
+
+	message := fmt.Sprintf("Created %d detailed edit request(s) successfully", len(createdRequests))
+	if len(skippedNames) > 0 {
+		message = fmt.Sprintf("สร้างคำร้องแก้ไข %d รายการ (ข้าม %d รายการที่มีคำร้องรออนุมัติอยู่แล้ว: %s)", len(createdRequests), len(skippedNames), strings.Join(skippedNames, ", "))
+	}
+
+	return c.Status(201).JSON(fiber.Map{
+		"success": true,
+		"message": message,
+		"data": fiber.Map{
+			"count":         len(createdRequests),
+			"skipped":       len(skippedNames),
+			"skipped_names": uniqueStrings(skippedNames),
+			"skipped_items": skippedItems,
+			"requests":      requests,
+		},
+	})
+}
+
+func uniqueStrings(input []string) []string {
+	if len(input) == 0 {
+		return input
+	}
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(input))
+	for _, value := range input {
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 // DELETE /api/score-edit-requests/:id/cancel

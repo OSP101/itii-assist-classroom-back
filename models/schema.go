@@ -152,18 +152,20 @@ type CourseMember struct {
 }
 
 type CourseInstructor struct {
-	ID         uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	CourseID   string    `gorm:"type:varchar(21);not null;index" json:"course_id"`
-	UserID     uint      `gorm:"not null;index" json:"user_id"`
-	IsPrimary  bool      `gorm:"type:boolean;default:false" json:"is_primary"`
-	AssignedAt time.Time `gorm:"type:timestamptz" json:"assigned_at"`
+	ID          uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	CourseID    string    `gorm:"type:varchar(21);not null;index" json:"course_id"`
+	UserID      uint      `gorm:"not null;index" json:"user_id"`
+	IsPrimary   bool      `gorm:"type:boolean;default:false" json:"is_primary"`
+	Permissions string    `gorm:"type:text" json:"permissions"`
+	AssignedAt  time.Time `gorm:"type:timestamptz" json:"assigned_at"`
 }
 
 type CourseTA struct {
-	ID         uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	CourseID   string    `gorm:"type:varchar(21);not null;index" json:"course_id"`
-	UserID     uint      `gorm:"not null;index" json:"user_id"`
-	AssignedAt time.Time `gorm:"type:timestamptz" json:"assigned_at"`
+	ID          uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	CourseID    string    `gorm:"type:varchar(21);not null;index" json:"course_id"`
+	UserID      uint      `gorm:"not null;index" json:"user_id"`
+	Permissions string    `gorm:"type:text" json:"permissions"`
+	AssignedAt  time.Time `gorm:"type:timestamptz" json:"assigned_at"`
 }
 
 func (CourseTA) TableName() string { return "course_tas" }
@@ -181,6 +183,17 @@ type CourseSectionStudent struct {
 	CourseSectionID uint      `gorm:"not null;index" json:"course_section_id"`
 	StudentID       uint      `gorm:"not null;index" json:"student_id"`
 	EnrolledAt      time.Time `gorm:"type:timestamptz" json:"enrolled_at"`
+}
+
+type CourseSectionStudentRemoval struct {
+	ID              uint       `gorm:"primaryKey;autoIncrement" json:"id"`
+	CourseID        string     `gorm:"type:varchar(21);not null;index" json:"course_id"`
+	CourseSectionID uint       `gorm:"not null;index" json:"course_section_id"`
+	StudentID       uint       `gorm:"not null;index" json:"student_id"`
+	RemovedBy       *uint      `gorm:"index" json:"removed_by,omitempty"`
+	RemovedAt       time.Time  `gorm:"type:timestamptz;not null" json:"removed_at"`
+	RestoreUntil    time.Time  `gorm:"type:timestamptz;not null;index" json:"restore_until"`
+	RestoredAt      *time.Time `gorm:"type:timestamptz" json:"restored_at,omitempty"`
 }
 
 type CourseActivityLog struct {

@@ -1344,7 +1344,13 @@ func GetPendingEditRequestsHandler(c fiber.Ctx) error {
 	if courseID == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "course_id required"})
 	}
-	requests, err := repositories.GetPendingEditRequests(courseID)
+	userID := c.Locals("user_id").(uint)
+	role := c.Locals("user_role").(string)
+	canReviewAll, err := repositories.CanReviewAllCourseScoreRequests(courseID, userID, role)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to resolve permissions"})
+	}
+	requests, err := loadScoreEditRequests(courseID, "pending", userID, canReviewAll)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch requests"})
 	}
@@ -1361,7 +1367,10 @@ func GetPendingCountHandler(c fiber.Ctx) error {
 	userID := c.Locals("user_id").(uint)
 	role := c.Locals("user_role").(string)
 
-	isInstructor := role == "admin" || role == "instructor"
+	isInstructor, err := repositories.CanReviewAllCourseScoreRequests(courseID, userID, role)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to resolve permissions"})
+	}
 
 	count, err := repositories.GetPendingEditRequestCount(courseID, userID, isInstructor)
 	if err != nil {

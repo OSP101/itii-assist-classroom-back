@@ -1,6 +1,7 @@
 package repositories
 
 import (
+	"errors"
 	"itii-assist/config"
 	"itii-assist/models"
 	"strings"
@@ -61,13 +62,26 @@ type SectionWithCount struct {
 	StudentCount int64 `json:"student_count"`
 }
 
+type CourseInstructorMeta struct {
+	IsPrimary   bool                    `json:"is_primary"`
+	AssignedAt  time.Time               `json:"assigned_at"`
+	Permissions CourseMemberPermissions `json:"permissions"`
+}
+
+type CourseTAMeta struct {
+	AssignedAt  time.Time               `json:"assigned_at"`
+	Permissions CourseMemberPermissions `json:"permissions"`
+}
+
 type UserBasic struct {
-	ID        uint   `json:"id"`
-	FullName  string `json:"full_name"`
-	Email     string `json:"email"`
-	Username  string `json:"username"`
-	Avatar    string `json:"avatar"`
-	IsPrimary bool   `json:"is_primary,omitempty"`
+	ID               uint                  `json:"id"`
+	FullName         string                `json:"full_name"`
+	Email            string                `json:"email"`
+	Username         string                `json:"username"`
+	Avatar           string                `json:"avatar"`
+	IsPrimary        bool                  `json:"is_primary,omitempty"`
+	CourseInstructor *CourseInstructorMeta `json:"CourseInstructor,omitempty"`
+	CourseTA         *CourseTAMeta         `json:"CourseTA,omitempty"`
 }
 
 type CourseStatusBreakdown struct {
@@ -93,6 +107,21 @@ type courseMemberRow struct {
 	UserID   uint
 }
 
+type courseInstructorMemberRow struct {
+	CourseID    string    `gorm:"column:course_id"`
+	UserID      uint      `gorm:"column:user_id"`
+	IsPrimary   bool      `gorm:"column:is_primary"`
+	AssignedAt  time.Time `gorm:"column:assigned_at"`
+	Permissions string    `gorm:"column:permissions"`
+}
+
+type courseTAMemberRow struct {
+	CourseID    string    `gorm:"column:course_id"`
+	UserID      uint      `gorm:"column:user_id"`
+	AssignedAt  time.Time `gorm:"column:assigned_at"`
+	Permissions string    `gorm:"column:permissions"`
+}
+
 func mapUsersToBasic(users []models.User) map[uint]UserBasic {
 	result := make(map[uint]UserBasic, len(users))
 	for _, user := range users {
@@ -112,8 +141,8 @@ func getCourseTAMap(courseIDs []string) map[string][]UserBasic {
 		return map[string][]UserBasic{}
 	}
 
-	var rows []courseMemberRow
-	if err := config.DB.Raw(`SELECT course_id, user_id FROM course_tas WHERE course_id IN ? ORDER BY course_id ASC, assigned_at ASC`, courseIDs).Scan(&rows).Error; err != nil {
+	var rows []courseTAMemberRow
+	if err := config.DB.Raw(`SELECT course_id, user_id, assigned_at, permissions FROM course_tas WHERE course_id IN ? ORDER BY course_id ASC, assigned_at ASC`, courseIDs).Scan(&rows).Error; err != nil {
 		return map[string][]UserBasic{}
 	}
 
@@ -140,6 +169,10 @@ func getCourseTAMap(courseIDs []string) map[string][]UserBasic {
 		user, exists := userMap[row.UserID]
 		if !exists {
 			continue
+		}
+		user.CourseTA = &CourseTAMeta{
+			AssignedAt:  row.AssignedAt,
+			Permissions: ResolveCourseMemberPermissions("ta", row.Permissions, false),
 		}
 		tasByCourse[row.CourseID] = append(tasByCourse[row.CourseID], user)
 	}
@@ -221,13 +254,8 @@ func GetCourses(params CourseListParams) (CourseListResult, error) {
 	}
 
 	// Batch: instructors of each course
-	type ciRow struct {
-		CourseID  string
-		UserID    uint
-		IsPrimary bool
-	}
-	var ciRows []ciRow
-	db.Raw(`SELECT course_id, user_id, is_primary FROM course_instructors WHERE course_id IN ?`, courseIDs).Scan(&ciRows)
+	var ciRows []courseInstructorMemberRow
+	db.Raw(`SELECT course_id, user_id, is_primary, assigned_at, permissions FROM course_instructors WHERE course_id IN ? ORDER BY course_id ASC, is_primary DESC, assigned_at ASC`, courseIDs).Scan(&ciRows)
 
 	// Gather user IDs for instructors
 	userIDSet := map[uint]bool{}
@@ -302,6 +330,11 @@ func GetCourses(params CourseListParams) (CourseListResult, error) {
 		courseInstructorMap[r.CourseID] = append(courseInstructorMap[r.CourseID], UserBasic{
 			ID: u.ID, FullName: u.FullName, Email: u.Email,
 			Username: u.Username, Avatar: u.Avatar, IsPrimary: r.IsPrimary,
+			CourseInstructor: &CourseInstructorMeta{
+				IsPrimary:   r.IsPrimary,
+				AssignedAt:  r.AssignedAt,
+				Permissions: ResolveCourseMemberPermissions("instructor", r.Permissions, r.IsPrimary),
+			},
 		})
 	}
 
@@ -401,39 +434,42 @@ func FindCourseByID(id string) (*CourseDetail, error) {
 	}
 
 	// Instructors
-	type ciRow struct {
-		UserID    uint
-		IsPrimary bool
-	}
-	var ciRows []ciRow
-	db.Raw(`SELECT user_id, is_primary FROM course_instructors WHERE course_id = ? ORDER BY is_primary DESC, assigned_at ASC`, id).Scan(&ciRows)
+	var ciRows []courseInstructorMemberRow
+	db.Raw(`SELECT course_id, user_id, is_primary, assigned_at, permissions FROM course_instructors WHERE course_id = ? ORDER BY is_primary DESC, assigned_at ASC`, id).Scan(&ciRows)
 
 	instructorUserIDs := make([]uint, len(ciRows))
 	for i, r := range ciRows {
 		instructorUserIDs[i] = r.UserID
 	}
-	primaryMap := map[uint]bool{}
-	for _, r := range ciRows {
-		primaryMap[r.UserID] = r.IsPrimary
-	}
-
 	var instructorUsers []models.User
 	if len(instructorUserIDs) > 0 {
 		db.Where("id IN ?", instructorUserIDs).Find(&instructorUsers)
 	}
-	instructors := make([]UserBasic, len(instructorUsers))
-	for i, u := range instructorUsers {
-		instructors[i] = UserBasic{
+	instructorUserMap := make(map[uint]models.User, len(instructorUsers))
+	for _, user := range instructorUsers {
+		instructorUserMap[user.ID] = user
+	}
+	instructors := make([]UserBasic, 0, len(ciRows))
+	for _, row := range ciRows {
+		u, ok := instructorUserMap[row.UserID]
+		if !ok {
+			continue
+		}
+		instructors = append(instructors, UserBasic{
 			ID: u.ID, FullName: u.FullName, Email: u.Email,
 			Username: u.Username, Avatar: u.Avatar,
-			IsPrimary: primaryMap[u.ID],
-		}
+			IsPrimary: row.IsPrimary,
+			CourseInstructor: &CourseInstructorMeta{
+				IsPrimary:   row.IsPrimary,
+				AssignedAt:  row.AssignedAt,
+				Permissions: ResolveCourseMemberPermissions("instructor", row.Permissions, row.IsPrimary),
+			},
+		})
 	}
 
 	// TAs
-	type taRow struct{ UserID uint }
-	var taRows []taRow
-	db.Raw(`SELECT user_id FROM course_tas WHERE course_id = ? ORDER BY assigned_at ASC`, id).Scan(&taRows)
+	var taRows []courseTAMemberRow
+	db.Raw(`SELECT course_id, user_id, assigned_at, permissions FROM course_tas WHERE course_id = ? ORDER BY assigned_at ASC`, id).Scan(&taRows)
 
 	taUserIDs := make([]uint, len(taRows))
 	for i, r := range taRows {
@@ -443,12 +479,24 @@ func FindCourseByID(id string) (*CourseDetail, error) {
 	if len(taUserIDs) > 0 {
 		db.Where("id IN ?", taUserIDs).Find(&taUsers)
 	}
-	tas := make([]UserBasic, len(taUsers))
-	for i, u := range taUsers {
-		tas[i] = UserBasic{
+	taUserMap := make(map[uint]models.User, len(taUsers))
+	for _, user := range taUsers {
+		taUserMap[user.ID] = user
+	}
+	tas := make([]UserBasic, 0, len(taRows))
+	for _, row := range taRows {
+		u, ok := taUserMap[row.UserID]
+		if !ok {
+			continue
+		}
+		tas = append(tas, UserBasic{
 			ID: u.ID, FullName: u.FullName, Email: u.Email,
 			Username: u.Username, Avatar: u.Avatar,
-		}
+			CourseTA: &CourseTAMeta{
+				AssignedAt:  row.AssignedAt,
+				Permissions: ResolveCourseMemberPermissions("ta", row.Permissions, false),
+			},
+		})
 	}
 
 	// Sections with student count
@@ -610,10 +658,11 @@ func DeleteSection(sectionID uint, courseID string) error {
 
 func AddCourseInstructor(courseID string, userID uint, isPrimary bool) error {
 	return config.DB.Create(&models.CourseInstructor{
-		CourseID:   courseID,
-		UserID:     userID,
-		IsPrimary:  isPrimary,
-		AssignedAt: time.Now(),
+		CourseID:    courseID,
+		UserID:      userID,
+		IsPrimary:   isPrimary,
+		Permissions: EncodeCourseMemberPermissions("instructor", nil),
+		AssignedAt:  time.Now(),
 	}).Error
 }
 
@@ -632,7 +681,7 @@ func BulkAddCourseInstructors(courseID string, userIDs []uint) (addedUsers []Use
 			skipped++
 		} else {
 			toCreate = append(toCreate, models.CourseInstructor{
-				CourseID: courseID, UserID: uid, IsPrimary: false, AssignedAt: time.Now(),
+				CourseID: courseID, UserID: uid, IsPrimary: false, Permissions: EncodeCourseMemberPermissions("instructor", nil), AssignedAt: time.Now(),
 			})
 			newUserIDs = append(newUserIDs, uid)
 		}
@@ -701,8 +750,9 @@ func ReplaceAllCourseInstructors(courseID string, userIDs []uint) error {
 	for i, uid := range userIDs {
 		toCreate[i] = models.CourseInstructor{
 			CourseID: courseID, UserID: uid,
-			IsPrimary:  i == 0,
-			AssignedAt: time.Now(),
+			IsPrimary:   i == 0,
+			Permissions: EncodeCourseMemberPermissions("instructor", nil),
+			AssignedAt:  time.Now(),
 		}
 	}
 	return db.Create(&toCreate).Error
@@ -714,9 +764,10 @@ func ReplaceAllCourseInstructors(courseID string, userIDs []uint) error {
 
 func AddCourseTA(courseID string, userID uint) error {
 	return config.DB.Create(&models.CourseTA{
-		CourseID:   courseID,
-		UserID:     userID,
-		AssignedAt: time.Now(),
+		CourseID:    courseID,
+		UserID:      userID,
+		Permissions: EncodeCourseMemberPermissions("ta", nil),
+		AssignedAt:  time.Now(),
 	}).Error
 }
 
@@ -753,7 +804,7 @@ func BulkAddCourseTAs(courseID string, userIDs []uint) (addedUsers []UserBasic, 
 			skipped++
 		} else {
 			toCreate = append(toCreate, models.CourseTA{
-				CourseID: courseID, UserID: user.ID, AssignedAt: time.Now(),
+				CourseID: courseID, UserID: user.ID, Permissions: EncodeCourseMemberPermissions("ta", nil), AssignedAt: time.Now(),
 			})
 			addedUsers = append(addedUsers, UserBasic{
 				ID:       user.ID,
@@ -809,6 +860,18 @@ type SectionStudentRow struct {
 	EnrolledAt time.Time `gorm:"column:enrolled_at" json:"enrolled_at"`
 }
 
+type RemovedSectionStudentRow struct {
+	RemovalID     uint      `gorm:"column:removal_id" json:"removal_id"`
+	SectionID     uint      `gorm:"column:section_id" json:"section_id"`
+	SectionNo     string    `gorm:"column:section_no" json:"section_no"`
+	StudentRefID  uint      `gorm:"column:student_ref_id" json:"student_ref_id"`
+	StudentID     string    `gorm:"column:student_id" json:"student_id"`
+	FullName      string    `gorm:"column:full_name" json:"full_name"`
+	RemovedAt     time.Time `gorm:"column:removed_at" json:"removed_at"`
+	RestoreUntil  time.Time `gorm:"column:restore_until" json:"restore_until"`
+	RemainingDays int       `json:"remaining_days"`
+}
+
 func GetSectionStudents(sectionID uint) ([]SectionStudentRow, error) {
 	var rows []SectionStudentRow
 	err := config.DB.Raw(`
@@ -838,11 +901,24 @@ func IsStudentInCourse(courseID string, studentID uint) bool {
 }
 
 func AddStudentToSection(sectionID uint, studentID uint) error {
-	return config.DB.Create(&models.CourseSectionStudent{
-		CourseSectionID: sectionID,
-		StudentID:       studentID,
-		EnrolledAt:      time.Now(),
-	}).Error
+	now := time.Now()
+	return config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&models.CourseSectionStudent{
+			CourseSectionID: sectionID,
+			StudentID:       studentID,
+			EnrolledAt:      now,
+		}).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Model(&models.CourseSectionStudentRemoval{}).
+			Where("course_section_id = ? AND student_id = ? AND restored_at IS NULL AND restore_until > ?", sectionID, studentID, now).
+			Update("restored_at", now).Error; err != nil {
+			return err
+		}
+
+		return nil
+	})
 }
 
 func BulkAddStudentsToSection(sectionID uint, studentIDs []uint) (added, skipped int, err error) {
@@ -867,7 +943,27 @@ func BulkAddStudentsToSection(sectionID uint, studentIDs []uint) (added, skipped
 		}
 	}
 	if len(toCreate) > 0 {
-		err = config.DB.Create(&toCreate).Error
+		err = config.DB.Transaction(func(tx *gorm.DB) error {
+			now := time.Now()
+			if err := tx.Create(&toCreate).Error; err != nil {
+				return err
+			}
+
+			addedIDs := make([]uint, 0, len(toCreate))
+			for _, student := range toCreate {
+				addedIDs = append(addedIDs, student.StudentID)
+			}
+
+			if len(addedIDs) > 0 {
+				if err := tx.Model(&models.CourseSectionStudentRemoval{}).
+					Where("course_section_id = ? AND student_id IN ? AND restored_at IS NULL AND restore_until > ?", sectionID, addedIDs, now).
+					Update("restored_at", now).Error; err != nil {
+					return err
+				}
+			}
+
+			return nil
+		})
 		added = len(toCreate)
 	}
 	return
@@ -876,6 +972,177 @@ func BulkAddStudentsToSection(sectionID uint, studentIDs []uint) (added, skipped
 func RemoveStudentFromSection(sectionID uint, studentID uint) bool {
 	result := config.DB.Where("course_section_id = ? AND student_id = ?", sectionID, studentID).Delete(&models.CourseSectionStudent{})
 	return result.RowsAffected > 0
+}
+
+func ArchiveAndRemoveStudentFromSection(sectionID uint, studentID uint, removedBy uint) (bool, time.Time, error) {
+	var (
+		found        bool
+		restoreUntil time.Time
+	)
+
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
+		var existing models.CourseSectionStudent
+		if err := tx.Where("course_section_id = ? AND student_id = ?", sectionID, studentID).First(&existing).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		found = true
+
+		var section models.CourseSection
+		if err := tx.Select("id", "course_id").First(&section, sectionID).Error; err != nil {
+			return err
+		}
+
+		now := time.Now()
+		restoreUntil = now.Add(10 * 24 * time.Hour)
+		removal := models.CourseSectionStudentRemoval{
+			CourseID:        section.CourseID,
+			CourseSectionID: sectionID,
+			StudentID:       studentID,
+			RemovedAt:       now,
+			RestoreUntil:    restoreUntil,
+		}
+		if removedBy > 0 {
+			removal.RemovedBy = &removedBy
+		}
+
+		if err := tx.Create(&removal).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Where("course_section_id = ? AND student_id = ?", sectionID, studentID).Delete(&models.CourseSectionStudent{}).Error; err != nil {
+			return err
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	if !found {
+		return false, time.Time{}, nil
+	}
+
+	return true, restoreUntil, nil
+}
+
+func GetRestorableRemovedStudents(courseID string, sectionID *uint) ([]RemovedSectionStudentRow, error) {
+	var rows []RemovedSectionStudentRow
+
+	query := `
+		SELECT
+			cssr.id AS removal_id,
+			cssr.course_section_id AS section_id,
+			cs.section_no AS section_no,
+			cssr.student_id AS student_ref_id,
+			s.student_id AS student_id,
+			s.full_name AS full_name,
+			cssr.removed_at AS removed_at,
+			cssr.restore_until AS restore_until
+		FROM course_section_student_removals cssr
+		JOIN students s ON s.id = cssr.student_id
+		JOIN course_sections cs ON cs.id = cssr.course_section_id
+		WHERE cssr.course_id = ?
+			AND cssr.restored_at IS NULL
+			AND cssr.restore_until > NOW()
+	`
+	args := []any{courseID}
+
+	if sectionID != nil {
+		query += ` AND cssr.course_section_id = ?`
+		args = append(args, *sectionID)
+	}
+
+	query += ` ORDER BY cssr.removed_at DESC`
+
+	if err := config.DB.Raw(query, args...).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	for i := range rows {
+		remaining := rows[i].RestoreUntil.Sub(now)
+		if remaining <= 0 {
+			rows[i].RemainingDays = 0
+			continue
+		}
+		days := int((remaining + (24*time.Hour - 1)) / (24 * time.Hour))
+		if days < 1 {
+			days = 1
+		}
+		rows[i].RemainingDays = days
+	}
+
+	if rows == nil {
+		rows = []RemovedSectionStudentRow{}
+	}
+
+	return rows, nil
+}
+
+func RestoreStudentToSection(sectionID uint, studentID uint) (bool, error) {
+	var restored bool
+
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
+		now := time.Now()
+
+		var removal models.CourseSectionStudentRemoval
+		if err := tx.Where(
+			"course_section_id = ? AND student_id = ? AND restored_at IS NULL AND restore_until > ?",
+			sectionID,
+			studentID,
+			now,
+		).Order("removed_at DESC").First(&removal).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+
+		var count int64
+		if err := tx.Model(&models.CourseSectionStudent{}).
+			Where("course_section_id = ? AND student_id = ?", sectionID, studentID).
+			Count(&count).Error; err != nil {
+			return err
+		}
+
+		if count == 0 {
+			if err := tx.Create(&models.CourseSectionStudent{
+				CourseSectionID: sectionID,
+				StudentID:       studentID,
+				EnrolledAt:      now,
+			}).Error; err != nil {
+				return err
+			}
+		}
+
+		if err := tx.Model(&models.CourseSectionStudentRemoval{}).
+			Where("id = ?", removal.ID).
+			Update("restored_at", now).Error; err != nil {
+			return err
+		}
+
+		restored = true
+		return nil
+	})
+
+	if err != nil {
+		return false, err
+	}
+
+	return restored, nil
+}
+
+// CleanupExpiredRemovals deletes archive records whose restore window has passed
+// and that have not been restored. Returns the number of rows deleted.
+func CleanupExpiredRemovals() (int64, error) {
+	result := config.DB.
+		Where("restore_until < ? AND restored_at IS NULL", time.Now()).
+		Delete(&models.CourseSectionStudentRemoval{})
+	return result.RowsAffected, result.Error
 }
 
 // ============================================================
@@ -977,14 +1244,9 @@ func GetMyCourses(userID uint, role string, params CourseListParams) (CourseList
 	}
 
 	// Batch: instructors
-	type ciRow2 struct {
-		CourseID  string
-		UserID    uint
-		IsPrimary bool
-	}
-	var ciRows2 []ciRow2
+	var ciRows2 []courseInstructorMemberRow
 	if len(courseIDs) > 0 {
-		db.Raw(`SELECT course_id, user_id, is_primary FROM course_instructors WHERE course_id IN ?`, courseIDs).Scan(&ciRows2)
+		db.Raw(`SELECT course_id, user_id, is_primary, assigned_at, permissions FROM course_instructors WHERE course_id IN ? ORDER BY course_id ASC, is_primary DESC, assigned_at ASC`, courseIDs).Scan(&ciRows2)
 	}
 	userIDSet2 := map[uint]bool{}
 	for _, r := range ciRows2 {
@@ -1008,6 +1270,11 @@ func GetMyCourses(userID uint, role string, params CourseListParams) (CourseList
 		courseInstructorMap2[r.CourseID] = append(courseInstructorMap2[r.CourseID], UserBasic{
 			ID: u.ID, FullName: u.FullName, Email: u.Email,
 			Username: u.Username, Avatar: u.Avatar, IsPrimary: r.IsPrimary,
+			CourseInstructor: &CourseInstructorMeta{
+				IsPrimary:   r.IsPrimary,
+				AssignedAt:  r.AssignedAt,
+				Permissions: ResolveCourseMemberPermissions("instructor", r.Permissions, r.IsPrimary),
+			},
 		})
 	}
 

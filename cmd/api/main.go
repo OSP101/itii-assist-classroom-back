@@ -4,10 +4,13 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	// เปลี่ยน "itii-assist" เป็นชื่อโมดูลของคุณในไฟล์ go.mod หากคุณตั้งชื่ออื่น
 	"itii-assist/config"
 	"itii-assist/models"
+	"itii-assist/realtime"
+	"itii-assist/repositories"
 	"itii-assist/routes"
 
 	"github.com/gofiber/fiber/v3"
@@ -51,6 +54,7 @@ func main() {
 		&models.CourseTA{},
 		&models.CourseSection{},
 		&models.CourseSectionStudent{},
+		&models.CourseSectionStudentRemoval{},
 		&models.CourseActivityLog{},
 		// นักศึกษา
 		&models.Student{},
@@ -86,7 +90,7 @@ func main() {
 	if err != nil {
 		log.Fatal("❌ Migration failed: ", err)
 	}
-	log.Println("✅ All 39 tables migrated successfully!")
+	log.Println("✅ All 40 tables migrated successfully!")
 
 	// 4. รัน Fiber Server
 	app := fiber.New()
@@ -121,6 +125,7 @@ func main() {
 	app.Get("/api/health", func(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "success", "message": "API is Running!"})
 	})
+	app.Get("/ws", realtime.Handler())
 
 	routes.SetupAuthRoutes(app)
 	routes.SetupUserRoutes(app)
@@ -142,5 +147,18 @@ func main() {
 	routes.SetupSystemLogRoutes(app)
 
 	log.Println("🚀 Starting server on port 8000...")
+	// Background job: cleanup expired student removal archive records daily
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			deleted, err := repositories.CleanupExpiredRemovals()
+			if err != nil {
+				log.Printf("⚠️  Cleanup expired removals error: %v", err)
+			} else if deleted > 0 {
+				log.Printf("🧹 Cleaned up %d expired student removal record(s)", deleted)
+			}
+		}
+	}()
 	log.Fatal(app.Listen(":8000"))
 }

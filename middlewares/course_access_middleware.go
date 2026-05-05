@@ -416,6 +416,61 @@ func CourseIDsFromScoreBody(field string) CourseAccessResolver {
 	}
 }
 
+func CourseIDsFromScoreEditBatchDetailedBody(field string) CourseAccessResolver {
+	return func(c fiber.Ctx) ([]string, error) {
+		type editPayload struct {
+			ScoreID uint `json:"score_id"`
+		}
+
+		edits := make([]editPayload, 0)
+		contentType := strings.ToLower(c.Get("Content-Type"))
+		if strings.HasPrefix(contentType, "multipart/form-data") {
+			raw := strings.TrimSpace(c.FormValue(field))
+			if raw == "" {
+				return nil, newCourseAccessError(400, fmt.Sprintf("%s array is required", field))
+			}
+			if err := json.Unmarshal([]byte(raw), &edits); err != nil {
+				return nil, newCourseAccessError(400, fmt.Sprintf("Invalid %s format", field))
+			}
+		} else {
+			var body map[string]json.RawMessage
+			if err := c.Bind().JSON(&body); err != nil {
+				return nil, newCourseAccessError(400, "Invalid request body")
+			}
+			raw, ok := body[field]
+			if !ok {
+				return nil, newCourseAccessError(400, fmt.Sprintf("%s array is required", field))
+			}
+			if err := json.Unmarshal(raw, &edits); err != nil {
+				return nil, newCourseAccessError(400, fmt.Sprintf("Invalid %s format", field))
+			}
+		}
+
+		if len(edits) == 0 {
+			return nil, newCourseAccessError(400, fmt.Sprintf("%s array is required", field))
+		}
+
+		scoreIDs := make([]uint, 0, len(edits))
+		seen := map[uint]struct{}{}
+		for _, edit := range edits {
+			if edit.ScoreID == 0 {
+				return nil, newCourseAccessError(400, "score_id is required")
+			}
+			if _, exists := seen[edit.ScoreID]; exists {
+				continue
+			}
+			seen[edit.ScoreID] = struct{}{}
+			scoreIDs = append(scoreIDs, edit.ScoreID)
+		}
+
+		courseIDs, err := repositories.GetCourseIDsByScoreIDs(scoreIDs)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, newCourseAccessError(404, "Score not found")
+		}
+		return courseIDs, err
+	}
+}
+
 func CourseIDFromScoreEditRequestParam(param string) CourseAccessResolver {
 	return func(c fiber.Ctx) ([]string, error) {
 		requestID, err := strconv.ParseUint(strings.TrimSpace(c.Params(param)), 10, 64)

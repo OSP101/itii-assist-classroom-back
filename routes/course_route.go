@@ -3,6 +3,7 @@ package routes
 import (
 	"itii-assist/handlers"
 	"itii-assist/middlewares"
+	"itii-assist/repositories"
 
 	"github.com/gofiber/fiber/v3"
 )
@@ -31,23 +32,27 @@ func SetupCourseRoutes(app *fiber.App) {
 	protected.Patch("/:id/toggle-status", middlewares.RequireRole("admin", "instructor"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor"), handlers.ToggleCourseStatusHandler)
 
 	// Section management (admin, instructor, ta — checked inside handler for course membership)
-	protected.Post("/:id/sections", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), handlers.AddSectionHandler)
-	protected.Put("/:id/sections/:sectionId", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), handlers.UpdateSectionHandler)
-	protected.Delete("/:id/sections/:sectionId", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), handlers.RemoveSectionHandler)
+	protected.Post("/:id/sections", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionCreateSections, "instructor", "ta"), handlers.AddSectionHandler)
+	protected.Put("/:id/sections/:sectionId", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionUpdateSections, "instructor", "ta"), handlers.UpdateSectionHandler)
+	protected.Delete("/:id/sections/:sectionId", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionDeleteSections, "instructor", "ta"), handlers.RemoveSectionHandler)
 
 	// TA management (admin, instructor of course)
-	protected.Post("/:id/tas", middlewares.RequireRole("admin", "instructor"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor"), handlers.AddTAHandler)
-	protected.Post("/:id/tas/bulk", middlewares.RequireRole("admin", "instructor"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor"), handlers.BulkAddTAsHandler)
-	protected.Delete("/:id/tas/:userId", middlewares.RequireRole("admin", "instructor"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor"), handlers.RemoveTAHandler)
+	protected.Post("/:id/tas", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionAddPeople, "instructor", "ta"), handlers.AddTAHandler)
+	protected.Post("/:id/tas/bulk", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionAddPeople, "instructor", "ta"), handlers.BulkAddTAsHandler)
+	protected.Delete("/:id/tas/:userId", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionRemovePeople, "instructor", "ta"), handlers.RemoveTAHandler)
+	protected.Patch("/:id/tas/:userId/permissions", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionEditMemberPermissions, "instructor", "ta"), handlers.UpdateTAPermissionsHandler)
 
 	// Instructor management (admin, instructor of course)
-	protected.Post("/:id/instructors", middlewares.RequireRole("admin", "instructor"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor"), handlers.AddInstructorHandler)
-	protected.Post("/:id/instructors/bulk", middlewares.RequireRole("admin", "instructor"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor"), handlers.BulkAddInstructorsHandler)
-	protected.Delete("/:id/instructors/:userId", middlewares.RequireRole("admin", "instructor"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor"), handlers.RemoveInstructorHandler)
+	protected.Post("/:id/instructors", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionAddPeople, "instructor", "ta"), handlers.AddInstructorHandler)
+	protected.Post("/:id/instructors/bulk", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionAddPeople, "instructor", "ta"), handlers.BulkAddInstructorsHandler)
+	protected.Delete("/:id/instructors/:userId", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionRemovePeople, "instructor", "ta"), handlers.RemoveInstructorHandler)
+	protected.Patch("/:id/instructors/:userId/permissions", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionEditMemberPermissions, "instructor", "ta"), handlers.UpdateInstructorPermissionsHandler)
 
 	// Section student management (admin, instructor, ta — checked inside handler for course membership)
-	protected.Get("/:id/sections/:sectionId/students", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), handlers.GetSectionStudentsHandler)
-	protected.Post("/:id/sections/:sectionId/students", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), handlers.AddStudentToSectionHandler)
-	protected.Post("/:id/sections/:sectionId/students/bulk", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), handlers.BulkAddStudentsToSectionHandler)
-	protected.Delete("/:id/sections/:sectionId/students/:studentId", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), handlers.RemoveStudentFromSectionHandler)
+	protected.Get("/:id/sections/:sectionId/students", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionViewSections, "instructor", "ta"), handlers.GetSectionStudentsHandler)
+	protected.Get("/:id/students/removed", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionViewSections, "instructor", "ta"), handlers.GetRemovedStudentsHandler)
+	protected.Post("/:id/sections/:sectionId/students", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionManageSectionStudents, "instructor", "ta"), handlers.AddStudentToSectionHandler)
+	protected.Post("/:id/sections/:sectionId/students/bulk", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionManageSectionStudents, "instructor", "ta"), handlers.BulkAddStudentsToSectionHandler)
+	protected.Delete("/:id/sections/:sectionId/students/:studentId", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionManageSectionStudents, "instructor", "ta"), handlers.RemoveStudentFromSectionHandler)
+	protected.Post("/:id/sections/:sectionId/students/:studentId/restore", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionManageSectionStudents, "instructor", "ta"), handlers.RestoreStudentToSectionHandler)
 }

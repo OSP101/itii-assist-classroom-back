@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"itii-assist/config"
 	"itii-assist/models"
+	"itii-assist/realtime"
 	"itii-assist/repositories"
 	"strconv"
 	"strings"
@@ -377,6 +378,30 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 		message = "เช็คชื่อสำเร็จ: มาสาย"
 	}
 
+	recordPayload := fiber.Map{
+		"attendance_session_id": id,
+		"student_id":            studentID,
+		"check_in_time":         result.CheckInTime,
+		"status":                result.Status,
+		"location_verified":     result.LocationVerified,
+		"distance_meters":       result.DistanceMeters,
+		"student":               fiber.Map{"id": student.ID, "student_id": student.StudentID, "full_name": student.FullName, "email": student.Email},
+	}
+	var checkedInRecord models.AttendanceRecord
+	if err := config.DB.Where("attendance_session_id = ? AND student_id = ?", uint(id), studentID).First(&checkedInRecord).Error; err == nil {
+		recordPayload["id"] = checkedInRecord.ID
+		recordPayload["pin_verified"] = checkedInRecord.PinVerified
+		recordPayload["google_email"] = nullableAttendanceString(checkedInRecord.GoogleEmail)
+		recordPayload["google_id"] = nullableAttendanceString(checkedInRecord.GoogleID)
+		recordPayload["location_lat"] = nullableAttendanceFloatString(checkedInRecord.LocationLat)
+		recordPayload["location_lng"] = nullableAttendanceFloatString(checkedInRecord.LocationLng)
+		recordPayload["note"] = nullableAttendanceString(checkedInRecord.Note)
+		recordPayload["updated_by"] = checkedInRecord.UpdatedBy
+		recordPayload["created_at"] = checkedInRecord.CreatedAt
+		recordPayload["updated_at"] = checkedInRecord.UpdatedAt
+	}
+	realtime.EmitToInstructor(id, "student-checked-in", fiber.Map{"record": recordPayload})
+
 	return c.JSON(fiber.Map{
 		"success": true,
 		"message": message,
@@ -671,6 +696,7 @@ func UpdateAttendanceRecordHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update record"})
 	}
 	writeCourseActivityLog(detail.CourseID, updatedBy, "update_attendance_record", "attendance", "attendance_session", detail.ID, detail.Title, fiber.Map{"student_id": studentID, "status": input.Status})
+	emitAttendanceRecordUpdated(uint(sessionID), uint(studentID))
 	return c.JSON(fiber.Map{"success": true, "message": "Record updated"})
 }
 
@@ -710,8 +736,45 @@ func UpdateAttendanceRecordByRecordIDHandler(c fiber.Ctx) error {
 	if err == nil {
 		writeCourseActivityLog(detail.CourseID, updatedBy, "update_attendance_record", "attendance", "attendance_session", detail.ID, detail.Title, fiber.Map{"student_id": record.StudentID, "record_id": record.ID, "status": record.Status})
 	}
+	emitAttendanceRecordUpdated(uint(sessionID), record.StudentID)
 
 	return c.JSON(fiber.Map{"success": true, "data": record})
+}
+
+func emitAttendanceRecordUpdated(sessionID uint, studentID uint) {
+	detail, err := repositories.GetAttendanceSession(sessionID)
+	if err != nil {
+		return
+	}
+	for _, record := range detail.Records {
+		if record.StudentID == studentID {
+			realtime.EmitToInstructor(sessionID, "attendance-updated", fiber.Map{"record": fiber.Map{
+				"id":                    record.ID,
+				"attendance_session_id": record.AttendanceSessionID,
+				"student_id":            record.StudentID,
+				"check_in_time":         record.CheckInTime,
+				"status":                record.Status,
+				"google_email":          nullableAttendanceString(record.GoogleEmail),
+				"google_id":             nullableAttendanceString(record.GoogleID),
+				"pin_verified":          record.PinVerified,
+				"location_verified":     record.LocationVerified,
+				"location_lat":          nullableAttendanceFloatString(record.LocationLat),
+				"location_lng":          nullableAttendanceFloatString(record.LocationLng),
+				"distance_meters":       record.DistanceMeters,
+				"note":                  nullableAttendanceString(record.Note),
+				"updated_by":            record.UpdatedBy,
+				"created_at":            record.CreatedAt,
+				"updated_at":            record.UpdatedAt,
+				"student": fiber.Map{
+					"id":         record.Student.ID,
+					"student_id": record.Student.StudentID,
+					"full_name":  record.Student.FullName,
+					"email":      record.Student.Email,
+				},
+			}})
+			return
+		}
+	}
 }
 
 func GetAttendanceRecordsHandler(c fiber.Ctx) error {
