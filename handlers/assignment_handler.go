@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"itii-assist/models"
+	"itii-assist/realtime"
 	"itii-assist/repositories"
 	"strconv"
 	"time"
@@ -95,6 +96,11 @@ func CreateAssignmentHandler(c fiber.Ctx) error {
 		"max_score":       assignment.MaxScore,
 		"sub_item_count":  len(subItems),
 	})
+	realtime.EmitDataUpdate("assignment", "create", assignment.ID, fiber.Map{
+		"courseId":     assignment.CourseID,
+		"assignmentId": assignment.ID,
+		"name":         assignment.Name,
+	})
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": assignment})
 }
 
@@ -169,6 +175,11 @@ func UpdateAssignmentHandler(c fiber.Ctx) error {
 		"max_score":         a.MaxScore,
 		"replace_sub_items": subItemsPtr != nil,
 	})
+	realtime.EmitDataUpdate("assignment", "update", a.ID, fiber.Map{
+		"courseId":     a.CourseID,
+		"assignmentId": a.ID,
+		"name":         a.Name,
+	})
 	return c.JSON(fiber.Map{"success": true, "data": a})
 }
 
@@ -190,6 +201,11 @@ func DeleteAssignmentHandler(c fiber.Ctx) error {
 		"assignment_type": assignment.AssignmentType,
 		"week_number":     assignment.WeekNumber,
 	})
+	realtime.EmitDataUpdate("assignment", "delete", assignment.ID, fiber.Map{
+		"courseId":     assignment.CourseID,
+		"assignmentId": assignment.ID,
+		"name":         assignment.Name,
+	})
 	return c.JSON(fiber.Map{"success": true, "message": "Assignment deleted"})
 }
 
@@ -206,6 +222,10 @@ func ReorderAssignmentsHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to reorder assignments"})
 	}
 	writeCourseActivityLog(input.CourseID, c.Locals("user_id").(uint), "reorder_assignments", "assignment", "course", input.CourseID, "", fiber.Map{"ordered_ids": input.OrderedIDs})
+	realtime.EmitDataUpdate("assignment", "update", nil, fiber.Map{
+		"courseId":    input.CourseID,
+		"ordered_ids": input.OrderedIDs,
+	})
 	return c.JSON(fiber.Map{"success": true, "message": "Reordered"})
 }
 
@@ -229,5 +249,10 @@ func LinkAttendanceSessionsHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update links"})
 	}
 	writeCourseActivityLog(assignment.CourseID, c.Locals("user_id").(uint), "link_assignment_attendance", "assignment", "assignment", assignment.ID, assignment.Name, fiber.Map{"session_ids": input.SessionIDs})
+	realtime.EmitDataUpdate("assignment", "update", assignment.ID, fiber.Map{
+		"courseId":     assignment.CourseID,
+		"assignmentId": assignment.ID,
+		"name":         assignment.Name,
+	})
 	return c.JSON(fiber.Map{"success": true, "message": "Links updated"})
 }
