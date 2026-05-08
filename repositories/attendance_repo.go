@@ -67,15 +67,18 @@ type AttendanceCheckInResult struct {
 }
 
 type AttendanceSessionInfo struct {
-	ID            uint                    `json:"id"`
-	Title         string                  `json:"title"`
-	SessionType   string                  `json:"session_type"`
-	CheckLocation bool                    `json:"check_location"`
-	StartTime     time.Time               `json:"start_time"`
-	EndTime       time.Time               `json:"end_time"`
-	Status        string                  `json:"status"`
-	Course        *AttendanceCourseBasic  `json:"course"`
-	Section       *AttendanceSectionBasic `json:"section"`
+	ID                   uint                    `json:"id"`
+	Title                string                  `json:"title"`
+	SessionType          string                  `json:"session_type"`
+	CheckLocation        bool                    `json:"check_location"`
+	PinCode              string                  `json:"pin_code"`
+	LateThresholdMinutes int                     `json:"late_threshold_minutes"`
+	LateThresholdTime    string                  `json:"late_threshold_time"`
+	StartTime            time.Time               `json:"start_time"`
+	EndTime              time.Time               `json:"end_time"`
+	Status               string                  `json:"status"`
+	Course               *AttendanceCourseBasic  `json:"course"`
+	Section              *AttendanceSectionBasic `json:"section"`
 }
 
 type AttendanceSessionDetail struct {
@@ -657,14 +660,17 @@ func GetSessionInfo(sessionID uint) (*AttendanceSessionInfo, error) {
 	}
 
 	return &AttendanceSessionInfo{
-		ID:            session.ID,
-		Title:         session.Title,
-		SessionType:   session.SessionType,
-		CheckLocation: session.CheckLocation,
-		StartTime:     session.StartTime,
-		EndTime:       session.EndTime,
-		Status:        ComputeSessionStatus(session),
-		Course:        course,
-		Section:       section,
+		ID:                   session.ID,
+		Title:                session.Title,
+		SessionType:          session.SessionType,
+		CheckLocation:        session.CheckLocation,
+		PinCode:              session.PinCode,
+		LateThresholdMinutes: session.LateThresholdMinutes,
+		LateThresholdTime:    session.LateThresholdTime,
+		StartTime:            session.StartTime,
+		EndTime:              session.EndTime,
+		Status:               ComputeSessionStatus(session),
+		Course:               course,
+		Section:              section,
 	}, nil
 }

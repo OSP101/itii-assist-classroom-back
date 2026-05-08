@@ -74,6 +74,10 @@ func main() {
 		&models.AttendanceSession{},
 		&models.AttendanceSessionSection{},
 		&models.AttendanceRecord{},
+		&models.AttendanceDisplayDevice{},
+		&models.AttendanceDisplayPairing{},
+		&models.AttendanceDisplayGrant{},
+		&models.AttendanceDisplayAuditLog{},
 		// คิว
 		&models.QueueSession{},
 		&models.QueueBooking{},
@@ -82,6 +86,7 @@ func main() {
 		// แจ้งเตือน
 		&models.FcmToken{},
 		&models.NotificationLog{},
+		&models.UserNotification{},
 		// Feedback และ Log
 		&models.Feedback{},
 		&models.SystemLog{},
@@ -90,7 +95,7 @@ func main() {
 	if err != nil {
 		log.Fatal("❌ Migration failed: ", err)
 	}
-	log.Println("✅ All 40 tables migrated successfully!")
+	log.Println("✅ All tables migrated successfully!")
 
 	// 4. รัน Fiber Server
 	app := fiber.New()
@@ -144,6 +149,7 @@ func main() {
 	routes.SetupQueueRoutes(app)
 	routes.SetupNotificationRoutes(app)
 	routes.SetupOAuthRoutes(app)
+	routes.SetupUserNotificationRoutes(app)
 	routes.SetupSystemLogRoutes(app)
 
 	log.Println("🚀 Starting server on port 8000...")

@@ -1,4 +1,4 @@
-package handlers
+﻿package handlers
 
 import (
 	"itii-assist/models"
@@ -47,6 +47,8 @@ func CreateAssignmentHandler(c fiber.Ctx) error {
 		MaxScore       float64    `json:"max_score"`
 		DueDate        *time.Time `json:"due_date"`
 		IsScoreVisible bool       `json:"is_score_visible"`
+		IsDraft        bool       `json:"is_draft"`
+		PublishAt      *time.Time `json:"publish_at"`
 		SubItems       []struct {
 			Name     string  `json:"name"`
 			MaxScore float64 `json:"max_score"`
@@ -78,6 +80,8 @@ func CreateAssignmentHandler(c fiber.Ctx) error {
 		MaxScore:       maxScore,
 		DueDate:        input.DueDate,
 		IsScoreVisible: input.IsScoreVisible,
+		IsDraft:        input.IsDraft,
+		PublishAt:      input.PublishAt,
 		IsActive:       true,
 		CreatedBy:      userID,
 	}
@@ -100,7 +104,16 @@ func CreateAssignmentHandler(c fiber.Ctx) error {
 		"courseId":     assignment.CourseID,
 		"assignmentId": assignment.ID,
 		"name":         assignment.Name,
+		"actor_id":     userID,
 	})
+	go createNotificationsForCourseMembers(
+		input.CourseID, userID,
+		"assignment_created",
+		"งานใหม่: "+assignment.Name,
+		"มีการสร้างงานใหม่ในวิชา",
+		"/classroom/"+input.CourseID+"/assignments",
+		buildNotifData(input.CourseID, strconv.FormatUint(uint64(assignment.ID), 10), "assignment", ""),
+	)
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": assignment})
 }
 
@@ -120,6 +133,9 @@ func UpdateAssignmentHandler(c fiber.Ctx) error {
 		MaxScore        *float64   `json:"max_score"`
 		DueDate         *time.Time `json:"due_date"`
 		IsScoreVisible  *bool      `json:"is_score_visible"`
+		IsDraft         *bool      `json:"is_draft"`
+		PublishAt       *time.Time `json:"publish_at"`
+		ClearPublishAt  bool       `json:"clear_publish_at"`
 		ReplaceSubItems *[]struct {
 			Name     string  `json:"name"`
 			MaxScore float64 `json:"max_score"`
@@ -156,6 +172,15 @@ func UpdateAssignmentHandler(c fiber.Ctx) error {
 	if input.IsScoreVisible != nil {
 		a.IsScoreVisible = *input.IsScoreVisible
 	}
+	if input.IsDraft != nil {
+		a.IsDraft = *input.IsDraft
+	}
+	if input.PublishAt != nil {
+		a.PublishAt = input.PublishAt
+	}
+	if input.ClearPublishAt {
+		a.PublishAt = nil
+	}
 
 	var subItemsPtr *[]models.AssignmentSubItem
 	if input.ReplaceSubItems != nil {
@@ -179,7 +204,16 @@ func UpdateAssignmentHandler(c fiber.Ctx) error {
 		"courseId":     a.CourseID,
 		"assignmentId": a.ID,
 		"name":         a.Name,
+		"actor_id":     actorID,
 	})
+	go createNotificationsForCourseMembers(
+		a.CourseID, actorID,
+		"assignment_updated",
+		"แก้ไขงาน: "+a.Name,
+		"มีการแก้ไขงานในวิชา",
+		"/classroom/"+a.CourseID+"/assignments",
+		buildNotifData(a.CourseID, strconv.FormatUint(uint64(a.ID), 10), "assignment", ""),
+	)
 	return c.JSON(fiber.Map{"success": true, "data": a})
 }
 
@@ -205,6 +239,7 @@ func DeleteAssignmentHandler(c fiber.Ctx) error {
 		"courseId":     assignment.CourseID,
 		"assignmentId": assignment.ID,
 		"name":         assignment.Name,
+		"actor_id":     actorID,
 	})
 	return c.JSON(fiber.Map{"success": true, "message": "Assignment deleted"})
 }
@@ -225,6 +260,7 @@ func ReorderAssignmentsHandler(c fiber.Ctx) error {
 	realtime.EmitDataUpdate("assignment", "update", nil, fiber.Map{
 		"courseId":    input.CourseID,
 		"ordered_ids": input.OrderedIDs,
+		"actor_id":    c.Locals("user_id").(uint),
 	})
 	return c.JSON(fiber.Map{"success": true, "message": "Reordered"})
 }
@@ -253,6 +289,7 @@ func LinkAttendanceSessionsHandler(c fiber.Ctx) error {
 		"courseId":     assignment.CourseID,
 		"assignmentId": assignment.ID,
 		"name":         assignment.Name,
+		"actor_id":     c.Locals("user_id").(uint),
 	})
 	return c.JSON(fiber.Map{"success": true, "message": "Links updated"})
 }

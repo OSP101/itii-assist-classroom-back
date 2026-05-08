@@ -557,6 +557,7 @@ func CreateScoreEditRequestCompatHandler(c fiber.Ctx) error {
 	}
 
 	writeCourseActivityLog(context.CourseID, userID, "create_score_edit_request", "score", "assignment", context.AssignmentID, context.AssignmentName, fiber.Map{"score_id": scoreID, "new_score": newScore, "image_count": len(imagePaths)})
+	go createNotificationsForCourseMembers(context.CourseID, userID, "score_edit_request", "ขอแก้ไขคะแนน: "+context.AssignmentName, "มีการส่งคำขอแก้ไขคะแนน", "/classroom/"+context.CourseID+"/approval", buildNotifData(context.CourseID, fmt.Sprint(context.AssignmentID), "score_edit_request", ""))
 
 	return c.Status(201).JSON(fiber.Map{
 		"success": true,
@@ -892,6 +893,7 @@ func ApproveScoreEditRequestCompatHandler(c fiber.Ctx) error {
 	}
 	_ = c.Bind().JSON(&input)
 	reviewerID := c.Locals("user_id").(uint)
+	requesterID, _ := repositories.GetScoreEditRequestRequester(uint(id))
 	count, courseID, assignmentName, err := reviewScoreEditRequests([]uint{uint(id)}, true, reviewerID, input.Comment)
 	if err != nil {
 		status := 500
@@ -903,6 +905,9 @@ func ApproveScoreEditRequestCompatHandler(c fiber.Ctx) error {
 		return c.Status(status).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
 	writeCourseActivityLog(courseID, reviewerID, "approve_score_edit_request", "score", "assignment", "", assignmentName, fiber.Map{"count": count, "request_id": id})
+	if requesterID != 0 {
+		go createNotificationForUser(requesterID, courseID, "score_edit_approved", "คำขอแก้ไขคะแนนได้รับการอนุมัติ", "คำขอแก้ไขคะแนนของคุณได้รับการอนุมัติแล้ว", "/classroom/"+courseID+"/approval", buildNotifData(courseID, fmt.Sprint(id), "score_edit_request", ""))
+	}
 	return c.JSON(fiber.Map{"success": true, "message": "Score edit request approved"})
 }
 
@@ -919,6 +924,7 @@ func RejectScoreEditRequestCompatHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Rejection reason is required"})
 	}
 	reviewerID := c.Locals("user_id").(uint)
+	requesterID, _ := repositories.GetScoreEditRequestRequester(uint(id))
 	count, courseID, assignmentName, err := reviewScoreEditRequests([]uint{uint(id)}, false, reviewerID, input.Comment)
 	if err != nil {
 		status := 500
@@ -930,6 +936,9 @@ func RejectScoreEditRequestCompatHandler(c fiber.Ctx) error {
 		return c.Status(status).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
 	writeCourseActivityLog(courseID, reviewerID, "reject_score_edit_request", "score", "assignment", "", assignmentName, fiber.Map{"count": count, "request_id": id})
+	if requesterID != 0 {
+		go createNotificationForUser(requesterID, courseID, "score_edit_rejected", "คำขอแก้ไขคะแนนถูกปฏิเสธ", "คำขอแก้ไขคะแนนของคุณถูกปฏิเสธ", "/classroom/"+courseID+"/approval", buildNotifData(courseID, fmt.Sprint(id), "score_edit_request", ""))
+	}
 	return c.JSON(fiber.Map{"success": true, "message": "Score edit request rejected"})
 }
 
@@ -942,8 +951,10 @@ func BatchApproveScoreEditRequestsCompatHandler(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&input); err != nil || len(input.RequestIDs) == 0 {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "request_ids array is required"})
 	}
+	requestIDs := uniqueScoreUintValues(input.RequestIDs)
+	requesterMap, _ := repositories.GetScoreEditRequestRequesters(requestIDs)
 	reviewerID := c.Locals("user_id").(uint)
-	count, courseID, assignmentName, err := reviewScoreEditRequests(uniqueScoreUintValues(input.RequestIDs), true, reviewerID, input.Comment)
+	count, courseID, assignmentName, err := reviewScoreEditRequests(requestIDs, true, reviewerID, input.Comment)
 	if err != nil {
 		status := 500
 		if strings.Contains(err.Error(), "no pending") {
@@ -954,6 +965,14 @@ func BatchApproveScoreEditRequestsCompatHandler(c fiber.Ctx) error {
 		return c.Status(status).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
 	writeCourseActivityLog(courseID, reviewerID, "batch_approve_score_edit_requests", "score", "assignment", "", assignmentName, fiber.Map{"count": count})
+	notifiedUsers := map[uint]bool{}
+	for reqID, requesterID := range requesterMap {
+		if requesterID == 0 || notifiedUsers[requesterID] {
+			continue
+		}
+		notifiedUsers[requesterID] = true
+		go createNotificationForUser(requesterID, courseID, "score_edit_approved", "คำขอแก้ไขคะแนนได้รับการอนุมัติ", fmt.Sprintf("คำขอแก้ไขคะแนนได้รับการอนุมัติ (%d รายการ)", count), "/classroom/"+courseID+"/approval", buildNotifData(courseID, fmt.Sprint(reqID), "score_edit_request", ""))
+	}
 	return c.JSON(fiber.Map{"success": true, "message": fmt.Sprintf("Approved %d edit request(s)", count), "count": count})
 }
 
@@ -969,8 +988,10 @@ func BatchRejectScoreEditRequestsCompatHandler(c fiber.Ctx) error {
 	if strings.TrimSpace(input.Comment) == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Rejection reason is required"})
 	}
+	requestIDs := uniqueScoreUintValues(input.RequestIDs)
+	requesterMap, _ := repositories.GetScoreEditRequestRequesters(requestIDs)
 	reviewerID := c.Locals("user_id").(uint)
-	count, courseID, assignmentName, err := reviewScoreEditRequests(uniqueScoreUintValues(input.RequestIDs), false, reviewerID, input.Comment)
+	count, courseID, assignmentName, err := reviewScoreEditRequests(requestIDs, false, reviewerID, input.Comment)
 	if err != nil {
 		status := 500
 		if strings.Contains(err.Error(), "no pending") {
@@ -981,5 +1002,13 @@ func BatchRejectScoreEditRequestsCompatHandler(c fiber.Ctx) error {
 		return c.Status(status).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
 	writeCourseActivityLog(courseID, reviewerID, "batch_reject_score_edit_requests", "score", "assignment", "", assignmentName, fiber.Map{"count": count})
+	notifiedUsers := map[uint]bool{}
+	for reqID, requesterID := range requesterMap {
+		if requesterID == 0 || notifiedUsers[requesterID] {
+			continue
+		}
+		notifiedUsers[requesterID] = true
+		go createNotificationForUser(requesterID, courseID, "score_edit_rejected", "คำขอแก้ไขคะแนนถูกปฏิเสธ", fmt.Sprintf("คำขอแก้ไขคะแนนถูกปฏิเสธ (%d รายการ)", count), "/classroom/"+courseID+"/approval", buildNotifData(courseID, fmt.Sprint(reqID), "score_edit_request", ""))
+	}
 	return c.JSON(fiber.Map{"success": true, "message": fmt.Sprintf("Rejected %d edit request(s)", count), "count": count})
 }

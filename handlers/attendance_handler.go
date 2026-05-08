@@ -1,7 +1,7 @@
-package handlers
+﻿package handlers
 
 import (
-	"encoding/json"
+	"fmt"
 	"itii-assist/config"
 	"itii-assist/models"
 	"itii-assist/realtime"
@@ -12,14 +12,6 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 )
-
-func attendanceSessionPayload(session models.AttendanceSession, sectionIDs []uint) fiber.Map {
-	raw, _ := json.Marshal(session)
-	payload := fiber.Map{}
-	_ = json.Unmarshal(raw, &payload)
-	payload["course_section_ids"] = sectionIDs
-	return payload
-}
 
 func uniqueUintValues(values []uint) []uint {
 	seen := make(map[uint]bool, len(values))
@@ -301,6 +293,30 @@ func attendanceSessionDetailResponse(detail *repositories.AttendanceSessionDetai
 	}
 }
 
+func attendanceSessionPayload(session models.AttendanceSession, sectionIDs []uint) fiber.Map {
+	return fiber.Map{
+		"id":                     session.ID,
+		"course_id":              session.CourseID,
+		"course_section_id":      session.CourseSectionID,
+		"course_section_ids":     uniqueUintValues(sectionIDs),
+		"title":                  session.Title,
+		"pin_code":               session.PinCode,
+		"session_type":           session.SessionType,
+		"check_location":         session.CheckLocation,
+		"location_lat":           nullableAttendanceFloatString(session.LocationLat),
+		"location_lng":           nullableAttendanceFloatString(session.LocationLng),
+		"radius_meters":          session.RadiusMeters,
+		"start_time":             session.StartTime,
+		"end_time":               session.EndTime,
+		"late_threshold_minutes": session.LateThresholdMinutes,
+		"late_threshold_time":    nullableAttendanceString(session.LateThresholdTime),
+		"status":                 session.Status,
+		"created_by":             session.CreatedBy,
+		"created_at":             session.CreatedAt,
+		"updated_at":             session.UpdatedAt,
+	}
+}
+
 // GET /api/attendance/check-in/:sessionId/info  (public)
 func GetSessionInfoHandler(c fiber.Ctx) error {
 	idStr := c.Params("sessionId")
@@ -356,13 +372,13 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 		}
 	}
 	if studentID == 0 {
-		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูลนักศึกษาในระบบ กรุณาติดต่อผู้สอน"})
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "à¹„à¸¡à¹ˆà¸žà¸šà¸‚à¹‰à¸­à¸¡à¸¹à¸¥à¸™à¸±à¸à¸¨à¸¶à¸à¸©à¸²à¹ƒà¸™à¸£à¸°à¸šà¸š à¸à¸£à¸¸à¸“à¸²à¸•à¸´à¸”à¸•à¹ˆà¸­à¸œà¸¹à¹‰à¸ªà¸­à¸™"})
 	}
 
 	result, err := repositories.StudentCheckIn(uint(id), studentID, input.PinCode, lat, lng, input.GoogleEmail, input.GoogleID)
 	if err != nil {
 		statusCode := 400
-		if strings.Contains(err.Error(), "ไม่พบ") || strings.Contains(err.Error(), "ไม่ได้ลงทะเบียน") {
+		if strings.Contains(err.Error(), "à¹„à¸¡à¹ˆà¸žà¸š") || strings.Contains(err.Error(), "à¹„à¸¡à¹ˆà¹„à¸”à¹‰à¸¥à¸‡à¸—à¸°à¹€à¸šà¸µà¸¢à¸™") {
 			statusCode = 404
 		}
 		return c.Status(statusCode).JSON(fiber.Map{"success": false, "message": err.Error()})
@@ -373,9 +389,9 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load student after check-in"})
 	}
 
-	message := "เช็คชื่อสำเร็จ: มาเรียน"
+	message := "à¹€à¸Šà¹‡à¸„à¸Šà¸·à¹ˆà¸­à¸ªà¸³à¹€à¸£à¹‡à¸ˆ: à¸¡à¸²à¹€à¸£à¸µà¸¢à¸™"
 	if result.Status == "late" {
-		message = "เช็คชื่อสำเร็จ: มาสาย"
+		message = "à¹€à¸Šà¹‡à¸„à¸Šà¸·à¹ˆà¸­à¸ªà¸³à¹€à¸£à¹‡à¸ˆ: à¸¡à¸²à¸ªà¸²à¸¢"
 	}
 
 	recordPayload := fiber.Map{
@@ -401,6 +417,7 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 		recordPayload["updated_at"] = checkedInRecord.UpdatedAt
 	}
 	realtime.EmitToInstructor(id, "student-checked-in", fiber.Map{"record": recordPayload})
+	realtime.EmitToAttendanceDisplay(id, "student-checked-in", fiber.Map{"record": recordPayload})
 
 	return c.JSON(fiber.Map{
 		"success": true,
@@ -529,6 +546,14 @@ func CreateAttendanceSessionHandler(c fiber.Ctx) error {
 		"end_time":           session.EndTime,
 		"check_location":     session.CheckLocation,
 	})
+	go createNotificationsForCourseMembers(
+		input.CourseID, userID,
+		"attendance_created",
+		"Create attendance: "+session.Title,
+		"A new attendance session was created in this course",
+		"/classroom/"+input.CourseID+"/attendance",
+		buildNotifData(input.CourseID, fmt.Sprint(session.ID), "attendance_session", ""),
+	)
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": attendanceSessionPayload(session, sectionIDs)})
 }
 
@@ -748,7 +773,7 @@ func emitAttendanceRecordUpdated(sessionID uint, studentID uint) {
 	}
 	for _, record := range detail.Records {
 		if record.StudentID == studentID {
-			realtime.EmitToInstructor(sessionID, "attendance-updated", fiber.Map{"record": fiber.Map{
+			payload := fiber.Map{"record": fiber.Map{
 				"id":                    record.ID,
 				"attendance_session_id": record.AttendanceSessionID,
 				"student_id":            record.StudentID,
@@ -771,7 +796,9 @@ func emitAttendanceRecordUpdated(sessionID uint, studentID uint) {
 					"full_name":  record.Student.FullName,
 					"email":      record.Student.Email,
 				},
-			}})
+			}}
+			realtime.EmitToInstructor(sessionID, "attendance-updated", payload)
+			realtime.EmitToAttendanceDisplay(sessionID, "attendance-updated", payload)
 			return
 		}
 	}
@@ -824,7 +851,16 @@ func ActivateAttendanceSessionHandler(c fiber.Ctx) error {
 		}
 	}
 	session.Status = repositories.ComputeSessionStatus(session)
-	writeCourseActivityLog(session.CourseID, c.Locals("user_id").(uint), "activate_attendance_session", "attendance", "attendance_session", session.ID, session.Title, fiber.Map{"status": session.Status})
+	actorUID := c.Locals("user_id").(uint)
+	writeCourseActivityLog(session.CourseID, actorUID, "activate_attendance_session", "attendance", "attendance_session", session.ID, session.Title, fiber.Map{"status": session.Status})
+	go createNotificationsForCourseMembers(
+		session.CourseID, actorUID,
+		"attendance_started",
+		"Start attendance: "+session.Title,
+		"Attendance has started in this course",
+		"/classroom/"+session.CourseID+"/attendance",
+		buildNotifData(session.CourseID, fmt.Sprint(session.ID), "attendance_session", ""),
+	)
 	return c.JSON(fiber.Map{"success": true, "message": "Session activated", "data": attendanceSessionPayload(session, detail.CourseSectionIDs)})
 }
 
@@ -848,7 +884,18 @@ func CloseAttendanceSessionHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to close session"})
 	}
 	session.Status = repositories.ComputeSessionStatus(session)
-	writeCourseActivityLog(session.CourseID, c.Locals("user_id").(uint), "close_attendance_session", "attendance", "attendance_session", session.ID, session.Title, fiber.Map{"status": session.Status})
+	actorCloseUID := c.Locals("user_id").(uint)
+	writeCourseActivityLog(session.CourseID, actorCloseUID, "close_attendance_session", "attendance", "attendance_session", session.ID, session.Title, fiber.Map{"status": session.Status})
+	go createNotificationsForCourseMembers(
+		session.CourseID, actorCloseUID,
+		"attendance_closed",
+		"Close attendance: "+session.Title,
+		"Attendance has been closed in this course",
+		"/classroom/"+session.CourseID+"/attendance",
+		buildNotifData(session.CourseID, fmt.Sprint(session.ID), "attendance_session", ""),
+	)
+	realtime.EmitToAttendance(session.ID, "session-closed", fiber.Map{"session_id": session.ID})
+	realtime.EmitToAttendanceDisplay(session.ID, "session-closed", fiber.Map{"session_id": session.ID})
 	return c.JSON(fiber.Map{"success": true, "message": "Session closed", "data": attendanceSessionPayload(session, detail.CourseSectionIDs)})
 }
 
@@ -863,7 +910,7 @@ func VerifyStudentHandler(c fiber.Ctx) error {
 
 	var student models.Student
 	if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?)", input.GoogleEmail).First(&student).Error; err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูลนักศึกษาในระบบ"})
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "à¹„à¸¡à¹ˆà¸žà¸šà¸‚à¹‰à¸­à¸¡à¸¹à¸¥à¸™à¸±à¸à¸¨à¸¶à¸à¸©à¸²à¹ƒà¸™à¸£à¸°à¸šà¸š"})
 	}
 
 	response := fiber.Map{
@@ -879,7 +926,7 @@ func VerifyStudentHandler(c fiber.Ctx) error {
 	if input.SessionID != nil {
 		var record models.AttendanceRecord
 		if err := config.DB.Where("attendance_session_id = ? AND student_id = ?", *input.SessionID, student.ID).First(&record).Error; err != nil {
-			return c.Status(404).JSON(fiber.Map{"success": false, "message": "คุณไม่ได้ลงทะเบียนในรายวิชานี้"})
+			return c.Status(404).JSON(fiber.Map{"success": false, "message": "à¸„à¸¸à¸“à¹„à¸¡à¹ˆà¹„à¸”à¹‰à¸¥à¸‡à¸—à¸°à¹€à¸šà¸µà¸¢à¸™à¹ƒà¸™à¸£à¸²à¸¢à¸§à¸´à¸Šà¸²à¸™à¸µà¹‰"})
 		}
 		if record.Status != "absent" {
 			response["already_checked_in"] = true
@@ -906,7 +953,7 @@ func PreviewSectionChangeHandler(c fiber.Ctx) error {
 
 	detail, err := repositories.GetAttendanceSession(uint(id))
 	if err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบรอบการเช็คชื่อ"})
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "à¹„à¸¡à¹ˆà¸žà¸šà¸£à¸­à¸šà¸à¸²à¸£à¹€à¸Šà¹‡à¸„à¸Šà¸·à¹ˆà¸­"})
 	}
 
 	newSectionIDs := uniqueUintValues(input.CourseSectionIDs)
@@ -1031,7 +1078,7 @@ func PreviewTimeChangeHandler(c fiber.Ctx) error {
 
 	var session models.AttendanceSession
 	if err := config.DB.First(&session, uint(id)).Error; err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบรอบการเช็คชื่อ"})
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "à¹„à¸¡à¹ˆà¸žà¸šà¸£à¸­à¸šà¸à¸²à¸£à¹€à¸Šà¹‡à¸„à¸Šà¸·à¹ˆà¸­"})
 	}
 
 	var records []models.AttendanceRecord
@@ -1145,7 +1192,7 @@ func ApplyTimeChangeHandler(c fiber.Ctx) error {
 
 	detail, err := repositories.GetAttendanceSession(uint(id))
 	if err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบรอบการเช็คชื่อ"})
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "à¹„à¸¡à¹ˆà¸žà¸šà¸£à¸­à¸šà¸à¸²à¸£à¹€à¸Šà¹‡à¸„à¸Šà¸·à¹ˆà¸­"})
 	}
 	session := detail.AttendanceSession
 	newStart := session.StartTime
@@ -1219,9 +1266,9 @@ func ApplyTimeChangeHandler(c fiber.Ctx) error {
 			continue
 		}
 
-		note := "[ระบบ] สถานะถูกอัปเดตหลังปรับเวลาเช็คชื่อ"
+		note := "[à¸£à¸°à¸šà¸š] à¸ªà¸–à¸²à¸™à¸°à¸–à¸¹à¸à¸­à¸±à¸›à¹€à¸”à¸•à¸«à¸¥à¸±à¸‡à¸›à¸£à¸±à¸šà¹€à¸§à¸¥à¸²à¹€à¸Šà¹‡à¸„à¸Šà¸·à¹ˆà¸­"
 		if newStatus == "invalid" {
-			note = "[ระบบ] สถานะเปลี่ยนเป็นขาด เนื่องจากเวลาเช็คอินอยู่นอกช่วงเวลาใหม่"
+			note = "[à¸£à¸°à¸šà¸š] à¸ªà¸–à¸²à¸™à¸°à¹€à¸›à¸¥à¸µà¹ˆà¸¢à¸™à¹€à¸›à¹‡à¸™à¸‚à¸²à¸” à¹€à¸™à¸·à¹ˆà¸­à¸‡à¸ˆà¸²à¸à¹€à¸§à¸¥à¸²à¹€à¸Šà¹‡à¸„à¸­à¸´à¸™à¸­à¸¢à¸¹à¹ˆà¸™à¸­à¸à¸Šà¹ˆà¸§à¸‡à¹€à¸§à¸¥à¸²à¹ƒà¸«à¸¡à¹ˆ"
 		}
 		if err := tx.Model(&models.AttendanceRecord{}).Where("id = ?", record.ID).Updates(map[string]interface{}{"status": dbStatus, "updated_by": updatedBy, "note": note, "updated_at": time.Now()}).Error; err != nil {
 			tx.Rollback()

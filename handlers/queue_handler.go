@@ -88,6 +88,7 @@ func CreateQueueSessionHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to create queue session"})
 	}
 	writeCourseActivityLog(courseID, userID, "create_queue_session", "queue", "queue_session", session.ID, session.Title, fiber.Map{"classroom_id": session.ClassroomID, "linked_assignment_id": session.LinkedAssignmentID, "require_attendance": session.RequireAttendance})
+	go createNotificationsForCourseMembers(courseID, userID, "queue_created", "สร้างคิว: "+session.Title, "มีการสร้างคิวใหม่ในวิชา", "/classroom/"+courseID+"/queue", buildNotifData(courseID, session.ID, "queue_session", ""))
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": session})
 }
 
@@ -127,6 +128,7 @@ func UpdateQueueSessionHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update session"})
 	}
 	writeCourseActivityLog(session.CourseID, actorID, "update_queue_session", "queue", "queue_session", session.ID, session.Title, fiber.Map{"description": session.Description})
+	go createNotificationsForCourseMembers(session.CourseID, actorID, "queue_updated", "แก้ไขคิว: "+session.Title, "มีการแก้ไขคิวในวิชา", "/classroom/"+session.CourseID+"/queue", buildNotifData(session.CourseID, session.ID, "queue_session", ""))
 	return c.JSON(fiber.Map{"success": true, "data": session})
 }
 
@@ -155,7 +157,9 @@ func StartQueueSessionHandler(c fiber.Ctx) error {
 	if err := repositories.StartQueueSession(sessionID, session.ClassroomID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to start session"})
 	}
-	writeCourseActivityLog(session.CourseID, c.Locals("user_id").(uint), "start_queue_session", "queue", "queue_session", session.ID, session.Title, nil)
+	actorID := c.Locals("user_id").(uint)
+	writeCourseActivityLog(session.CourseID, actorID, "start_queue_session", "queue", "queue_session", session.ID, session.Title, nil)
+	go createNotificationsForCourseMembers(session.CourseID, actorID, "queue_opened", "เปิดคิว: "+session.Title, "มีการเปิดคิวในวิชา", "/classroom/"+session.CourseID+"/queue", buildNotifData(session.CourseID, session.ID, "queue_session", ""))
 	return c.JSON(fiber.Map{"success": true, "message": "Session started"})
 }
 
@@ -197,7 +201,9 @@ func CloseQueueSessionHandler(c fiber.Ctx) error {
 	if err := repositories.CloseQueueSession(sessionID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to close session"})
 	}
-	writeCourseActivityLog(session.CourseID, c.Locals("user_id").(uint), "close_queue_session", "queue", "queue_session", session.ID, session.Title, nil)
+	actorID := c.Locals("user_id").(uint)
+	writeCourseActivityLog(session.CourseID, actorID, "close_queue_session", "queue", "queue_session", session.ID, session.Title, nil)
+	go createNotificationsForCourseMembers(session.CourseID, actorID, "queue_closed", "ปิดคิว: "+session.Title, "มีการปิดคิวในวิชา", "/classroom/"+session.CourseID+"/queue", buildNotifData(session.CourseID, session.ID, "queue_session", ""))
 	return c.JSON(fiber.Map{"success": true, "message": "Session closed"})
 }
 

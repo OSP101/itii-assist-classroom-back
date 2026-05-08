@@ -257,6 +257,8 @@ type Assignment struct {
 	DueDate                   *time.Time `gorm:"type:timestamptz" json:"due_date,omitempty"`
 	IsActive                  bool       `gorm:"type:boolean;default:true" json:"is_active"`
 	IsScoreVisible            bool       `gorm:"type:boolean;default:true" json:"is_score_visible"`
+	IsDraft                   bool       `gorm:"type:boolean;default:false" json:"is_draft"`
+	PublishAt                 *time.Time `gorm:"type:timestamptz" json:"publish_at,omitempty"`
 	CreatedBy                 uint       `gorm:"not null;index" json:"created_by"`
 	OrderIndex                int        `gorm:"default:0" json:"order_index"`
 	CreatedAt                 time.Time  `gorm:"type:timestamptz" json:"created_at"`
@@ -402,6 +404,65 @@ type AttendanceRecord struct {
 	UpdatedAt           time.Time  `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
 }
 
+type AttendanceDisplayDevice struct {
+	ID                  string     `gorm:"primaryKey;type:varchar(64)" json:"id"`
+	BootstrapSecretHash string     `gorm:"type:char(64);uniqueIndex;not null" json:"-"`
+	Status              string     `gorm:"type:varchar(20);default:'bootstrapped';index" json:"status"`
+	LastIPHash          string     `gorm:"type:char(64)" json:"-"`
+	LastUserAgent       string     `gorm:"type:text" json:"last_user_agent"`
+	CreatedAt           time.Time  `gorm:"type:timestamptz" json:"created_at"`
+	LastSeenAt          *time.Time `gorm:"type:timestamptz" json:"last_seen_at,omitempty"`
+	UpdatedAt           time.Time  `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+}
+
+type AttendanceDisplayPairing struct {
+	ID                   string     `gorm:"primaryKey;type:varchar(64)" json:"id"`
+	DisplayDeviceID      string     `gorm:"type:varchar(64);not null;index" json:"display_device_id"`
+	PairingTokenHash     string     `gorm:"type:char(64);uniqueIndex;not null" json:"-"`
+	VerificationCodeHash string     `gorm:"type:char(64)" json:"-"`
+	CourseID             string     `gorm:"type:varchar(21);index" json:"course_id"`
+	AttendanceSessionID  *uint      `gorm:"index" json:"attendance_session_id,omitempty"`
+	ApprovedByUserID     *uint      `gorm:"index" json:"approved_by_user_id,omitempty"`
+	Status               string     `gorm:"type:varchar(20);default:'pending';index" json:"status"`
+	ExpiresAt            time.Time  `gorm:"type:timestamptz;index" json:"expires_at"`
+	ClaimedAt            *time.Time `gorm:"type:timestamptz" json:"claimed_at,omitempty"`
+	ConfirmedAt          *time.Time `gorm:"type:timestamptz" json:"confirmed_at,omitempty"`
+	AttemptCount         int        `gorm:"default:0" json:"attempt_count"`
+	MaxAttempts          int        `gorm:"default:5" json:"max_attempts"`
+	CreatedAt            time.Time  `gorm:"type:timestamptz" json:"created_at"`
+	UpdatedAt            time.Time  `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+}
+
+type AttendanceDisplayGrant struct {
+	ID                  string     `gorm:"primaryKey;type:varchar(64)" json:"id"`
+	DisplayDeviceID     string     `gorm:"type:varchar(64);not null;index" json:"display_device_id"`
+	AttendanceSessionID uint       `gorm:"not null;index" json:"attendance_session_id"`
+	CourseID            string     `gorm:"type:varchar(21);not null;index" json:"course_id"`
+	GrantedByUserID     uint       `gorm:"not null;index" json:"granted_by_user_id"`
+	Scope               string     `gorm:"type:varchar(255);not null" json:"scope"`
+	SessionSecretHash   string     `gorm:"type:char(64);uniqueIndex;not null" json:"-"`
+	Status              string     `gorm:"type:varchar(20);default:'active';index" json:"status"`
+	ExpiresAt           time.Time  `gorm:"type:timestamptz;index" json:"expires_at"`
+	LastSeenAt          *time.Time `gorm:"type:timestamptz" json:"last_seen_at,omitempty"`
+	RevokedAt           *time.Time `gorm:"type:timestamptz" json:"revoked_at,omitempty"`
+	RevokeReason        string     `gorm:"type:varchar(255)" json:"revoke_reason"`
+	CreatedAt           time.Time  `gorm:"type:timestamptz" json:"created_at"`
+	UpdatedAt           time.Time  `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+}
+
+type AttendanceDisplayAuditLog struct {
+	ID              uint           `gorm:"primaryKey;autoIncrement" json:"id"`
+	DisplayDeviceID string         `gorm:"type:varchar(64);index" json:"display_device_id"`
+	PairingID       string         `gorm:"type:varchar(64);index" json:"pairing_id"`
+	GrantID         string         `gorm:"type:varchar(64);index" json:"grant_id"`
+	EventType       string         `gorm:"type:varchar(50);not null;index" json:"event_type"`
+	ActorUserID     *uint          `gorm:"index" json:"actor_user_id,omitempty"`
+	IPHash          string         `gorm:"type:char(64)" json:"-"`
+	UserAgent       string         `gorm:"type:text" json:"user_agent"`
+	Metadata        datatypes.JSON `gorm:"type:jsonb" json:"metadata,omitempty"`
+	CreatedAt       time.Time      `gorm:"type:timestamptz" json:"created_at"`
+}
+
 // =============================================================================
 // 8. ระบบคิว
 // =============================================================================
@@ -490,6 +551,24 @@ type FcmToken struct {
 	LastUsedAt *time.Time     `gorm:"type:timestamptz" json:"last_used_at,omitempty"`
 	CreatedAt  time.Time      `gorm:"type:timestamptz" json:"created_at"`
 	UpdatedAt  time.Time      `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+}
+
+// =============================================================================
+// UserNotification — per-user in-app notifications
+// =============================================================================
+
+type UserNotification struct {
+	ID        uint           `gorm:"primaryKey;autoIncrement" json:"id"`
+	UserID    uint           `gorm:"not null;index" json:"user_id"`
+	Type      string         `gorm:"type:varchar(60);not null" json:"type"` // assignment_created, assignment_updated, attendance_created, attendance_started, attendance_closed, queue_created, queue_updated, queue_opened, queue_closed, score_edit_request, score_edit_approved, score_edit_rejected, admin_message
+	Title     string         `gorm:"type:varchar(255);not null" json:"title"`
+	Message   string         `gorm:"type:text" json:"message"`
+	CourseID  string         `gorm:"type:varchar(21);index" json:"course_id"`
+	Link      string         `gorm:"type:varchar(255)" json:"link"`
+	Data      datatypes.JSON `gorm:"type:jsonb" json:"data,omitempty"`
+	IsRead    bool           `gorm:"type:boolean;default:false;index" json:"is_read"`
+	ReadAt    *time.Time     `gorm:"type:timestamptz" json:"read_at,omitempty"`
+	CreatedAt time.Time      `gorm:"type:timestamptz" json:"created_at"`
 }
 
 type NotificationLog struct {

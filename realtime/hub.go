@@ -1,6 +1,7 @@
-package realtime
+﻿package realtime
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -41,6 +42,18 @@ type hub struct {
 var defaultHub = &hub{
 	clients: make(map[*client]struct{}),
 	rooms:   make(map[string]map[*client]struct{}),
+}
+
+type socketTicket struct {
+	room      string
+	expiresAt time.Time
+}
+
+var displaySocketTickets = struct {
+	mu    sync.Mutex
+	items map[string]socketTicket
+}{
+	items: make(map[string]socketTicket),
 }
 
 var upgrader = websocket.FastHTTPUpgrader{
@@ -210,7 +223,8 @@ func (c *client) handleMessage(message incomingMessage) {
 	case "classroom-change":
 		payload := rawMap(message.Data)
 		room := "classroom-" + fmt.Sprint(payload["classroomId"])
-		c.hub.broadcast(room, "classroom-updated", fiber.Map{"type": payload["type"], "payload": payload["payload"], "timestamp": nowMillis()}, c)
+		payload["timestamp"] = nowMillis()
+		c.hub.broadcast(room, "classroom-updated", payload, c)
 	case "join-global-updates":
 		c.hub.join(c, "global-updates")
 	case "leave-global-updates":
@@ -227,13 +241,37 @@ func (c *client) handleMessage(message incomingMessage) {
 		c.hub.join(c, "booking-"+rawString(message.Data))
 	case "leave-booking":
 		c.hub.leave(c, "booking-"+rawString(message.Data))
+	case "join-user":
+		c.hub.join(c, "user-"+rawString(message.Data))
+	case "leave-user":
+		c.hub.leave(c, "user-"+rawString(message.Data))
+	case "join-display":
+		payload := rawMap(message.Data)
+		ticket := strings.TrimSpace(fmt.Sprint(payload["ticket"]))
+		if room, ok := validateDisplaySocketTicket(ticket); ok {
+			c.hub.join(c, room)
+		}
+	case "leave-display":
+		payload := rawMap(message.Data)
+		room := strings.TrimSpace(fmt.Sprint(payload["room"]))
+		if room != "" {
+			c.hub.leave(c, room)
+		}
 	case "data-change":
 		payload := rawMap(message.Data)
 		resource, _ := payload["resource"].(string)
 		update := fiber.Map{"resource": resource, "action": payload["action"], "id": payload["id"], "data": payload["data"], "timestamp": nowMillis()}
 		c.hub.broadcast("global-updates", "data-updated", update, c)
 		if resource == "course" {
-			c.hub.broadcast("global-courses", "course-updated", fiber.Map{"action": payload["action"], "courseId": payload["id"], "timestamp": nowMillis()}, c)
+			actorID := interface{}(nil)
+			if dataPayload, ok := payload["data"].(map[string]interface{}); ok {
+				if value, exists := dataPayload["actor_id"]; exists {
+					actorID = value
+				} else if value, exists := dataPayload["actorId"]; exists {
+					actorID = value
+				}
+			}
+			c.hub.broadcast("global-courses", "course-updated", fiber.Map{"action": payload["action"], "courseId": payload["id"], "actor_id": actorID, "timestamp": nowMillis()}, c)
 		}
 	}
 }
@@ -249,6 +287,10 @@ func EmitToAttendance(sessionID interface{}, event string, data interface{}) {
 
 func EmitToInstructor(sessionID interface{}, event string, data interface{}) {
 	EmitToRoom("instructor-"+fmt.Sprint(sessionID), event, data)
+}
+
+func EmitToAttendanceDisplay(sessionID interface{}, event string, data interface{}) {
+	EmitToRoom("display-attendance-"+fmt.Sprint(sessionID), event, data)
 }
 
 func EmitToQueue(sessionID interface{}, event string, data interface{}) {
@@ -269,6 +311,55 @@ func EmitCourseUpdate(action string, courseID interface{}, userID interface{}) {
 
 func EmitDataUpdate(resource string, action string, id interface{}, data interface{}) {
 	EmitToRoom("global-updates", "data-updated", fiber.Map{"resource": resource, "action": action, "id": id, "data": data, "timestamp": nowMillis()})
+}
+
+func EmitToUser(userID interface{}, event string, data interface{}) {
+	EmitToRoom(fmt.Sprintf("user-%v", userID), event, data)
+}
+
+func IssueDisplaySocketTicket(room string, ttl time.Duration) (string, time.Time, error) {
+	room = strings.TrimSpace(room)
+	if room == "" {
+		return "", time.Time{}, fmt.Errorf("room required")
+	}
+	buffer := make([]byte, 24)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", time.Time{}, err
+	}
+	ticket := fmt.Sprintf("%x", buffer)
+	expiresAt := time.Now().Add(ttl)
+	displaySocketTickets.mu.Lock()
+	defer displaySocketTickets.mu.Unlock()
+	cleanupExpiredDisplayTicketsLocked()
+	displaySocketTickets.items[ticket] = socketTicket{room: room, expiresAt: expiresAt}
+	return ticket, expiresAt, nil
+}
+
+func validateDisplaySocketTicket(ticket string) (string, bool) {
+	ticket = strings.TrimSpace(ticket)
+	if ticket == "" {
+		return "", false
+	}
+	displaySocketTickets.mu.Lock()
+	defer displaySocketTickets.mu.Unlock()
+	cleanupExpiredDisplayTicketsLocked()
+	item, ok := displaySocketTickets.items[ticket]
+	if !ok || time.Now().After(item.expiresAt) {
+		if ok {
+			delete(displaySocketTickets.items, ticket)
+		}
+		return "", false
+	}
+	return item.room, true
+}
+
+func cleanupExpiredDisplayTicketsLocked() {
+	now := time.Now()
+	for ticket, item := range displaySocketTickets.items {
+		if now.After(item.expiresAt) {
+			delete(displaySocketTickets.items, ticket)
+		}
+	}
 }
 
 func rawString(data json.RawMessage) string {
