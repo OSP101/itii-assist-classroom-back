@@ -280,6 +280,18 @@ func MigratePerformanceIndexes() {
 			name: "queue_sessions_pin_code_status",
 			sql:  `CREATE INDEX IF NOT EXISTS idx_queue_sessions_pin_code_status ON queue_sessions (pin_code, status)`,
 		},
+		{
+			name: "queue_sessions_status_cutoff",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_queue_sessions_status_cutoff ON queue_sessions (status, cutoff_at)`,
+		},
+		{
+			name: "queue_bookings_session_late_created",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_queue_bookings_session_late_created ON queue_bookings (queue_session_id, is_late_booking, created_at DESC)`,
+		},
+		{
+			name: "queue_workers_session_user_unique",
+			sql:  `CREATE UNIQUE INDEX IF NOT EXISTS uq_queue_workers_session_user ON queue_workers (queue_session_id, user_id)`,
+		},
 	}
 
 	ensuredCount := 0

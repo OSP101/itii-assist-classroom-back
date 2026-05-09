@@ -97,6 +97,10 @@ func main() {
 	}
 	log.Println("✅ All tables migrated successfully!")
 
+	config.MigrateScoreSchemaCompatibility()
+	config.MigrateQueueSessionCounterCompatibility()
+	config.MigratePerformanceIndexes()
+
 	// 4. รัน Fiber Server
 	app := fiber.New()
 	app.Use(logger.New())

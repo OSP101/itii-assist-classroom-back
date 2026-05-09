@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ---------- helpers ----------
@@ -317,6 +318,8 @@ type BookingInput struct {
 	DeskNumber  int
 	BookingType string // grading | help
 	Note        string
+	IsLate      bool
+	LateReason  string
 }
 
 func CreateBooking(sessionID string, input BookingInput) (*models.QueueBooking, error) {
@@ -335,6 +338,8 @@ func CreateBooking(sessionID string, input BookingInput) (*models.QueueBooking, 
 			BookingType:    input.BookingType,
 			QueueNumber:    queueNumber,
 			Note:           input.Note,
+			IsLateBooking:  input.IsLate,
+			LateReason:     input.LateReason,
 			Status:         "waiting",
 		}
 		if err := tx.Create(booking).Error; err != nil {
@@ -465,25 +470,32 @@ func GetStudentActiveBooking(sessionID string, studentID uint) (*models.QueueBoo
 }
 
 func CancelBooking(bookingID uint, studentID uint) error {
-	var b models.QueueBooking
-	if err := config.DB.First(&b, bookingID).Error; err != nil {
-		return err
-	}
-	if b.StudentID != studentID {
-		return fmt.Errorf("unauthorized")
-	}
-	if b.Status != "waiting" {
-		return fmt.Errorf("cannot cancel booking in status: %s", b.Status)
-	}
-	b.Status = "cancelled"
-	if err := config.DB.Save(&b).Error; err != nil {
-		return err
-	}
-	if b.BookingType == "grading" {
-		return updateDeskStatus(config.DB, b.QueueSessionID, b.DeskID, b.BookingType, resetDeskStatus(b.BookingType), 0)
-	}
-	return syncHelpDeskStatus(config.DB, b.QueueSessionID, b.DeskID)
-	return nil
+	return config.DB.Transaction(func(tx *gorm.DB) error {
+		var b models.QueueBooking
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&b, bookingID).Error; err != nil {
+			return err
+		}
+		if b.StudentID != studentID {
+			return fmt.Errorf("unauthorized")
+		}
+		if b.Status != "waiting" {
+			return fmt.Errorf("cannot cancel booking in status: %s", b.Status)
+		}
+
+		now := time.Now()
+		updates := map[string]interface{}{
+			"status":     "cancelled",
+			"updated_at": now,
+		}
+		if err := tx.Model(&models.QueueBooking{}).Where("id = ?", b.ID).Updates(updates).Error; err != nil {
+			return err
+		}
+
+		if b.BookingType == "grading" {
+			return updateDeskStatus(tx, b.QueueSessionID, b.DeskID, b.BookingType, resetDeskStatus(b.BookingType), 0)
+		}
+		return syncHelpDeskStatus(tx, b.QueueSessionID, b.DeskID)
+	})
 }
 
 func resetDeskStatus(bookingType string) string {
@@ -539,96 +551,251 @@ func GetWorkersBySession(sessionID string) ([]models.QueueWorker, error) {
 	return workers, err
 }
 
+// AssignNextWaitingBookingToWorker attempts to atomically assign the next matching waiting booking
+// to the specified worker. It returns (booking, assignedNow, error).
+// assignedNow is true only when this call newly assigned a booking.
+func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.QueueBooking, bool, error) {
+	var bookingResult models.QueueBooking
+	assignedNow := false
+
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
+		var worker models.QueueWorker
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("queue_session_id = ? AND user_id = ?", sessionID, workerID).
+			First(&worker).Error; err != nil {
+			return err
+		}
+
+		// If worker already has an assigned active booking, return it without reassignment.
+		var existing models.QueueBooking
+		existingErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("queue_session_id = ? AND assigned_worker_id = ? AND status IN ?", sessionID, workerID, []string{"waiting", "in_progress"}).
+			Order("updated_at DESC, id DESC").
+			First(&existing).Error
+		if existingErr == nil {
+			bookingResult = existing
+			assignedNow = false
+			return nil
+		}
+		if existingErr != nil && !errors.Is(existingErr, gorm.ErrRecordNotFound) {
+			return existingErr
+		}
+
+		if worker.Status != "online" {
+			return nil
+		}
+
+		bookingTypes := make([]string, 0, 2)
+		if worker.AcceptGrading {
+			bookingTypes = append(bookingTypes, "grading")
+		}
+		if worker.AcceptHelp {
+			bookingTypes = append(bookingTypes, "help")
+		}
+		if len(bookingTypes) == 0 {
+			return nil
+		}
+
+		var waiting models.QueueBooking
+		waitingErr := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+			Where("queue_session_id = ? AND status = ? AND assigned_worker_id IS NULL AND booking_type IN ?", sessionID, "waiting", bookingTypes).
+			Order("queue_number ASC, created_at ASC, id ASC").
+			First(&waiting).Error
+		if errors.Is(waitingErr, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if waitingErr != nil {
+			return waitingErr
+		}
+
+		now := time.Now()
+		bookingUpdates := map[string]interface{}{
+			"assigned_worker_id": workerID,
+			"assigned_at":        now,
+			"started_at":         now,
+			"status":             "in_progress",
+			"updated_at":         now,
+		}
+		if err := tx.Model(&models.QueueBooking{}).Where("id = ?", waiting.ID).Updates(bookingUpdates).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Model(&models.QueueWorker{}).
+			Where("queue_session_id = ? AND user_id = ?", sessionID, workerID).
+			Updates(map[string]interface{}{"status": "busy", "current_booking_id": waiting.ID, "last_active_at": now}).Error; err != nil {
+			return err
+		}
+
+		if err := updateDeskStatus(tx, waiting.QueueSessionID, waiting.DeskID, waiting.BookingType, "in_progress", waiting.ID); err != nil {
+			return err
+		}
+
+		if err := tx.First(&bookingResult, waiting.ID).Error; err != nil {
+			return err
+		}
+
+		assignedNow = true
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+
+	if bookingResult.ID == 0 {
+		return nil, false, nil
+	}
+
+	return &bookingResult, assignedNow, nil
+}
+
 // Worker starts / completes a booking
 func WorkerUpdateBooking(bookingID uint, workerID uint, action string, score *float64, workerNote string) (*models.QueueBooking, error) {
-	var b models.QueueBooking
-	if err := config.DB.First(&b, bookingID).Error; err != nil {
-		return nil, err
+	if action != "start" && action != "complete" && action != "no_show" {
+		return nil, fmt.Errorf("invalid action")
 	}
 
-	var worker models.QueueWorker
-	workerErr := config.DB.Where("queue_session_id = ? AND user_id = ?", b.QueueSessionID, workerID).First(&worker).Error
-	if workerErr != nil {
-		return nil, fmt.Errorf("worker not registered for this queue session")
-	}
-
-	now := time.Now()
-	needsHelpDeskSync := false
-	switch action {
-	case "start":
-		b.Status = "in_progress"
-		b.AssignedWorkerID = &workerID
-		b.AssignedAt = &now
-		b.StartedAt = &now
-		if err := updateDeskStatus(config.DB, b.QueueSessionID, b.DeskID, b.BookingType, "in_progress", b.ID); err != nil {
-			return nil, err
+	var updated models.QueueBooking
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
+		var b models.QueueBooking
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&b, bookingID).Error; err != nil {
+			return err
 		}
-		if workerErr == nil {
-			config.DB.Model(&models.QueueWorker{}).
+
+		var worker models.QueueWorker
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("queue_session_id = ? AND user_id = ?", b.QueueSessionID, workerID).First(&worker).Error; err != nil {
+			return fmt.Errorf("worker not registered for this queue session")
+		}
+
+		now := time.Now()
+		needsHelpDeskSync := false
+
+		switch action {
+		case "start":
+			if b.Status != "waiting" {
+				return fmt.Errorf("booking is not waiting")
+			}
+			if b.AssignedWorkerID != nil && *b.AssignedWorkerID != workerID {
+				return fmt.Errorf("booking already assigned to another worker")
+			}
+
+			updates := map[string]interface{}{
+				"status":             "in_progress",
+				"assigned_worker_id": workerID,
+				"assigned_at":        now,
+				"started_at":         now,
+				"updated_at":         now,
+			}
+			if err := tx.Model(&models.QueueBooking{}).Where("id = ?", b.ID).Updates(updates).Error; err != nil {
+				return err
+			}
+			if err := updateDeskStatus(tx, b.QueueSessionID, b.DeskID, b.BookingType, "in_progress", b.ID); err != nil {
+				return err
+			}
+			if err := tx.Model(&models.QueueWorker{}).
 				Where("queue_session_id = ? AND user_id = ?", b.QueueSessionID, workerID).
-				Updates(map[string]interface{}{"status": "busy", "current_booking_id": b.ID, "last_active_at": now})
-		}
-	case "complete":
-		b.Status = "completed"
-		b.CompletedAt = &now
-		b.Score = score
-		b.WorkerNote = workerNote
-		if workerErr == nil {
-			updates := map[string]interface{}{"current_booking_id": nil, "last_active_at": now}
+				Updates(map[string]interface{}{"status": "busy", "current_booking_id": b.ID, "last_active_at": now}).Error; err != nil {
+				return err
+			}
+
+		case "complete":
+			if b.Status != "in_progress" {
+				return fmt.Errorf("booking is not in progress")
+			}
+			if b.AssignedWorkerID == nil || *b.AssignedWorkerID != workerID {
+				return fmt.Errorf("booking is not assigned to this worker")
+			}
+
+			updates := map[string]interface{}{
+				"status":       "completed",
+				"completed_at": now,
+				"score":        score,
+				"worker_note":  workerNote,
+				"updated_at":   now,
+			}
+			if err := tx.Model(&models.QueueBooking{}).Where("id = ?", b.ID).Updates(updates).Error; err != nil {
+				return err
+			}
+
+			workerUpdates := map[string]interface{}{"current_booking_id": nil, "last_active_at": now}
 			if worker.Status == "paused" {
-				updates["status"] = "offline"
+				workerUpdates["status"] = "offline"
 			} else {
-				updates["status"] = "online"
+				workerUpdates["status"] = "online"
 			}
 			if b.BookingType == "grading" {
-				updates["total_grading_completed"] = gorm.Expr("total_grading_completed + 1")
+				workerUpdates["total_grading_completed"] = gorm.Expr("total_grading_completed + 1")
 			} else {
-				updates["total_help_completed"] = gorm.Expr("total_help_completed + 1")
+				workerUpdates["total_help_completed"] = gorm.Expr("total_help_completed + 1")
 			}
-			config.DB.Model(&models.QueueWorker{}).
+			if err := tx.Model(&models.QueueWorker{}).
 				Where("queue_session_id = ? AND user_id = ?", b.QueueSessionID, workerID).
-				Updates(updates)
-		}
-		if b.BookingType == "grading" {
-			if err := updateDeskStatus(config.DB, b.QueueSessionID, b.DeskID, b.BookingType, resetDeskStatus(b.BookingType), 0); err != nil {
-				return nil, err
+				Updates(workerUpdates).Error; err != nil {
+				return err
 			}
-		} else {
-			needsHelpDeskSync = true
-		}
-	case "no_show":
-		b.Status = "no_show"
-		b.CompletedAt = &now
-		b.WorkerNote = workerNote
-		if workerErr == nil {
-			updates := map[string]interface{}{"current_booking_id": nil, "last_active_at": now}
-			if worker.Status == "paused" {
-				updates["status"] = "offline"
-			} else {
-				updates["status"] = "online"
-			}
-			config.DB.Model(&models.QueueWorker{}).
-				Where("queue_session_id = ? AND user_id = ?", b.QueueSessionID, workerID).
-				Updates(updates)
-		}
-		if b.BookingType == "grading" {
-			if err := updateDeskStatus(config.DB, b.QueueSessionID, b.DeskID, b.BookingType, resetDeskStatus(b.BookingType), 0); err != nil {
-				return nil, err
-			}
-		} else {
-			needsHelpDeskSync = true
-		}
-	}
 
-	if err := config.DB.Save(&b).Error; err != nil {
+			if b.BookingType == "grading" {
+				if err := updateDeskStatus(tx, b.QueueSessionID, b.DeskID, b.BookingType, resetDeskStatus(b.BookingType), 0); err != nil {
+					return err
+				}
+			} else {
+				needsHelpDeskSync = true
+			}
+
+		case "no_show":
+			if b.Status != "in_progress" {
+				return fmt.Errorf("booking is not in progress")
+			}
+			if b.AssignedWorkerID == nil || *b.AssignedWorkerID != workerID {
+				return fmt.Errorf("booking is not assigned to this worker")
+			}
+
+			updates := map[string]interface{}{
+				"status":       "no_show",
+				"completed_at": now,
+				"worker_note":  workerNote,
+				"updated_at":   now,
+			}
+			if err := tx.Model(&models.QueueBooking{}).Where("id = ?", b.ID).Updates(updates).Error; err != nil {
+				return err
+			}
+
+			workerUpdates := map[string]interface{}{"current_booking_id": nil, "last_active_at": now}
+			if worker.Status == "paused" {
+				workerUpdates["status"] = "offline"
+			} else {
+				workerUpdates["status"] = "online"
+			}
+			if err := tx.Model(&models.QueueWorker{}).
+				Where("queue_session_id = ? AND user_id = ?", b.QueueSessionID, workerID).
+				Updates(workerUpdates).Error; err != nil {
+				return err
+			}
+
+			if b.BookingType == "grading" {
+				if err := updateDeskStatus(tx, b.QueueSessionID, b.DeskID, b.BookingType, resetDeskStatus(b.BookingType), 0); err != nil {
+					return err
+				}
+			} else {
+				needsHelpDeskSync = true
+			}
+		}
+
+		if needsHelpDeskSync {
+			if err := syncHelpDeskStatus(tx, b.QueueSessionID, b.DeskID); err != nil {
+				return err
+			}
+		}
+
+		if err := tx.First(&updated, b.ID).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
-	if needsHelpDeskSync {
-		if err := syncHelpDeskStatus(config.DB, b.QueueSessionID, b.DeskID); err != nil {
-			return nil, err
-		}
-	}
-	return &b, nil
+
+	return &updated, nil
 }
 
 // VerifySessionPIN checks if PIN matches an active session

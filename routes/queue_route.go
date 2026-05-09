@@ -17,6 +17,8 @@ func SetupQueueRoutes(app *fiber.App) {
 	public.Get("/bookings/:bookingId/status", handlers.GetQueueBookingStatusPublicHandler)
 	public.Post("/bookings/:bookingId/cancel", handlers.CancelQueueBookingPublicHandler)
 	public.Get("/sessions/:sessionId/desk-statuses", handlers.GetQueueDeskStatusesPublicHandler)
+	public.Post("/sessions/:sessionId/status", handlers.UpdateQueueSessionStatusPublicHandler)
+	public.Post("/sessions/:sessionId/cutoff", handlers.UpdateQueueSessionCutoffPublicHandler)
 
 	legacyProtected := app.Group("/api/queue", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"))
 	legacyProtected.Post("/sessions/:sessionId/status", middlewares.RequireCourseAccess(middlewares.CourseIDFromQueueSessionParam("sessionId"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionUpdateQueueSessions, "instructor", "ta"), handlers.UpdateQueueSessionStatusPublicHandler)

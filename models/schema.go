@@ -477,6 +477,9 @@ type QueueSession struct {
 	LinkedAssignmentID        *uint      `gorm:"index" json:"linked_assignment_id,omitempty"`
 	RequireAttendance         bool       `gorm:"type:boolean;default:false" json:"require_attendance"`
 	LinkedAttendanceSessionID *uint      `gorm:"index" json:"linked_attendance_session_id,omitempty"`
+	IsCutoffEnabled           bool       `gorm:"type:boolean;default:false" json:"is_cutoff_enabled"`
+	CutoffAt                  *time.Time `gorm:"type:timestamptz" json:"cutoff_at,omitempty"`
+	CutoffNote                string     `gorm:"type:text" json:"cutoff_note"`
 	NextQueueNumber           int        `gorm:"not null;default:1" json:"-"`
 	Status                    string     `gorm:"type:varchar(20);default:'draft'" json:"status"` // draft, active, paused, closed
 	StartTime                 *time.Time `gorm:"type:timestamptz" json:"start_time,omitempty"`
@@ -495,6 +498,8 @@ type QueueBooking struct {
 	BookingType      string     `gorm:"type:varchar(20);not null" json:"booking_type"` // grading, help
 	QueueNumber      int        `gorm:"not null" json:"queue_number"`
 	Note             string     `gorm:"type:text" json:"note"`
+	IsLateBooking    bool       `gorm:"type:boolean;default:false" json:"is_late_booking"`
+	LateReason       string     `gorm:"type:text" json:"late_reason"`
 	Status           string     `gorm:"type:varchar(20);default:'waiting'" json:"status"` // waiting, in_progress, completed, cancelled, no_show
 	AssignedWorkerID *uint      `gorm:"index" json:"assigned_worker_id,omitempty"`
 	AssignedAt       *time.Time `gorm:"type:timestamptz" json:"assigned_at,omitempty"`
