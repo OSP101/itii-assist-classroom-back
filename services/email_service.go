@@ -208,6 +208,89 @@ func SendTwoFactorCodeEmail(user *models.User, code string, purpose string) erro
 	})
 }
 
+func SendSupportTicketAlert(feedback *models.Feedback) error {
+	if feedback == nil {
+		return fmt.Errorf("support alert requires feedback")
+	}
+
+	recipients := supportAlertRecipients()
+	if len(recipients) == 0 {
+		return nil
+	}
+
+	cfg := loadEmailConfig()
+	adminURL := strings.TrimRight(cfg.Frontend, "/") + "/admin/feedback?type=support"
+	createdAt := feedback.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+
+	priorityLabel := strings.ToUpper(strings.TrimSpace(feedback.Priority))
+	if priorityLabel == "" {
+		priorityLabel = "MEDIUM"
+	}
+
+	contactEmail := strings.TrimSpace(feedback.ContactEmail)
+	if contactEmail == "" {
+		contactEmail = "ไม่ระบุ"
+	}
+
+	subject := fmt.Sprintf("[%s] Support ticket #%d (%s)", cfg.AppName, feedback.ID, priorityLabel)
+	htmlBody := fmt.Sprintf(`
+<div style="font-family: 'Segoe UI', Tahoma, sans-serif; background: #f3f6fb; padding: 32px 16px;">
+  <div style="max-width: 640px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);">
+    <div style="padding: 28px 32px; background: linear-gradient(135deg, #0f766e, #1d4ed8); color: #ffffff;">
+      <p style="margin: 0; font-size: 12px; letter-spacing: 2px; text-transform: uppercase; opacity: 0.85;">Support Ticket Alert</p>
+      <h1 style="margin: 10px 0 0; font-size: 24px;">%s</h1>
+      <p style="margin: 12px 0 0; opacity: 0.92;">Ticket #%d • Priority %s</p>
+    </div>
+    <div style="padding: 32px; color: #0f172a;">
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 24px;">
+        <div style="padding: 16px; border-radius: 14px; background: #f8fafc; border: 1px solid #e2e8f0;">
+          <div style="font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 1px;">Contact Email</div>
+          <div style="margin-top: 6px; font-size: 15px; font-weight: 600;">%s</div>
+        </div>
+        <div style="padding: 16px; border-radius: 14px; background: #f8fafc; border: 1px solid #e2e8f0;">
+          <div style="font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 1px;">Created At</div>
+          <div style="margin-top: 6px; font-size: 15px; font-weight: 600;">%s</div>
+        </div>
+      </div>
+      <div style="margin-bottom: 16px; font-size: 13px; color: #64748b; text-transform: uppercase; letter-spacing: 1px;">รายละเอียดคำขอ</div>
+      <div style="padding: 18px; border-radius: 16px; background: #f8fafc; border: 1px solid #e2e8f0; white-space: pre-wrap; line-height: 1.7; color: #334155;">%s</div>
+      <p style="margin: 28px 0 0;">
+        <a href="%s" style="display: inline-block; background: #1d4ed8; color: #ffffff; text-decoration: none; padding: 14px 22px; border-radius: 12px; font-weight: 600;">
+          เปิดหน้า Feedback Admin
+        </a>
+      </p>
+    </div>
+  </div>
+</div>`, html.EscapeString(feedback.Title), feedback.ID, html.EscapeString(priorityLabel), html.EscapeString(contactEmail), html.EscapeString(createdAt.Format("2006-01-02 15:04:05 MST")), html.EscapeString(strings.TrimSpace(feedback.Description)), html.EscapeString(adminURL))
+
+	plainBody := fmt.Sprintf(
+		"Support ticket #%d\nหัวข้อ: %s\nPriority: %s\nContact: %s\nCreated At: %s\n\nรายละเอียด:\n%s\n\nเปิดในระบบ: %s\n",
+		feedback.ID,
+		strings.TrimSpace(feedback.Title),
+		priorityLabel,
+		contactEmail,
+		createdAt.Format("2006-01-02 15:04:05 MST"),
+		strings.TrimSpace(feedback.Description),
+		adminURL,
+	)
+
+	for _, recipient := range recipients {
+		if err := sendEmail(emailMessage{
+			To:      recipient,
+			Subject: subject,
+			HTML:    htmlBody,
+			Plain:   plainBody,
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func sendEmail(message emailMessage) error {
 	cfg := loadEmailConfig()
 	switch cfg.Provider {
@@ -357,6 +440,30 @@ func extractEmailAddress(from string) string {
 		}
 	}
 	return strings.TrimSpace(from)
+}
+
+func supportAlertRecipients() []string {
+	rawRecipients := strings.TrimSpace(os.Getenv("SUPPORT_ALERT_EMAILS"))
+	if rawRecipients == "" {
+		return nil
+	}
+
+	parts := strings.FieldsFunc(rawRecipients, func(r rune) bool {
+		return r == ',' || r == ';'
+	})
+
+	recipients := make([]string, 0, len(parts))
+	seen := map[string]bool{}
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" || seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
+		recipients = append(recipients, trimmed)
+	}
+
+	return recipients
 }
 
 func LogEmailDeliveryError(context string, err error) {

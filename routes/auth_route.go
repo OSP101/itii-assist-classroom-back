@@ -23,6 +23,7 @@ func SetupAuthRoutes(app *fiber.App) {
 	api.Post("/change-password", middlewares.Protected(), handlers.ChangePasswordHandler)
 	api.Post("/force-change-password", middlewares.Protected(), handlers.ForceChangePasswordHandler)
 	api.Put("/profile", middlewares.Protected(), handlers.UpdateProfileHandler)
+	api.Put("/preferences", middlewares.Protected(), handlers.UpdatePreferencesHandler)
 	api.Post("/avatar", middlewares.Protected(), handlers.UploadAvatarHandler)
 	api.Delete("/avatar", middlewares.Protected(), handlers.RemoveAvatarHandler)
 

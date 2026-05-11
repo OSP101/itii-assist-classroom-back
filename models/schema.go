@@ -21,6 +21,9 @@ type User struct {
 	Provider             string         `gorm:"type:varchar(20);default:'local'" json:"provider"` // local, google
 	GoogleID             string         `gorm:"type:varchar(255)" json:"google_id"`
 	Avatar               string         `gorm:"type:text" json:"avatar"`
+	ThemePreference      string         `gorm:"type:varchar(10);default:'system'" json:"theme_preference"`
+	FontSizePreference   string         `gorm:"type:varchar(10);default:'md'" json:"font_size_preference"`
+	LanguagePreference   string         `gorm:"type:varchar(10);default:'th'" json:"language_preference"`
 	IsActive             bool           `gorm:"type:boolean;default:true" json:"is_active"`
 	MustChangePassword   bool           `gorm:"type:boolean;default:false" json:"must_change_password"`
 	TwoFactorEnabled     bool           `gorm:"type:boolean;default:false" json:"two_factor_enabled"`
@@ -597,7 +600,7 @@ type NotificationLog struct {
 type Feedback struct {
 	ID           uint           `gorm:"primaryKey;autoIncrement" json:"id"`
 	UserID       *uint          `gorm:"index" json:"user_id,omitempty"`
-	Type         string         `gorm:"type:varchar(20);not null;default:'other'" json:"type"` // bug, feature, improvement, other
+	Type         string         `gorm:"type:varchar(20);not null;default:'other'" json:"type"` // bug, feature, improvement, other, support
 	Title        string         `gorm:"type:varchar(255);not null" json:"title"`
 	Description  string         `gorm:"type:text;not null" json:"description"`
 	Attachments  datatypes.JSON `gorm:"type:jsonb" json:"attachments,omitempty"`

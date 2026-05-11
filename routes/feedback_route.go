@@ -8,6 +8,9 @@ import (
 )
 
 func SetupFeedbackRoutes(app *fiber.App) {
+	// Public support ticket intake
+	app.Post("/api/feedback/support", middlewares.SupportTicketGuard(), handlers.CreateSupportTicketHandler)
+
 	// Authenticated: submit feedback & view own
 	auth := app.Group("/api/feedback", middlewares.Protected())
 	auth.Post("/", handlers.CreateFeedbackHandler)

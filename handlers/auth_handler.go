@@ -52,6 +52,12 @@ type UpdateProfileInput struct {
 	CurrentPassword string `json:"currentPassword"`
 }
 
+type UpdatePreferencesInput struct {
+	Theme    string `json:"theme"`
+	FontSize string `json:"fontSize"`
+	Language string `json:"language"`
+}
+
 type ForgotPasswordInput struct {
 	Email string `json:"email"`
 }
@@ -69,6 +75,45 @@ type ResetPasswordInput struct {
 // Helper: สร้าง safe user object (ไม่มีรหัสผ่าน)
 // =============================================================================
 
+func normalizeThemePreference(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "light":
+		return "light"
+	case "dark":
+		return "dark"
+	default:
+		return "system"
+	}
+}
+
+func normalizeFontSizePreference(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "sm":
+		return "sm"
+	case "lg":
+		return "lg"
+	default:
+		return "md"
+	}
+}
+
+func normalizeLanguagePreference(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "en":
+		return "en"
+	default:
+		return "th"
+	}
+}
+
+func userPreferences(u *models.User) fiber.Map {
+	return fiber.Map{
+		"theme":    normalizeThemePreference(u.ThemePreference),
+		"fontSize": normalizeFontSizePreference(u.FontSizePreference),
+		"language": normalizeLanguagePreference(u.LanguagePreference),
+	}
+}
+
 func safeUser(u *models.User) fiber.Map {
 	var twoFactorMethod interface{}
 	if u.TwoFactorMethod != "" {
@@ -83,6 +128,7 @@ func safeUser(u *models.User) fiber.Map {
 		"google_id":               u.GoogleID,
 		"provider":                u.Provider,
 		"avatar":                  u.Avatar,
+		"preferences":             userPreferences(u),
 		"is_active":               u.IsActive,
 		"must_change_password":    u.MustChangePassword,
 		"two_factor_enabled":      u.TwoFactorEnabled,
@@ -505,6 +551,54 @@ func UpdateProfileHandler(c fiber.Ctx) error {
 		"success": true,
 		"message": "อัปเดตโปรไฟล์สำเร็จ",
 		"data":    fiber.Map{"user": safeUser(user)},
+	})
+}
+
+// =============================================================================
+// PUT /api/auth/preferences
+// =============================================================================
+
+func UpdatePreferencesHandler(c fiber.Ctx) error {
+	var input UpdatePreferencesInput
+	if err := c.Bind().JSON(&input); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
+	}
+
+	userID := c.Locals("user_id").(uint)
+	user, err := repositories.FindUserByID(userID)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบผู้ใช้"})
+	}
+
+	if strings.TrimSpace(input.Theme) != "" {
+		user.ThemePreference = normalizeThemePreference(input.Theme)
+	} else {
+		user.ThemePreference = normalizeThemePreference(user.ThemePreference)
+	}
+
+	if strings.TrimSpace(input.FontSize) != "" {
+		user.FontSizePreference = normalizeFontSizePreference(input.FontSize)
+	} else {
+		user.FontSizePreference = normalizeFontSizePreference(user.FontSizePreference)
+	}
+
+	if strings.TrimSpace(input.Language) != "" {
+		user.LanguagePreference = normalizeLanguagePreference(input.Language)
+	} else {
+		user.LanguagePreference = normalizeLanguagePreference(user.LanguagePreference)
+	}
+
+	if err := repositories.UpdateUser(user); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึกการตั้งค่าไม่สำเร็จ"})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "อัปเดตการตั้งค่าสำเร็จ",
+		"data": fiber.Map{
+			"preferences": userPreferences(user),
+			"user":        safeUser(user),
+		},
 	})
 }
 

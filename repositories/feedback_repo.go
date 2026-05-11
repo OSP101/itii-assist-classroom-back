@@ -111,6 +111,35 @@ func CreateFeedback(f *models.Feedback) error {
 	return config.DB.Create(f).Error
 }
 
+func CountRecentFeedbacksByContactEmail(feedbackType string, contactEmail string, since time.Time) (int64, error) {
+	trimmedEmail := strings.ToLower(strings.TrimSpace(contactEmail))
+	if trimmedEmail == "" {
+		return 0, nil
+	}
+
+	var total int64
+	err := config.DB.Model(&models.Feedback{}).
+		Where("type = ? AND created_at >= ? AND LOWER(contact_email) = ?", feedbackType, since, trimmedEmail).
+		Count(&total).Error
+
+	return total, err
+}
+
+func HasRecentFeedbackWithSameTitle(feedbackType string, contactEmail string, title string, since time.Time) (bool, error) {
+	trimmedEmail := strings.ToLower(strings.TrimSpace(contactEmail))
+	trimmedTitle := strings.ToLower(strings.TrimSpace(title))
+	if trimmedEmail == "" || trimmedTitle == "" {
+		return false, nil
+	}
+
+	var total int64
+	err := config.DB.Model(&models.Feedback{}).
+		Where("type = ? AND created_at >= ? AND LOWER(contact_email) = ? AND LOWER(title) = ?", feedbackType, since, trimmedEmail, trimmedTitle).
+		Count(&total).Error
+
+	return total > 0, err
+}
+
 func GetFeedbacks(params FeedbackListParams) (FeedbackListResult, error) {
 	db := config.DB
 	query := db.Model(&models.Feedback{})
@@ -266,6 +295,7 @@ type FeedbackByType struct {
 	Features     int64 `json:"features"`
 	Improvements int64 `json:"improvements"`
 	Others       int64 `json:"others"`
+	Supports     int64 `json:"supports"`
 }
 
 type FeedbackStats struct {
@@ -277,7 +307,7 @@ type FeedbackStats struct {
 func GetFeedbackStats() FeedbackStats {
 	db := config.DB
 	var total, pending, reviewing, resolved, rejected int64
-	var bugs, features, improvements, others int64
+	var bugs, features, improvements, others, supports int64
 	db.Model(&models.Feedback{}).Count(&total)
 	db.Model(&models.Feedback{}).Where("status = 'pending'").Count(&pending)
 	db.Model(&models.Feedback{}).Where("status = 'reviewing'").Count(&reviewing)
@@ -287,9 +317,10 @@ func GetFeedbackStats() FeedbackStats {
 	db.Model(&models.Feedback{}).Where("type = 'feature'").Count(&features)
 	db.Model(&models.Feedback{}).Where("type = 'improvement'").Count(&improvements)
 	db.Model(&models.Feedback{}).Where("type = 'other'").Count(&others)
+	db.Model(&models.Feedback{}).Where("type = 'support'").Count(&supports)
 	return FeedbackStats{
 		Total:    total,
 		ByStatus: FeedbackByStatus{Pending: pending, Reviewing: reviewing, Resolved: resolved, Rejected: rejected},
-		ByType:   FeedbackByType{Bugs: bugs, Features: features, Improvements: improvements, Others: others},
+		ByType:   FeedbackByType{Bugs: bugs, Features: features, Improvements: improvements, Others: others, Supports: supports},
 	}
 }
