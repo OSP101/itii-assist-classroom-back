@@ -12,6 +12,11 @@ type courseAccessStateRow struct {
 	Allowed      bool `gorm:"column:allowed"`
 }
 
+type courseActiveStateRow struct {
+	CourseExists bool `gorm:"column:course_exists"`
+	IsActive     bool `gorm:"column:is_active"`
+}
+
 type courseLookupRow struct {
 	ID       uint   `gorm:"column:id"`
 	CourseID string `gorm:"column:course_id"`
@@ -87,6 +92,25 @@ func GetCourseAccessState(courseID string, userID uint, allowedCourseRoles ...st
 func UserHasCourseAccess(courseID string, userID uint, allowedCourseRoles ...string) (bool, error) {
 	_, allowed, err := GetCourseAccessState(courseID, userID, allowedCourseRoles...)
 	return allowed, err
+}
+
+func GetCourseActiveState(courseID string) (bool, bool, error) {
+	courseID = strings.TrimSpace(courseID)
+	if courseID == "" {
+		return false, false, nil
+	}
+
+	query := `
+		SELECT EXISTS (SELECT 1 FROM courses WHERE id = ?) AS course_exists,
+		       COALESCE((SELECT is_active FROM courses WHERE id = ? LIMIT 1), false) AS is_active
+	`
+
+	var row courseActiveStateRow
+	if err := config.DB.Raw(query, courseID, courseID).Scan(&row).Error; err != nil {
+		return false, false, err
+	}
+
+	return row.CourseExists, row.IsActive, nil
 }
 
 func loadCourseIDByRawQuery(query string, args ...interface{}) (string, error) {

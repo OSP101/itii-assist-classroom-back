@@ -34,6 +34,19 @@ func RequireCourseAccess(resolver CourseAccessResolver, allowedCourseRoles ...st
 			return writeCourseAccessError(c, err)
 		}
 
+		for _, courseID := range uniqueCourseIDs(courseIDs) {
+			courseExists, isActive, err := repositories.GetCourseActiveState(courseID)
+			if err != nil {
+				return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to validate course access"})
+			}
+			if !courseExists {
+				return c.Status(404).JSON(fiber.Map{"success": false, "message": "Course not found"})
+			}
+			if isInactiveCourseWriteBlocked(c) && !isActive {
+				return c.Status(403).JSON(fiber.Map{"success": false, "message": "รายวิชานี้ถูกปิดแล้วและอนุญาตให้ดูข้อมูลได้อย่างเดียว"})
+			}
+		}
+
 		userRole, ok := GetUserRole(c)
 		if !ok {
 			return c.Status(403).JSON(fiber.Map{"success": false, "message": "ไม่สามารถตรวจสอบสิทธิ์ได้"})
@@ -63,6 +76,21 @@ func RequireCourseAccess(resolver CourseAccessResolver, allowedCourseRoles ...st
 
 		return c.Next()
 	}
+}
+
+func isInactiveCourseWriteBlocked(c fiber.Ctx) bool {
+	method := strings.ToUpper(strings.TrimSpace(c.Method()))
+	switch method {
+	case fiber.MethodGet, fiber.MethodHead, fiber.MethodOptions:
+		return false
+	}
+
+	path := strings.TrimSpace(c.Path())
+	if method == fiber.MethodPatch && strings.HasPrefix(path, "/api/courses/") && strings.HasSuffix(path, "/toggle-status") {
+		return false
+	}
+
+	return true
 }
 
 func writeCourseAccessError(c fiber.Ctx, err error) error {
