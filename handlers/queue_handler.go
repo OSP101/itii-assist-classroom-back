@@ -480,8 +480,8 @@ func GetQueueSessionReportHandler(c fiber.Ctx) error {
 		}
 
 		bookingReports = append(bookingReports, fiber.Map{
-			"id":                 booking.ID,
-			"student_id":         booking.StudentID,
+			"id":         booking.ID,
+			"student_id": booking.StudentID,
 			"student": fiber.Map{
 				"id":         student.ID,
 				"student_id": student.StudentID,
@@ -541,17 +541,17 @@ func GetQueueSessionReportHandler(c fiber.Ctx) error {
 		}
 
 		workerStats = append(workerStats, fiber.Map{
-			"user_id":            worker.UserID,
-			"full_name":          user.FullName,
-			"total_completed":    completed,
-			"grading_completed":  worker.TotalGradingCompleted,
-			"help_completed":     worker.TotalHelpCompleted,
-			"percent":            percent,
-			"opened_count":       openedCount,
-			"closed_count":       closedCount,
-			"first_opened_at":    firstOpenedAt,
-			"last_opened_at":     lastOpenedAt,
-			"last_closed_at":     lastClosedAt,
+			"user_id":               worker.UserID,
+			"full_name":             user.FullName,
+			"total_completed":       completed,
+			"grading_completed":     worker.TotalGradingCompleted,
+			"help_completed":        worker.TotalHelpCompleted,
+			"percent":               percent,
+			"opened_count":          openedCount,
+			"closed_count":          closedCount,
+			"first_opened_at":       firstOpenedAt,
+			"last_opened_at":        lastOpenedAt,
+			"last_closed_at":        lastClosedAt,
 			"total_active_duration": totalActiveDuration,
 		})
 	}
