@@ -501,6 +501,9 @@ type QueueBooking struct {
 	BookingType      string     `gorm:"type:varchar(20);not null" json:"booking_type"` // grading, help
 	QueueNumber      int        `gorm:"not null" json:"queue_number"`
 	Note             string     `gorm:"type:text" json:"note"`
+	BookingIP        string     `gorm:"type:varchar(64)" json:"booking_ip"`
+	BookingUserAgent string     `gorm:"type:text" json:"booking_user_agent"`
+	BookingDevice    string     `gorm:"type:varchar(255)" json:"booking_device"`
 	IsLateBooking    bool       `gorm:"type:boolean;default:false" json:"is_late_booking"`
 	LateReason       string     `gorm:"type:text" json:"late_reason"`
 	Status           string     `gorm:"type:varchar(20);default:'waiting'" json:"status"` // waiting, in_progress, completed, cancelled, no_show

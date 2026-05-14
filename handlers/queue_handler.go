@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	ua "github.com/mileusna/useragent"
 	"gorm.io/gorm"
 )
 
@@ -61,6 +62,10 @@ func GetQueueSessionsHandler(c fiber.Ctx) error {
 // POST /api/courses/:courseId/queue/sessions
 func CreateQueueSessionHandler(c fiber.Ctx) error {
 	courseID := c.Params("courseId")
+	if err := queueEnsureCourseWritable(c, courseID); err != nil {
+		return err
+	}
+
 	var input struct {
 		ClassroomID               string     `json:"classroom_id"`
 		Title                     string     `json:"title"`
@@ -121,6 +126,9 @@ func UpdateQueueSessionHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
 	}
+	if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+		return err
+	}
 	actorID := c.Locals("user_id").(uint)
 
 	var input struct {
@@ -171,6 +179,9 @@ func DeleteQueueSessionHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
 	}
+	if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+		return err
+	}
 	if err := repositories.DeleteQueueSession(sessionID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to delete session"})
 	}
@@ -184,6 +195,9 @@ func StartQueueSessionHandler(c fiber.Ctx) error {
 	session, err := repositories.GetQueueSessionByID(sessionID)
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
+	}
+	if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+		return err
 	}
 	if err := repositories.StartQueueSession(sessionID, session.ClassroomID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to start session"})
@@ -201,6 +215,9 @@ func PauseQueueSessionHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
 	}
+	if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+		return err
+	}
 	if err := repositories.PauseQueueSession(sessionID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to pause session"})
 	}
@@ -215,6 +232,9 @@ func ResumeQueueSessionHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
 	}
+	if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+		return err
+	}
 	if err := repositories.ResumeQueueSession(sessionID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to resume session"})
 	}
@@ -228,6 +248,9 @@ func CloseQueueSessionHandler(c fiber.Ctx) error {
 	session, err := repositories.GetQueueSessionByID(sessionID)
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
+	}
+	if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+		return err
 	}
 	if err := repositories.CloseQueueSession(sessionID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to close session"})
@@ -260,6 +283,9 @@ func CreateBookingHandler(c fiber.Ctx) error {
 	session, err := repositories.GetQueueSessionByID(sessionID)
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
+	}
+	if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+		return err
 	}
 	var input struct {
 		StudentID   uint   `json:"student_id"`
@@ -302,6 +328,270 @@ func GetBookingsHandler(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "data": bookings})
 }
 
+// GET /api/courses/:courseId/queue/sessions/:sessionId/report
+func GetQueueSessionReportHandler(c fiber.Ctx) error {
+	courseID := c.Params("courseId")
+	sessionID := c.Params("sessionId")
+
+	session, err := repositories.GetQueueSessionByID(sessionID)
+	if err != nil || session.CourseID != courseID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
+	}
+
+	bookings, err := repositories.GetBookingsBySession(sessionID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch bookings"})
+	}
+
+	workers, err := repositories.GetWorkersBySession(sessionID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch workers"})
+	}
+
+	studentIDs := make([]uint, 0)
+	studentSeen := map[uint]struct{}{}
+	workerIDs := make([]uint, 0)
+	workerSeen := map[uint]struct{}{}
+	for _, booking := range bookings {
+		if _, ok := studentSeen[booking.StudentID]; !ok {
+			studentSeen[booking.StudentID] = struct{}{}
+			studentIDs = append(studentIDs, booking.StudentID)
+		}
+		if booking.AssignedWorkerID != nil {
+			if _, ok := workerSeen[*booking.AssignedWorkerID]; !ok {
+				workerSeen[*booking.AssignedWorkerID] = struct{}{}
+				workerIDs = append(workerIDs, *booking.AssignedWorkerID)
+			}
+		}
+	}
+	for _, worker := range workers {
+		if _, ok := workerSeen[worker.UserID]; !ok {
+			workerSeen[worker.UserID] = struct{}{}
+			workerIDs = append(workerIDs, worker.UserID)
+		}
+	}
+
+	studentMap := map[uint]models.Student{}
+	if len(studentIDs) > 0 {
+		var students []models.Student
+		if err := config.DB.Select("id", "student_id", "full_name").Where("id IN ?", studentIDs).Find(&students).Error; err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch students"})
+		}
+		for _, student := range students {
+			studentMap[student.ID] = student
+		}
+	}
+
+	workerMap := map[uint]models.User{}
+	if len(workerIDs) > 0 {
+		var users []models.User
+		if err := config.DB.Select("id", "full_name").Where("id IN ?", workerIDs).Find(&users).Error; err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch workers"})
+		}
+		for _, user := range users {
+			workerMap[user.ID] = user
+		}
+	}
+
+	type queueWorkerActivityLog struct {
+		ActorUserID uint      `gorm:"column:actor_user_id"`
+		Action      string    `gorm:"column:action"`
+		CreatedAt   time.Time `gorm:"column:created_at"`
+	}
+	type queueWorkerActivitySummary struct {
+		OpenedCount         int
+		ClosedCount         int
+		FirstOpenedAt       *time.Time
+		LastOpenedAt        *time.Time
+		LastClosedAt        *time.Time
+		TotalActiveDuration time.Duration
+		CurrentOpenedAt     *time.Time
+	}
+
+	workerActivity := map[uint]*queueWorkerActivitySummary{}
+	if len(workerIDs) > 0 {
+		var activityLogs []queueWorkerActivityLog
+		if err := config.DB.Model(&models.CourseActivityLog{}).
+			Select("actor_user_id", "action", "created_at").
+			Where("course_id = ? AND target_type = ? AND target_id = ? AND action IN ? AND actor_user_id IN ?", courseID, "queue_session", sessionID, []string{"join_queue_worker", "leave_queue_worker"}, workerIDs).
+			Order("created_at ASC").
+			Scan(&activityLogs).Error; err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch worker activity"})
+		}
+
+		for _, logEntry := range activityLogs {
+			summary, ok := workerActivity[logEntry.ActorUserID]
+			if !ok {
+				summary = &queueWorkerActivitySummary{}
+				workerActivity[logEntry.ActorUserID] = summary
+			}
+
+			switch logEntry.Action {
+			case "join_queue_worker":
+				summary.OpenedCount++
+				if summary.FirstOpenedAt == nil {
+					openedAt := logEntry.CreatedAt
+					summary.FirstOpenedAt = &openedAt
+				}
+				openedAt := logEntry.CreatedAt
+				summary.LastOpenedAt = &openedAt
+				if summary.CurrentOpenedAt == nil {
+					summary.CurrentOpenedAt = &openedAt
+				}
+			case "leave_queue_worker":
+				summary.ClosedCount++
+				closedAt := logEntry.CreatedAt
+				summary.LastClosedAt = &closedAt
+				if summary.CurrentOpenedAt != nil && summary.CurrentOpenedAt.Before(closedAt) {
+					summary.TotalActiveDuration += closedAt.Sub(*summary.CurrentOpenedAt)
+					summary.CurrentOpenedAt = nil
+				}
+			}
+		}
+	}
+
+	bookingReports := make([]fiber.Map, 0, len(bookings))
+	for _, booking := range bookings {
+		waitDuration := ""
+		serviceDuration := ""
+
+		waitUntil := booking.StartedAt
+		if waitUntil == nil {
+			waitUntil = booking.AssignedAt
+		}
+		if waitUntil == nil {
+			waitUntil = booking.CompletedAt
+		}
+		if waitUntil != nil && booking.CreatedAt.Before(*waitUntil) {
+			waitDuration = waitUntil.Sub(booking.CreatedAt).String()
+		}
+		if booking.StartedAt != nil && booking.CompletedAt != nil && booking.StartedAt.Before(*booking.CompletedAt) {
+			serviceDuration = booking.CompletedAt.Sub(*booking.StartedAt).String()
+		}
+
+		student := studentMap[booking.StudentID]
+		var workerInfo fiber.Map
+		if booking.AssignedWorkerID != nil {
+			if user, ok := workerMap[*booking.AssignedWorkerID]; ok {
+				workerInfo = fiber.Map{"id": user.ID, "full_name": user.FullName}
+			} else {
+				workerInfo = fiber.Map{"id": *booking.AssignedWorkerID, "full_name": ""}
+			}
+		}
+
+		bookingReports = append(bookingReports, fiber.Map{
+			"id":                 booking.ID,
+			"student_id":         booking.StudentID,
+			"student": fiber.Map{
+				"id":         student.ID,
+				"student_id": student.StudentID,
+				"full_name":  student.FullName,
+			},
+			"desk_id":            booking.DeskID,
+			"desk_number":        booking.DeskNumber,
+			"booking_type":       booking.BookingType,
+			"queue_number":       booking.QueueNumber,
+			"status":             booking.Status,
+			"assigned_worker_id": booking.AssignedWorkerID,
+			"assigned_worker":    workerInfo,
+			"assigned_at":        booking.AssignedAt,
+			"started_at":         booking.StartedAt,
+			"completed_at":       booking.CompletedAt,
+			"created_at":         booking.CreatedAt,
+			"wait_duration":      waitDuration,
+			"service_duration":   serviceDuration,
+			"booking_ip":         booking.BookingIP,
+			"booking_user_agent": booking.BookingUserAgent,
+			"booking_device":     booking.BookingDevice,
+			"score":              booking.Score,
+			"score_comment":      booking.ScoreComment,
+			"worker_note":        booking.WorkerNote,
+		})
+	}
+
+	totalCompleted := 0
+	for _, worker := range workers {
+		totalCompleted += worker.TotalGradingCompleted + worker.TotalHelpCompleted
+	}
+
+	workerStats := make([]fiber.Map, 0, len(workers))
+	for _, worker := range workers {
+		completed := worker.TotalGradingCompleted + worker.TotalHelpCompleted
+		percent := 0.0
+		if totalCompleted > 0 {
+			percent = float64(completed) * 100 / float64(totalCompleted)
+		}
+		user := workerMap[worker.UserID]
+		activity := workerActivity[worker.UserID]
+		openedCount := 0
+		closedCount := 0
+		var firstOpenedAt *time.Time
+		var lastOpenedAt *time.Time
+		var lastClosedAt *time.Time
+		totalActiveDuration := ""
+		if activity != nil {
+			openedCount = activity.OpenedCount
+			closedCount = activity.ClosedCount
+			firstOpenedAt = activity.FirstOpenedAt
+			lastOpenedAt = activity.LastOpenedAt
+			lastClosedAt = activity.LastClosedAt
+			if activity.TotalActiveDuration > 0 {
+				totalActiveDuration = activity.TotalActiveDuration.String()
+			}
+		}
+
+		workerStats = append(workerStats, fiber.Map{
+			"user_id":            worker.UserID,
+			"full_name":          user.FullName,
+			"total_completed":    completed,
+			"grading_completed":  worker.TotalGradingCompleted,
+			"help_completed":     worker.TotalHelpCompleted,
+			"percent":            percent,
+			"opened_count":       openedCount,
+			"closed_count":       closedCount,
+			"first_opened_at":    firstOpenedAt,
+			"last_opened_at":     lastOpenedAt,
+			"last_closed_at":     lastClosedAt,
+			"total_active_duration": totalActiveDuration,
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data": fiber.Map{
+			"session": fiber.Map{
+				"id":    session.ID,
+				"title": session.Title,
+			},
+			"bookings":     bookingReports,
+			"worker_stats": workerStats,
+		},
+	})
+}
+
+func queueBookingDeviceLabel(userAgent string) string {
+	parsed := ua.Parse(strings.TrimSpace(userAgent))
+	deviceType := "Desktop"
+	if parsed.Mobile {
+		deviceType = "Mobile"
+	} else if parsed.Tablet {
+		deviceType = "Tablet"
+	} else if parsed.Bot {
+		deviceType = "Bot"
+	}
+
+	parts := make([]string, 0, 3)
+	parts = append(parts, deviceType)
+	if parsed.Name != "" {
+		parts = append(parts, parsed.Name)
+	}
+	if parsed.OS != "" {
+		parts = append(parts, parsed.OS)
+	}
+
+	return strings.Join(parts, " / ")
+}
+
 // GET /api/courses/:courseId/queue/sessions/:sessionId/bookings/student/:studentId
 func GetStudentBookingHandler(c fiber.Ctx) error {
 	sessionID := c.Params("sessionId")
@@ -326,6 +616,13 @@ func CancelBookingHandler(c fiber.Ctx) error {
 	}
 	studentID := c.Locals("user_id").(uint)
 	booking, _ := repositories.GetBookingByID(uint(bookingID))
+	if booking != nil {
+		if session, sessionErr := repositories.GetQueueSessionByID(booking.QueueSessionID); sessionErr == nil {
+			if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+				return err
+			}
+		}
+	}
 	if err := repositories.CancelBooking(uint(bookingID), studentID); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
@@ -351,6 +648,14 @@ func GetDeskStatusesHandler(c fiber.Ctx) error {
 // POST /api/courses/:courseId/queue/sessions/:sessionId/worker/join
 func WorkerJoinHandler(c fiber.Ctx) error {
 	sessionID := c.Params("sessionId")
+	session, err := repositories.GetQueueSessionByID(sessionID)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
+	}
+	if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+		return err
+	}
+
 	var input struct {
 		AcceptGrading bool `json:"accept_grading"`
 		AcceptHelp    bool `json:"accept_help"`
@@ -378,9 +683,7 @@ func WorkerJoinHandler(c fiber.Ctx) error {
 		assignedBookingPayload = payload
 	}
 
-	if session, sessionErr := repositories.GetQueueSessionByID(sessionID); sessionErr == nil {
-		writeCourseActivityLog(session.CourseID, userID, "join_queue_worker", "queue", "queue_session", session.ID, session.Title, fiber.Map{"accept_grading": input.AcceptGrading, "accept_help": input.AcceptHelp})
-	}
+	writeCourseActivityLog(session.CourseID, userID, "join_queue_worker", "queue", "queue_session", session.ID, session.Title, fiber.Map{"accept_grading": input.AcceptGrading, "accept_help": input.AcceptHelp})
 	realtime.EmitToQueue(sessionID, "worker-joined", fiber.Map{"worker": worker, "timestamp": time.Now().UnixMilli()})
 	return c.JSON(fiber.Map{"success": true, "data": worker, "assignedBooking": assignedBookingPayload})
 }
@@ -399,6 +702,13 @@ func GetWorkersHandler(c fiber.Ctx) error {
 func WorkerLeaveHandler(c fiber.Ctx) error {
 	sessionID := c.Params("sessionId")
 	userID := c.Locals("user_id").(uint)
+	session, err := repositories.GetQueueSessionByID(sessionID)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
+	}
+	if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+		return err
+	}
 
 	worker, err := repositories.GetWorkerBySessionUser(sessionID, userID)
 	if err != nil {
@@ -422,9 +732,7 @@ func WorkerLeaveHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to leave worker session"})
 	}
 
-	if session, sessionErr := repositories.GetQueueSessionByID(sessionID); sessionErr == nil {
-		writeCourseActivityLog(session.CourseID, userID, "leave_queue_worker", "queue", "queue_session", session.ID, session.Title, fiber.Map{"status": newStatus})
-	}
+	writeCourseActivityLog(session.CourseID, userID, "leave_queue_worker", "queue", "queue_session", session.ID, session.Title, fiber.Map{"status": newStatus})
 	realtime.EmitToQueue(sessionID, "worker-left", fiber.Map{"worker_id": userID, "status": newStatus, "timestamp": time.Now().UnixMilli()})
 
 	return c.JSON(fiber.Map{"success": true, "message": message, "data": fiber.Map{"status": newStatus}})
@@ -434,6 +742,17 @@ func WorkerLeaveHandler(c fiber.Ctx) error {
 func GetWorkerCurrentBookingHandler(c fiber.Ctx) error {
 	sessionID := c.Params("sessionId")
 	userID := c.Locals("user_id").(uint)
+	session, err := repositories.GetQueueSessionByID(sessionID)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
+	}
+	courseExists, isCourseActive, activeErr := repositories.GetCourseActiveState(session.CourseID)
+	if activeErr != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch current booking"})
+	}
+	if !courseExists {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Course not found"})
+	}
 
 	worker, _ := repositories.GetWorkerBySessionUser(sessionID, userID)
 	if worker == nil {
@@ -452,7 +771,7 @@ func GetWorkerCurrentBookingHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch current booking"})
 	}
 
-	if errors.Is(bookingErr, gorm.ErrRecordNotFound) {
+	if errors.Is(bookingErr, gorm.ErrRecordNotFound) && isCourseActive {
 		assignedBooking, assignErr := tryAssignNextBookingAndEmit(sessionID, userID)
 		if assignErr != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch current booking"})
@@ -496,6 +815,16 @@ func WorkerBookingActionHandler(c fiber.Ctx) error {
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
+	}
+
+	existingBooking, err := repositories.GetBookingByID(uint(bookingID))
+	if err != nil || existingBooking == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Booking not found"})
+	}
+	if session, sessionErr := repositories.GetQueueSessionByID(existingBooking.QueueSessionID); sessionErr == nil {
+		if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+			return err
+		}
 	}
 
 	workerID := c.Locals("user_id").(uint)
@@ -542,6 +871,16 @@ func CompleteQueueBookingCompatHandler(c fiber.Ctx) error {
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
+	}
+
+	existingBooking, lookupErr := repositories.GetBookingByID(uint(bookingID))
+	if lookupErr != nil || existingBooking == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Booking not found"})
+	}
+	if session, sessionErr := repositories.GetQueueSessionByID(existingBooking.QueueSessionID); sessionErr == nil {
+		if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+			return err
+		}
 	}
 
 	workerID := c.Locals("user_id").(uint)
@@ -593,6 +932,16 @@ func SkipQueueBookingCompatHandler(c fiber.Ctx) error {
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
+	}
+
+	existingBooking, lookupErr := repositories.GetBookingByID(uint(bookingID))
+	if lookupErr != nil || existingBooking == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Booking not found"})
+	}
+	if session, sessionErr := repositories.GetQueueSessionByID(existingBooking.QueueSessionID); sessionErr == nil {
+		if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+			return err
+		}
 	}
 
 	workerID := c.Locals("user_id").(uint)
@@ -691,6 +1040,20 @@ func loadQueueCourse(courseID string) (*models.Course, error) {
 		return nil, err
 	}
 	return &course, nil
+}
+
+func queueEnsureCourseWritable(c fiber.Ctx, courseID string) error {
+	courseExists, isActive, err := repositories.GetCourseActiveState(courseID)
+	if err != nil {
+		return queueLegacyError(c, 500, "ไม่สามารถตรวจสอบสถานะรายวิชาได้")
+	}
+	if !courseExists {
+		return queueLegacyError(c, 404, "ไม่พบรายวิชา")
+	}
+	if !isActive {
+		return queueLegacyError(c, 403, "รายวิชานี้ถูกปิดแล้วและอนุญาตให้ดูข้อมูลได้อย่างเดียว")
+	}
+	return nil
 }
 
 func loadQueueClassroom(classroomID string) (*models.Classroom, error) {
@@ -1551,6 +1914,9 @@ func CreateQueueBookingPublicHandler(c fiber.Ctx) error {
 	if !queueCourseScopeMatches(c, session.CourseID) {
 		return queueLegacyError(c, 404, "ไม่พบการจองคิวที่เปิดอยู่ หรือ PIN ไม่ถูกต้อง")
 	}
+	if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+		return err
+	}
 	if session.Status == "paused" {
 		return queueLegacyError(c, 400, "ปิดรับการจองคิวชั่วคราว กรุณารอสักครู่", fiber.Map{"code": "SESSION_PAUSED"})
 	}
@@ -1583,6 +1949,9 @@ func CreateQueueBookingPublicHandler(c fiber.Ctx) error {
 		DeskNumber:  int(input.DeskNumber),
 		BookingType: input.BookingType,
 		Note:        input.Note,
+		BookingIP:   strings.TrimSpace(c.IP()),
+		UserAgent:   strings.TrimSpace(c.Get("User-Agent")),
+		Device:      queueBookingDeviceLabel(c.Get("User-Agent")),
 		IsLate:      queueBookingIsAfterCutoff(session, time.Now()),
 		LateReason:  queueBookingLateReason(session),
 	})
@@ -1735,6 +2104,11 @@ func CancelQueueBookingPublicHandler(c fiber.Ctx) error {
 	}
 	if session != nil && !queueCourseScopeMatches(c, session.CourseID) {
 		return queueLegacyError(c, 404, "ไม่พบข้อมูลการจอง")
+	}
+	if session != nil {
+		if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+			return err
+		}
 	}
 
 	if booking.Status != "waiting" {
@@ -1972,6 +2346,9 @@ func UpdateQueueSessionStatusPublicHandler(c fiber.Ctx) error {
 	if !queueCourseScopeMatches(c, session.CourseID) {
 		return queueLegacyError(c, 404, "ไม่พบ Queue Session")
 	}
+	if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+		return err
+	}
 
 	if err := updateQueueSessionStatusCompat(session, input.Status, false); err != nil {
 		return queueLegacyError(c, 400, err.Error())
@@ -2007,6 +2384,9 @@ func UpdateQueueSessionCutoffPublicHandler(c fiber.Ctx) error {
 	}
 	if !queueCourseScopeMatches(c, session.CourseID) {
 		return queueLegacyError(c, 404, "ไม่พบ Queue Session")
+	}
+	if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+		return err
 	}
 
 	updates := map[string]interface{}{
@@ -2058,6 +2438,9 @@ func UpdateQueueSessionStatusCompatHandler(c fiber.Ctx) error {
 	}
 	if !queueCourseScopeMatches(c, session.CourseID) {
 		return queueLegacyError(c, 404, "ไม่พบ Queue Session")
+	}
+	if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+		return err
 	}
 
 	if err := updateQueueSessionStatusCompat(session, input.Status, true); err != nil {

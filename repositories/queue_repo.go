@@ -318,6 +318,9 @@ type BookingInput struct {
 	DeskNumber  int
 	BookingType string // grading | help
 	Note        string
+	BookingIP   string
+	UserAgent   string
+	Device      string
 	IsLate      bool
 	LateReason  string
 }
@@ -331,16 +334,19 @@ func CreateBooking(sessionID string, input BookingInput) (*models.QueueBooking, 
 		}
 
 		booking = &models.QueueBooking{
-			QueueSessionID: sessionID,
-			StudentID:      input.StudentID,
-			DeskID:         input.DeskID,
-			DeskNumber:     input.DeskNumber,
-			BookingType:    input.BookingType,
-			QueueNumber:    queueNumber,
-			Note:           input.Note,
-			IsLateBooking:  input.IsLate,
-			LateReason:     input.LateReason,
-			Status:         "waiting",
+			QueueSessionID:   sessionID,
+			StudentID:        input.StudentID,
+			DeskID:           input.DeskID,
+			DeskNumber:       input.DeskNumber,
+			BookingType:      input.BookingType,
+			QueueNumber:      queueNumber,
+			Note:             input.Note,
+			BookingIP:        input.BookingIP,
+			BookingUserAgent: input.UserAgent,
+			BookingDevice:    input.Device,
+			IsLateBooking:    input.IsLate,
+			LateReason:       input.LateReason,
+			Status:           "waiting",
 		}
 		if err := tx.Create(booking).Error; err != nil {
 			if isActiveQueueBookingConflict(err) {
@@ -460,6 +466,12 @@ func GetBookingsBySession(sessionID string) ([]models.QueueBooking, error) {
 	return bookings, err
 }
 
+func GetWorkersBySession(sessionID string) ([]models.QueueWorker, error) {
+	var workers []models.QueueWorker
+	err := config.DB.Where("queue_session_id = ?", sessionID).Order("user_id ASC").Find(&workers).Error
+	return workers, err
+}
+
 func GetStudentActiveBooking(sessionID string, studentID uint) (*models.QueueBooking, error) {
 	var b models.QueueBooking
 	err := config.DB.Where("queue_session_id = ? AND student_id = ? AND status IN ('waiting','in_progress')", sessionID, studentID).First(&b).Error
@@ -543,12 +555,6 @@ func WorkerUpdateStatus(sessionID string, userID uint, status string) error {
 	return config.DB.Model(&models.QueueWorker{}).
 		Where("queue_session_id = ? AND user_id = ?", sessionID, userID).
 		Updates(map[string]interface{}{"status": status, "last_active_at": now}).Error
-}
-
-func GetWorkersBySession(sessionID string) ([]models.QueueWorker, error) {
-	var workers []models.QueueWorker
-	err := config.DB.Where("queue_session_id = ?", sessionID).Find(&workers).Error
-	return workers, err
 }
 
 // AssignNextWaitingBookingToWorker attempts to atomically assign the next matching waiting booking
