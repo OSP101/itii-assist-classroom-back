@@ -300,6 +300,26 @@ func MigratePerformanceIndexes() {
 			name: "queue_workers_session_user_unique",
 			sql:  `CREATE UNIQUE INDEX IF NOT EXISTS uq_queue_workers_session_user ON queue_workers (queue_session_id, user_id)`,
 		},
+		{
+			name: "queue_bookings_session_status_assigned_worker",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_queue_bookings_session_status_assigned_worker ON queue_bookings (queue_session_id, status, assigned_worker_id, queue_number)`,
+		},
+		{
+			name: "queue_bookings_session_worker_active",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_queue_bookings_session_worker_active ON queue_bookings (queue_session_id, assigned_worker_id, status) WHERE status IN ('waiting','in_progress')`,
+		},
+		{
+			name: "scores_assignment_student",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_scores_assignment_student ON scores (assignment_id, student_id)`,
+		},
+		{
+			name: "user_notifications_user_is_read",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_user_notifications_user_is_read ON user_notifications (user_id, is_read) WHERE is_read = false`,
+		},
+		{
+			name: "fcm_tokens_session_type",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_fcm_tokens_session_type ON fcm_tokens (session_id, user_type)`,
+		},
 	}
 
 	ensuredCount := 0

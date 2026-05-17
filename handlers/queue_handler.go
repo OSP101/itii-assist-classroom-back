@@ -8,6 +8,7 @@ import (
 	"itii-assist/models"
 	"itii-assist/realtime"
 	"itii-assist/repositories"
+	"itii-assist/services"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,15 @@ import (
 	ua "github.com/mileusna/useragent"
 	"gorm.io/gorm"
 )
+
+// QueueHandler — struct-based handler with audit logger
+type QueueHandler struct {
+	auditLogger *services.AuditLogger
+}
+
+func NewQueueHandler(auditLogger *services.AuditLogger) *QueueHandler {
+	return &QueueHandler{auditLogger: auditLogger}
+}
 
 // GET /api/courses/:courseId/queue/sessions
 func GetQueueSessionsHandler(c fiber.Ctx) error {
@@ -191,7 +201,7 @@ func DeleteQueueSessionHandler(c fiber.Ctx) error {
 }
 
 // POST /api/courses/:courseId/queue/sessions/:sessionId/start
-func StartQueueSessionHandler(c fiber.Ctx) error {
+func (h *QueueHandler) StartQueueSession(c fiber.Ctx) error {
 	sessionID := c.Params("sessionId")
 	session, err := repositories.GetQueueSessionByID(sessionID)
 	if err != nil {
@@ -206,6 +216,16 @@ func StartQueueSessionHandler(c fiber.Ctx) error {
 	actorID := c.Locals("user_id").(uint)
 	logCourseActivity(c, session.CourseID, actorID, "start_queue_session", "queue", "queue_session", session.ID, session.Title, nil)
 	go createNotificationsForCourseMembers(session.CourseID, actorID, "queue_opened", "เปิดคิว: "+session.Title, "มีการเปิดคิวในวิชา", "/classroom/"+session.CourseID+"/queue", buildNotifData(session.CourseID, session.ID, "queue_session", ""))
+	reqID, _, ip := services.ExtractMeta(c)
+	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
+		CourseID:    session.CourseID,
+		ActorUserID: actorID,
+		Action:      services.ActionQueueSessionOpened,
+		TargetType:  "queue_session",
+		TargetID:    session.ID,
+		RequestID:   reqID,
+		IPAddress:   ip,
+	})
 	return c.JSON(fiber.Map{"success": true, "message": "Session started"})
 }
 
@@ -244,7 +264,7 @@ func ResumeQueueSessionHandler(c fiber.Ctx) error {
 }
 
 // POST /api/courses/:courseId/queue/sessions/:sessionId/close
-func CloseQueueSessionHandler(c fiber.Ctx) error {
+func (h *QueueHandler) CloseQueueSession(c fiber.Ctx) error {
 	sessionID := c.Params("sessionId")
 	session, err := repositories.GetQueueSessionByID(sessionID)
 	if err != nil {
@@ -259,6 +279,16 @@ func CloseQueueSessionHandler(c fiber.Ctx) error {
 	actorID := c.Locals("user_id").(uint)
 	logCourseActivity(c, session.CourseID, actorID, "close_queue_session", "queue", "queue_session", session.ID, session.Title, nil)
 	go createNotificationsForCourseMembers(session.CourseID, actorID, "queue_closed", "ปิดคิว: "+session.Title, "มีการปิดคิวในวิชา", "/classroom/"+session.CourseID+"/queue", buildNotifData(session.CourseID, session.ID, "queue_session", ""))
+	reqID, _, ip := services.ExtractMeta(c)
+	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
+		CourseID:    session.CourseID,
+		ActorUserID: actorID,
+		Action:      services.ActionQueueSessionClosed,
+		TargetType:  "queue_session",
+		TargetID:    session.ID,
+		RequestID:   reqID,
+		IPAddress:   ip,
+	})
 	return c.JSON(fiber.Map{"success": true, "message": "Session closed"})
 }
 
@@ -279,7 +309,7 @@ func VerifyQueuePINHandler(c fiber.Ctx) error {
 }
 
 // POST /api/courses/:courseId/queue/sessions/:sessionId/bookings
-func CreateBookingHandler(c fiber.Ctx) error {
+func (h *QueueHandler) CreateBooking(c fiber.Ctx) error {
 	sessionID := c.Params("sessionId")
 	session, err := repositories.GetQueueSessionByID(sessionID)
 	if err != nil {
@@ -314,8 +344,20 @@ func CreateBookingHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
-	logCourseActivity(c, session.CourseID, c.Locals("user_id").(uint), "create_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"queue_session_id": booking.QueueSessionID, "student_id": booking.StudentID, "desk_number": booking.DeskNumber, "booking_type": booking.BookingType})
+	actorID := c.Locals("user_id").(uint)
+	logCourseActivity(c, session.CourseID, actorID, "create_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"queue_session_id": booking.QueueSessionID, "student_id": booking.StudentID, "desk_number": booking.DeskNumber, "booking_type": booking.BookingType})
 	emitQueueBookingChanged(sessionID, "new-booking", booking)
+	reqID, _, ip := services.ExtractMeta(c)
+	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
+		CourseID:    session.CourseID,
+		ActorUserID: actorID,
+		Action:      services.ActionQueueBookingCreated,
+		TargetType:  "queue_booking",
+		TargetID:    strconv.Itoa(int(booking.ID)),
+		Description: fmt.Sprintf("Student %d booked desk %s", input.StudentID, input.DeskID),
+		RequestID:   reqID,
+		IPAddress:   ip,
+	})
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": booking})
 }
 
@@ -2311,6 +2353,7 @@ func GetQueueDeskStatusesPublicHandler(c fiber.Ctx) error {
 		"data": fiber.Map{
 			"session": fiber.Map{
 				"id":                session.ID,
+				"course_id":         session.CourseID,
 				"title":             session.Title,
 				"pin_code":          session.PinCode,
 				"status":            session.Status,
@@ -2602,4 +2645,56 @@ func buildWorkerBookingPayload(booking *models.QueueBooking) (fiber.Map, error) 
 			"full_name":  student.FullName,
 		},
 	}, nil
+}
+
+// GET /api/admin/queue/sessions/active
+// Returns all active or paused queue sessions across all courses (admin-only)
+func GetActiveQueueSessionsAdminHandler(c fiber.Ctx) error {
+	type ActiveSessionRow struct {
+		ID                string     `json:"id"`
+		Title             string     `json:"title"`
+		Status            string     `json:"status"`
+		PinCode           string     `json:"pin_code"`
+		CourseID          string     `json:"course_id"`
+		CourseName        string     `json:"course_name"`
+		CourseCode        string     `json:"course_code"`
+		ClassroomID       string     `json:"classroom_id"`
+		ClassroomName     string     `json:"classroom_name"`
+		ClassroomBuilding string     `json:"classroom_building"`
+		StartTime         *time.Time `json:"start_time,omitempty"`
+		CreatedAt         time.Time  `json:"created_at"`
+	}
+
+	var rows []ActiveSessionRow
+	if err := config.DB.Raw(`
+		SELECT
+			qs.id,
+			qs.title,
+			qs.status,
+			qs.pin_code,
+			qs.course_id,
+			c.name AS course_name,
+			c.code AS course_code,
+			qs.classroom_id,
+			cl.name AS classroom_name,
+			cl.building AS classroom_building,
+			qs.start_time,
+			qs.created_at
+		FROM queue_sessions qs
+		JOIN courses c ON c.id = qs.course_id
+		JOIN classrooms cl ON cl.id = qs.classroom_id
+		WHERE qs.status IN ('active', 'paused')
+		ORDER BY qs.created_at ASC
+	`).Scan(&rows).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"error": fiber.Map{"message": "ไม่สามารถโหลดข้อมูลได้"}})
+	}
+
+	if rows == nil {
+		rows = []ActiveSessionRow{}
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    rows,
+	})
 }

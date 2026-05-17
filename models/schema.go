@@ -211,15 +211,17 @@ type CourseActivityLog struct {
 	ActorUserID uint           `gorm:"not null;index" json:"actor_user_id"`
 	ActorEmail  string         `gorm:"type:varchar(255)" json:"actor_email"` // snapshot at event time
 	ActorRole   string         `gorm:"type:varchar(30)" json:"actor_role"`   // snapshot at event time
-	Action      string         `gorm:"type:varchar(100);not null" json:"action"`
+	Action      string         `gorm:"type:varchar(100);not null;index" json:"action"`
 	Category    string         `gorm:"type:varchar(30);default:'general'" json:"category"`
 	TargetType  string         `gorm:"type:varchar(50)" json:"target_type"`
 	TargetID    string         `gorm:"type:varchar(100)" json:"target_id"`
 	TargetName  string         `gorm:"type:varchar(255)" json:"target_name"`
+	Description string         `gorm:"type:text" json:"description"`
 	Detail      datatypes.JSON `gorm:"type:jsonb" json:"detail,omitempty"`
+	RequestID   string         `gorm:"type:varchar(128);index" json:"request_id"`
 	IPAddress   string         `gorm:"type:varchar(45)" json:"ip_address"`  // IPv4 or IPv6
 	UserAgent   string         `gorm:"type:varchar(512)" json:"user_agent"` // device/browser
-	CreatedAt   time.Time      `gorm:"type:timestamptz" json:"created_at"`
+	CreatedAt   time.Time      `gorm:"type:timestamptz;index" json:"created_at"`
 }
 
 // =============================================================================
@@ -642,7 +644,7 @@ type SystemLog struct {
 	ActorUserID    *uint          `gorm:"index" json:"actor_user_id,omitempty"`
 	SessionID      string         `gorm:"type:varchar(128)" json:"session_id"`
 	AuthMethod     string         `gorm:"type:varchar(50)" json:"auth_method"`
-	Action         string         `gorm:"type:varchar(255);not null" json:"action"`
+	Action         string         `gorm:"type:varchar(255);not null;index" json:"action"`
 	HTTPMethod     string         `gorm:"type:varchar(10)" json:"http_method"`
 	URL            string         `gorm:"type:varchar(2048)" json:"url"`
 	QueryParams    datatypes.JSON `gorm:"type:jsonb" json:"query_params,omitempty"`
@@ -663,7 +665,9 @@ type SystemLog struct {
 	DeviceType     string         `gorm:"type:varchar(50)" json:"device_type"`
 	Browser        string         `gorm:"type:varchar(100)" json:"browser"`
 	OS             string         `gorm:"type:varchar(100)" json:"os"`
-	CreatedAt      time.Time      `gorm:"type:timestamptz" json:"created_at"`
+	RequestID      string         `gorm:"type:varchar(128);index" json:"request_id"`
+	TraceID        string         `gorm:"type:varchar(128);index" json:"trace_id"`
+	CreatedAt      time.Time      `gorm:"type:timestamptz;index" json:"created_at"`
 }
 
 type AppConfig struct {

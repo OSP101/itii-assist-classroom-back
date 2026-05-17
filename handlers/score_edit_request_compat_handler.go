@@ -7,6 +7,7 @@ import (
 	"itii-assist/config"
 	"itii-assist/models"
 	"itii-assist/repositories"
+	"itii-assist/services"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,6 +18,16 @@ import (
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
+
+// ScoreEditRequestHandler — struct-based handler with audit logger
+
+type ScoreEditRequestHandler struct {
+	auditLogger *services.AuditLogger
+}
+
+func NewScoreEditRequestHandler(auditLogger *services.AuditLogger) *ScoreEditRequestHandler {
+	return &ScoreEditRequestHandler{auditLogger: auditLogger}
+}
 
 type scoreEditRequestListRow struct {
 	ID                 uint           `gorm:"column:id"`
@@ -883,7 +894,7 @@ func CancelScoreEditRequestCompatHandler(c fiber.Ctx) error {
 }
 
 // POST /api/score-edit-requests/:id/approve
-func ApproveScoreEditRequestCompatHandler(c fiber.Ctx) error {
+func (h *ScoreEditRequestHandler) ApproveRequest(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid ID"})
@@ -905,6 +916,18 @@ func ApproveScoreEditRequestCompatHandler(c fiber.Ctx) error {
 		return c.Status(status).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
 	logCourseActivity(c, courseID, reviewerID, "approve_score_edit_request", "score", "assignment", "", assignmentName, fiber.Map{"count": count, "request_id": id})
+	reqID, traceID, ip := services.ExtractMeta(c)
+	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
+		CourseID:    courseID,
+		ActorUserID: reviewerID,
+		Action:      services.ActionScoreEditRequestApproved,
+		TargetType:  "score_edit_request",
+		TargetID:    strconv.Itoa(int(id)),
+		Description: fmt.Sprintf("Score edit request %d approved", id),
+		RequestID:   reqID,
+		IPAddress:   ip,
+	})
+	_ = traceID
 	if requesterID != 0 {
 		go createNotificationForUser(requesterID, courseID, "score_edit_approved", "คำขอแก้ไขคะแนนได้รับการอนุมัติ", "คำขอแก้ไขคะแนนของคุณได้รับการอนุมัติแล้ว", "/classroom/"+courseID+"/approval", buildNotifData(courseID, fmt.Sprint(id), "score_edit_request", ""))
 	}
@@ -912,7 +935,7 @@ func ApproveScoreEditRequestCompatHandler(c fiber.Ctx) error {
 }
 
 // POST /api/score-edit-requests/:id/reject
-func RejectScoreEditRequestCompatHandler(c fiber.Ctx) error {
+func (h *ScoreEditRequestHandler) RejectRequest(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid ID"})
@@ -936,6 +959,18 @@ func RejectScoreEditRequestCompatHandler(c fiber.Ctx) error {
 		return c.Status(status).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
 	logCourseActivity(c, courseID, reviewerID, "reject_score_edit_request", "score", "assignment", "", assignmentName, fiber.Map{"count": count, "request_id": id})
+	reqID, traceID, ip := services.ExtractMeta(c)
+	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
+		CourseID:    courseID,
+		ActorUserID: reviewerID,
+		Action:      services.ActionScoreEditRequestRejected,
+		TargetType:  "score_edit_request",
+		TargetID:    strconv.Itoa(int(id)),
+		Description: fmt.Sprintf("Score edit request %d rejected", id),
+		RequestID:   reqID,
+		IPAddress:   ip,
+	})
+	_ = traceID
 	if requesterID != 0 {
 		go createNotificationForUser(requesterID, courseID, "score_edit_rejected", "คำขอแก้ไขคะแนนถูกปฏิเสธ", "คำขอแก้ไขคะแนนของคุณถูกปฏิเสธ", "/classroom/"+courseID+"/approval", buildNotifData(courseID, fmt.Sprint(id), "score_edit_request", ""))
 	}

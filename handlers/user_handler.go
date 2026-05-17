@@ -4,12 +4,22 @@ import (
 	"crypto/rand"
 	"itii-assist/models"
 	"itii-assist/repositories"
+	"itii-assist/services"
 	"itii-assist/utils"
 	"math/big"
 	"strconv"
 
 	"github.com/gofiber/fiber/v3"
 )
+
+// UserHandler — struct-based handler with audit logger
+type UserHandler struct {
+	auditLogger *services.AuditLogger
+}
+
+func NewUserHandler(auditLogger *services.AuditLogger) *UserHandler {
+	return &UserHandler{auditLogger: auditLogger}
+}
 
 // =============================================================================
 // Helper: สร้างรหัสผ่านแบบสุ่ม 12 ตัว
@@ -277,7 +287,7 @@ func UpdateUserHandler(c fiber.Ctx) error {
 // PATCH /api/users/:id/status
 // =============================================================================
 
-func ToggleUserStatusHandler(c fiber.Ctx) error {
+func (h *UserHandler) ToggleUserStatus(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ID ไม่ถูกต้อง"})
@@ -365,7 +375,25 @@ func ToggleUserStatusHandler(c fiber.Ctx) error {
 		"target_type":     "user",
 		"target_snapshot": userSnapshotForAudit(user),
 	})
-
+	reqID, traceID, ip := services.ExtractMeta(c)
+	auditAction := services.ActionAdminUserDeactivated
+	auditSeverity := "warn"
+	if user.IsActive {
+		auditAction = services.ActionAdminUserActivated
+		auditSeverity = "info"
+	}
+	h.auditLogger.LogSystem(c.Context(), services.SystemEvent{
+		ActorUserID:  actorID,
+		Action:       auditAction,
+		LogType:      "admin",
+		Severity:     auditSeverity,
+		ResourceType: "user",
+		ResourceID:   strconv.FormatUint(id, 10),
+		IPAddress:    ip,
+		UserAgent:    c.Get("User-Agent"),
+		RequestID:    reqID,
+		TraceID:      traceID,
+	})
 	return c.JSON(fiber.Map{
 		"success": true,
 		"message": msg,

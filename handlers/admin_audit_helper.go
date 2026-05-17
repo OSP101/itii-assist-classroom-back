@@ -6,6 +6,7 @@ import (
 
 	"itii-assist/config"
 	"itii-assist/models"
+	"itii-assist/utils"
 
 	"github.com/gofiber/fiber/v3"
 	"gorm.io/datatypes"
@@ -31,6 +32,7 @@ func makeAdminAuditDetail(riskLevel string, detail fiber.Map) datatypes.JSON {
 }
 
 func logPrivilegedAdminAction(c fiber.Ctx, actorID uint, action string, severity string, resourceType string, resourceID string, detail fiber.Map) {
+	deviceType, browser, osName := utils.ParseUserAgent(c.Get("User-Agent"))
 	logEntry := models.SystemLog{
 		LogType:      "security",
 		Severity:     severity,
@@ -40,6 +42,9 @@ func logPrivilegedAdminAction(c fiber.Ctx, actorID uint, action string, severity
 		ResourceID:   resourceID,
 		IPAddress:    c.IP(),
 		UserAgent:    c.Get("User-Agent"),
+		DeviceType:   deviceType,
+		Browser:      browser,
+		OS:           osName,
 		HTTPMethod:   c.Method(),
 		URL:          c.OriginalURL(),
 		Detail:       makeAdminAuditDetail(severity, detail),

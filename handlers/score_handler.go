@@ -5,6 +5,7 @@ import (
 	"itii-assist/config"
 	"itii-assist/models"
 	"itii-assist/repositories"
+	"itii-assist/services"
 	"sort"
 	"strconv"
 	"strings"
@@ -66,6 +67,16 @@ type scoreLinkedSessionRow struct {
 	Title     string    `gorm:"column:title"`
 	StartTime time.Time `gorm:"column:start_time"`
 	EndTime   time.Time `gorm:"column:end_time"`
+}
+
+// ScoreHandler — struct-based handler with audit logger
+
+type ScoreHandler struct {
+	auditLogger *services.AuditLogger
+}
+
+func NewScoreHandler(auditLogger *services.AuditLogger) *ScoreHandler {
+	return &ScoreHandler{auditLogger: auditLogger}
 }
 
 func uniqueScoreUintValues(values []uint) []uint {
@@ -1138,7 +1149,7 @@ func min(a int, b int) int {
 }
 
 // POST /api/scores
-func SubmitScoreHandler(c fiber.Ctx) error {
+func (h *ScoreHandler) SubmitScore(c fiber.Ctx) error {
 	var input struct {
 		AssignmentID uint    `json:"assignment_id"`
 		StudentID    *uint   `json:"student_id"`
@@ -1174,6 +1185,18 @@ func SubmitScoreHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to submit score"})
 	}
 	logCourseActivity(c, assignment.CourseID, userID, "submit_score", "score", "assignment", input.AssignmentID, assignment.Name, fiber.Map{"student_id": input.StudentID, "group_id": input.GroupID, "sub_item_id": input.SubItemID, "score": input.Score})
+	reqID, traceID, ip := services.ExtractMeta(c)
+	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
+		CourseID:    assignment.CourseID,
+		ActorUserID: userID,
+		Action:      services.ActionScoreUpdated,
+		TargetType:  "score",
+		TargetID:    strconv.Itoa(int(score.ID)),
+		Description: fmt.Sprintf("Submitted score for assignment %d", score.AssignmentID),
+		RequestID:   reqID,
+		IPAddress:   ip,
+	})
+	_ = traceID
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": score})
 }
 

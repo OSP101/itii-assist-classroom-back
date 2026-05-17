@@ -7,12 +7,23 @@ import (
 	"itii-assist/observability"
 	"itii-assist/realtime"
 	"itii-assist/repositories"
+	"itii-assist/services"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
 )
+
+// AttendanceHandler — struct-based handler with audit logger
+
+type AttendanceHandler struct {
+	auditLogger *services.AuditLogger
+}
+
+func NewAttendanceHandler(auditLogger *services.AuditLogger) *AttendanceHandler {
+	return &AttendanceHandler{auditLogger: auditLogger}
+}
 
 func uniqueUintValues(values []uint) []uint {
 	seen := make(map[uint]bool, len(values))
@@ -464,7 +475,7 @@ func GetAttendanceSessionHandler(c fiber.Ctx) error {
 }
 
 // POST /api/attendance
-func CreateAttendanceSessionHandler(c fiber.Ctx) error {
+func (h *AttendanceHandler) CreateAttendanceSession(c fiber.Ctx) error {
 	var input struct {
 		CourseID             string    `json:"course_id"`
 		CourseSectionID      *uint     `json:"course_section_id"`
@@ -559,6 +570,16 @@ func CreateAttendanceSessionHandler(c fiber.Ctx) error {
 		"/classroom/"+input.CourseID+"/attendance",
 		buildNotifData(input.CourseID, fmt.Sprint(session.ID), "attendance_session", ""),
 	)
+	reqID, _, ip := services.ExtractMeta(c)
+	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
+		CourseID:    session.CourseID,
+		ActorUserID: userID,
+		Action:      services.ActionAttendanceSessionCreated,
+		TargetType:  "attendance_session",
+		TargetID:    strconv.Itoa(int(session.ID)),
+		RequestID:   reqID,
+		IPAddress:   ip,
+	})
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": attendanceSessionPayload(session, sectionIDs)})
 }
 
@@ -716,7 +737,7 @@ func DeleteAttendanceSessionHandler(c fiber.Ctx) error {
 }
 
 // PATCH /api/attendance/:id/records/:studentId
-func UpdateAttendanceRecordHandler(c fiber.Ctx) error {
+func (h *AttendanceHandler) UpdateAttendanceRecord(c fiber.Ctx) error {
 	sessionID, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid session ID"})
@@ -743,11 +764,23 @@ func UpdateAttendanceRecordHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update record"})
 	}
 	logCourseActivity(c, detail.CourseID, updatedBy, "update_attendance_record", "attendance", "attendance_session", detail.ID, detail.Title, fiber.Map{"student_id": studentID, "status": input.Status})
+	reqID, traceID, ip := services.ExtractMeta(c)
+	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
+		CourseID:    detail.CourseID,
+		ActorUserID: updatedBy,
+		Action:      services.ActionAttendanceRecordUpdated,
+		TargetType:  "attendance_record",
+		TargetID:    strconv.Itoa(int(studentID)),
+		Description: fmt.Sprintf("Attendance updated for student %d in session %d", studentID, sessionID),
+		RequestID:   reqID,
+		IPAddress:   ip,
+	})
+	_ = traceID
 	emitAttendanceRecordUpdated(uint(sessionID), uint(studentID))
 	return c.JSON(fiber.Map{"success": true, "message": "Record updated"})
 }
 
-func UpdateAttendanceRecordByRecordIDHandler(c fiber.Ctx) error {
+func (h *AttendanceHandler) UpdateAttendanceRecordByRecordID(c fiber.Ctx) error {
 	sessionID, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid session ID"})
@@ -782,6 +815,18 @@ func UpdateAttendanceRecordByRecordIDHandler(c fiber.Ctx) error {
 	detail, err := repositories.GetAttendanceSession(uint(sessionID))
 	if err == nil {
 		logCourseActivity(c, detail.CourseID, updatedBy, "update_attendance_record", "attendance", "attendance_session", detail.ID, detail.Title, fiber.Map{"student_id": record.StudentID, "record_id": record.ID, "status": record.Status})
+		reqID, traceID, ip := services.ExtractMeta(c)
+		h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
+			CourseID:    detail.CourseID,
+			ActorUserID: updatedBy,
+			Action:      services.ActionAttendanceRecordUpdated,
+			TargetType:  "attendance_record",
+			TargetID:    strconv.Itoa(int(record.ID)),
+			Description: fmt.Sprintf("Attendance updated for student %d in session %d", record.StudentID, sessionID),
+			RequestID:   reqID,
+			IPAddress:   ip,
+		})
+		_ = traceID
 	}
 	emitAttendanceRecordUpdated(uint(sessionID), record.StudentID)
 

@@ -723,15 +723,21 @@ func CompleteTwoFALoginHandler(c fiber.Ctx) error {
 	}
 
 	actorUserID := user.ID
-	_ = config.DB.Create(&models.SystemLog{
-		LogType:     "auth",
-		Severity:    "info",
-		ActorUserID: &actorUserID,
-		Action:      "2fa_login_success",
-		IPAddress:   c.IP(),
-		UserAgent:   c.Get("User-Agent"),
-		CreatedAt:   time.Now(),
-	}).Error
+	{
+		dt, br, osn := utils.ParseUserAgent(c.Get("User-Agent"))
+		_ = config.DB.Create(&models.SystemLog{
+			LogType:     "auth",
+			Severity:    "info",
+			ActorUserID: &actorUserID,
+			Action:      "2fa_login_success",
+			IPAddress:   c.IP(),
+			UserAgent:   c.Get("User-Agent"),
+			DeviceType:  dt,
+			Browser:     br,
+			OS:          osn,
+			CreatedAt:   time.Now(),
+		}).Error
+	}
 
 	return c.JSON(fiber.Map{
 		"success": true,

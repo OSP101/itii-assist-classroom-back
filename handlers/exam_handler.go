@@ -4,12 +4,22 @@ import (
 	"errors"
 	"fmt"
 	"itii-assist/repositories"
+	"itii-assist/services"
 	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
 	"gorm.io/gorm"
 )
+
+// ExamHandler — struct-based handler with audit logger
+type ExamHandler struct {
+	auditLogger *services.AuditLogger
+}
+
+func NewExamHandler(auditLogger *services.AuditLogger) *ExamHandler {
+	return &ExamHandler{auditLogger: auditLogger}
+}
 
 // GET /api/courses/:courseId/exam-settings
 func GetExamSettingsHandler(c fiber.Ctx) error {
@@ -66,7 +76,7 @@ func GetExamScoreStatsHandler(c fiber.Ctx) error {
 }
 
 // POST /api/courses/:courseId/exam-scores
-func UpsertExamScoreHandler(c fiber.Ctx) error {
+func (h *ExamHandler) UpsertExamScore(c fiber.Ctx) error {
 	var input struct {
 		ExamSettingID uint     `json:"exam_setting_id"`
 		StudentID     uint     `json:"student_id"`
@@ -103,6 +113,16 @@ func UpsertExamScoreHandler(c fiber.Ctx) error {
 	}
 	courseID := c.Params("courseId")
 	logCourseActivity(c, courseID, gradedBy, "submit_exam_score", "score", "student", input.StudentID, "", fiber.Map{"exam_setting_id": input.ExamSettingID, "score": input.Score})
+	reqID, _, ip := services.ExtractMeta(c)
+	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
+		CourseID:    courseID,
+		ActorUserID: gradedBy,
+		Action:      services.ActionExamScoreUpdated,
+		TargetType:  "exam_score",
+		TargetID:    strconv.Itoa(int(saved.ID)),
+		RequestID:   reqID,
+		IPAddress:   ip,
+	})
 	return c.JSON(fiber.Map{"success": true, "data": saved, "message": "บันทึกคะแนนสำเร็จ"})
 }
 

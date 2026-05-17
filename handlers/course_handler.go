@@ -6,6 +6,7 @@ import (
 	"itii-assist/middlewares"
 	"itii-assist/models"
 	"itii-assist/repositories"
+	"itii-assist/services"
 	"itii-assist/utils"
 	"log"
 	"strconv"
@@ -14,6 +15,15 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"gorm.io/gorm"
 )
+
+// CourseHandler — struct-based handler with audit logger
+type CourseHandler struct {
+	auditLogger *services.AuditLogger
+}
+
+func NewCourseHandler(auditLogger *services.AuditLogger) *CourseHandler {
+	return &CourseHandler{auditLogger: auditLogger}
+}
 
 // =============================================================================
 // GET /api/courses/instructors
@@ -756,7 +766,7 @@ func RemoveSectionHandler(c fiber.Ctx) error {
 // =============================================================================
 
 // POST /api/courses/:id/tas
-func AddTAHandler(c fiber.Ctx) error {
+func (h *CourseHandler) AddTA(c fiber.Ctx) error {
 	courseID := c.Params("id")
 	actorID := c.Locals("user_id").(uint)
 	actorRole := c.Locals("user_role").(string)
@@ -800,6 +810,16 @@ func AddTAHandler(c fiber.Ctx) error {
 			"user_id": input.UserID,
 			"role":    "ta",
 		},
+	})
+	reqID, _, ip := services.ExtractMeta(c)
+	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
+		CourseID:    courseID,
+		ActorUserID: actorID,
+		Action:      services.ActionCourseTAAdded,
+		TargetType:  "ta",
+		TargetID:    strconv.Itoa(int(input.UserID)),
+		RequestID:   reqID,
+		IPAddress:   ip,
 	})
 	return c.Status(201).JSON(fiber.Map{"success": true, "message": "เพิ่มผู้ช่วยสอนสำเร็จ"})
 }
@@ -859,7 +879,7 @@ func BulkAddTAsHandler(c fiber.Ctx) error {
 }
 
 // DELETE /api/courses/:id/tas/:userId
-func RemoveTAHandler(c fiber.Ctx) error {
+func (h *CourseHandler) RemoveTA(c fiber.Ctx) error {
 	courseID := c.Params("id")
 	userID, _ := strconv.ParseUint(c.Params("userId"), 10, 64)
 	actorID := c.Locals("user_id").(uint)
@@ -891,6 +911,16 @@ func RemoveTAHandler(c fiber.Ctx) error {
 			"user_id": uint(userID),
 			"role":    "ta",
 		},
+	})
+	reqID, _, ip := services.ExtractMeta(c)
+	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
+		CourseID:    courseID,
+		ActorUserID: actorID,
+		Action:      services.ActionCourseTARemoved,
+		TargetType:  "ta",
+		TargetID:    strconv.FormatUint(userID, 10),
+		RequestID:   reqID,
+		IPAddress:   ip,
 	})
 	return c.JSON(fiber.Map{"success": true, "message": "นำผู้ช่วยสอนออกสำเร็จ"})
 }
@@ -1215,7 +1245,7 @@ func BulkAddStudentsToSectionHandler(c fiber.Ctx) error {
 }
 
 // DELETE /api/courses/:id/sections/:sectionId/students/:studentId
-func RemoveStudentFromSectionHandler(c fiber.Ctx) error {
+func (h *CourseHandler) RemoveStudentFromSection(c fiber.Ctx) error {
 	courseID := c.Params("id")
 	sectionID, _ := strconv.ParseUint(c.Params("sectionId"), 10, 64)
 	studentID, _ := strconv.ParseUint(c.Params("studentId"), 10, 64)
@@ -1235,6 +1265,16 @@ func RemoveStudentFromSectionHandler(c fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบนักศึกษาในกลุ่มเรียนนี้"})
 	}
 	logCourseActivity(c, courseID, actorID, "remove_student", "member", "student", studentID, "", fiber.Map{"section_id": sectionID})
+	reqID, _, ip := services.ExtractMeta(c)
+	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
+		CourseID:    courseID,
+		ActorUserID: actorID,
+		Action:      services.ActionCourseStudentRemoved,
+		TargetType:  "student",
+		TargetID:    strconv.FormatUint(studentID, 10),
+		RequestID:   reqID,
+		IPAddress:   ip,
+	})
 
 	return c.JSON(fiber.Map{
 		"success": true,

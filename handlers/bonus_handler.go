@@ -3,12 +3,22 @@ package handlers
 import (
 	"fmt"
 	"itii-assist/repositories"
+	"itii-assist/services"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
 )
+
+// BonusHandler — struct-based handler with audit logger
+type BonusHandler struct {
+	auditLogger *services.AuditLogger
+}
+
+func NewBonusHandler(auditLogger *services.AuditLogger) *BonusHandler {
+	return &BonusHandler{auditLogger: auditLogger}
+}
 
 func getBonusCourseID(c fiber.Ctx) string {
 	if courseID := strings.TrimSpace(c.Params("courseId")); courseID != "" {
@@ -49,7 +59,7 @@ func buildBonusRecord(row repositories.BonusScoreWithNames) fiber.Map {
 }
 
 // POST /api/bonus-scores
-func GiveBonusScoreHandler(c fiber.Ctx) error {
+func (h *BonusHandler) GiveBonusScore(c fiber.Ctx) error {
 	var input struct {
 		CourseID  string  `json:"course_id"`
 		StudentID uint    `json:"student_id"`
@@ -109,6 +119,16 @@ func GiveBonusScoreHandler(c fiber.Ctx) error {
 		}
 	}
 
+	reqID, _, ip := services.ExtractMeta(c)
+	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
+		CourseID:    bonus.CourseID,
+		ActorUserID: givenBy,
+		Action:      services.ActionBonusScoreGiven,
+		TargetType:  "bonus_score",
+		TargetID:    strconv.Itoa(int(bonus.ID)),
+		RequestID:   reqID,
+		IPAddress:   ip,
+	})
 	return c.Status(201).JSON(fiber.Map{
 		"success": true,
 		"message": fmt.Sprintf("ให้คะแนนพิเศษ %s คะแนนสำเร็จ", strconv.FormatFloat(score, 'f', -1, 64)),
@@ -277,13 +297,25 @@ func GetEnrolledStudentsForBonusHandler(c fiber.Ctx) error {
 }
 
 // DELETE /api/bonus-scores/:id
-func DeleteBonusScoreHandler(c fiber.Ctx) error {
+func (h *BonusHandler) DeleteBonusScore(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid ID"})
 	}
+	courseID, _ := repositories.GetCourseIDByBonusScoreID(uint(id))
 	if err := repositories.DeleteBonusScore(uint(id)); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to delete bonus score"})
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	reqID, _, ip := services.ExtractMeta(c)
+	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
+		CourseID:    courseID,
+		ActorUserID: actorID,
+		Action:      services.ActionBonusScoreDeleted,
+		TargetType:  "bonus_score",
+		TargetID:    c.Params("id"),
+		RequestID:   reqID,
+		IPAddress:   ip,
+	})
 	return c.JSON(fiber.Map{"success": true, "message": "Bonus score deleted"})
 }

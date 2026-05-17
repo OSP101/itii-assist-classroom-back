@@ -140,10 +140,22 @@ func safeUser(u *models.User) fiber.Map {
 }
 
 // =============================================================================
+// AuthHandler — struct-based handler with audit logger
+// =============================================================================
+
+type AuthHandler struct {
+	auditLogger *services.AuditLogger
+}
+
+func NewAuthHandler(auditLogger *services.AuditLogger) *AuthHandler {
+	return &AuthHandler{auditLogger: auditLogger}
+}
+
+// =============================================================================
 // POST /api/auth/login
 // =============================================================================
 
-func LoginHandler(c fiber.Ctx) error {
+func (h *AuthHandler) Login(c fiber.Ctx) error {
 	var input LoginInput
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
@@ -154,6 +166,17 @@ func LoginHandler(c fiber.Ctx) error {
 
 	user, err := repositories.FindUserByUsername(input.Username)
 	if err != nil {
+		reqID, traceID, ip := services.ExtractMeta(c)
+		h.auditLogger.LogSystem(c.Context(), services.SystemEvent{
+			Action:    services.ActionAuthLoginFailed,
+			LogType:   "auth",
+			Severity:  "warn",
+			IPAddress: ip,
+			UserAgent: c.Get("User-Agent"),
+			RequestID: reqID,
+			TraceID:   traceID,
+			Detail:    map[string]any{"username_attempted": input.Username, "reason": "user_not_found"},
+		})
 		return c.Status(401).JSON(fiber.Map{"success": false, "message": "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"})
 	}
 
@@ -162,6 +185,17 @@ func LoginHandler(c fiber.Ctx) error {
 	}
 
 	if !utils.CheckPasswordHash(input.Password, user.PasswordHash) {
+		reqID, traceID, ip := services.ExtractMeta(c)
+		h.auditLogger.LogSystem(c.Context(), services.SystemEvent{
+			Action:    services.ActionAuthLoginFailed,
+			LogType:   "auth",
+			Severity:  "warn",
+			IPAddress: ip,
+			UserAgent: c.Get("User-Agent"),
+			RequestID: reqID,
+			TraceID:   traceID,
+			Detail:    map[string]any{"username_attempted": input.Username, "reason": "invalid_password"},
+		})
 		return c.Status(401).JSON(fiber.Map{"success": false, "message": "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"})
 	}
 
@@ -219,6 +253,20 @@ func LoginHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึก Token ไม่สำเร็จ"})
 	}
 
+	reqID, traceID, ip := services.ExtractMeta(c)
+	h.auditLogger.LogSystem(c.Context(), services.SystemEvent{
+		ActorUserID:  user.ID,
+		Action:       services.ActionAuthLoginSuccess,
+		LogType:      "auth",
+		Severity:     "info",
+		ResourceType: "user",
+		ResourceID:   strconv.Itoa(int(user.ID)),
+		IPAddress:    ip,
+		UserAgent:    c.Get("User-Agent"),
+		RequestID:    reqID,
+		TraceID:      traceID,
+		Detail:       map[string]any{"user_id": user.ID, "username": user.Username, "method": "password"},
+	})
 	return c.JSON(fiber.Map{
 		"success": true,
 		"message": "เข้าสู่ระบบสำเร็จ",
@@ -318,14 +366,30 @@ func RefreshHandler(c fiber.Ctx) error {
 // POST /api/auth/logout
 // =============================================================================
 
-func LogoutHandler(c fiber.Ctx) error {
+func (h *AuthHandler) Logout(c fiber.Ctx) error {
+	var jti string
+	var actorID uint
 	var input LogoutInput
 	if err := c.Bind().JSON(&input); err == nil && input.RefreshToken != "" {
 		claims, err := utils.ValidateRefreshToken(input.RefreshToken)
 		if err == nil {
+			jti = claims.JTI
+			actorID = claims.UserID
 			_ = repositories.RevokeRefreshToken(claims.JTI)
 		}
 	}
+	reqID, traceID, ip := services.ExtractMeta(c)
+	h.auditLogger.LogSystem(c.Context(), services.SystemEvent{
+		ActorUserID: actorID,
+		Action:      services.ActionAuthLogout,
+		LogType:     "auth",
+		Severity:    "info",
+		IPAddress:   ip,
+		UserAgent:   c.Get("User-Agent"),
+		RequestID:   reqID,
+		TraceID:     traceID,
+		Detail:      map[string]any{"session_jti": jti},
+	})
 	return c.JSON(fiber.Map{"success": true, "message": "ออกจากระบบสำเร็จ"})
 }
 
@@ -346,23 +410,35 @@ func ForgotPasswordHandler(c fiber.Ctx) error {
 			if emailErr := services.SendPasswordResetEmail(user, tokenRecord.Token); emailErr != nil {
 				services.LogEmailDeliveryError("forgot password", emailErr)
 			}
-			config.DB.Create(&models.SystemLog{
-				LogType:     "auth",
-				Severity:    "info",
-				ActorUserID: &user.ID,
-				Action:      "password_reset_requested",
-				IPAddress:   c.IP(),
-				UserAgent:   c.Get("User-Agent"),
-			})
+			{
+				dt, br, osn := utils.ParseUserAgent(c.Get("User-Agent"))
+				config.DB.Create(&models.SystemLog{
+					LogType:     "auth",
+					Severity:    "info",
+					ActorUserID: &user.ID,
+					Action:      "password_reset_requested",
+					IPAddress:   c.IP(),
+					UserAgent:   c.Get("User-Agent"),
+					DeviceType:  dt,
+					Browser:     br,
+					OS:          osn,
+				})
+			}
 		}
 	} else {
-		config.DB.Create(&models.SystemLog{
-			LogType:   "auth",
-			Severity:  "warn",
-			Action:    "password_reset_nonexistent_email",
-			IPAddress: c.IP(),
-			UserAgent: c.Get("User-Agent"),
-		})
+		{
+			dt, br, osn := utils.ParseUserAgent(c.Get("User-Agent"))
+			config.DB.Create(&models.SystemLog{
+				LogType:    "auth",
+				Severity:   "warn",
+				Action:     "password_reset_nonexistent_email",
+				IPAddress:  c.IP(),
+				UserAgent:  c.Get("User-Agent"),
+				DeviceType: dt,
+				Browser:    br,
+				OS:         osn,
+			})
+		}
 	}
 
 	return c.JSON(fiber.Map{"success": true, "message": successMessage})
@@ -430,14 +506,20 @@ func ResetPasswordHandler(c fiber.Ctx) error {
 	}
 	_ = repositories.RevokeAllUserRefreshTokens(user.ID)
 
-	config.DB.Create(&models.SystemLog{
-		LogType:     "auth",
-		Severity:    "info",
-		ActorUserID: &user.ID,
-		Action:      "password_reset_completed",
-		IPAddress:   c.IP(),
-		UserAgent:   c.Get("User-Agent"),
-	})
+	{
+		dt, br, osn := utils.ParseUserAgent(c.Get("User-Agent"))
+		config.DB.Create(&models.SystemLog{
+			LogType:     "auth",
+			Severity:    "info",
+			ActorUserID: &user.ID,
+			Action:      "password_reset_completed",
+			IPAddress:   c.IP(),
+			UserAgent:   c.Get("User-Agent"),
+			DeviceType:  dt,
+			Browser:     br,
+			OS:          osn,
+		})
+	}
 
 	return c.JSON(fiber.Map{"success": true, "message": "รหัสผ่านถูกเปลี่ยนเรียบร้อยแล้ว กรุณาเข้าสู่ระบบด้วยรหัสผ่านใหม่"})
 }
@@ -527,13 +609,20 @@ func ChangePasswordHandler(c fiber.Ctx) error {
 	_ = repositories.RevokeAllUserRefreshTokens(userID)
 
 	// Log
-	config.DB.Create(&models.SystemLog{
-		Action:      "change_password",
-		LogType:     "auth",
-		Severity:    "info",
-		ActorUserID: &userID,
-		IPAddress:   c.IP(),
-	})
+	{
+		dt, br, osn := utils.ParseUserAgent(c.Get("User-Agent"))
+		config.DB.Create(&models.SystemLog{
+			Action:      "change_password",
+			LogType:     "auth",
+			Severity:    "info",
+			ActorUserID: &userID,
+			IPAddress:   c.IP(),
+			UserAgent:   c.Get("User-Agent"),
+			DeviceType:  dt,
+			Browser:     br,
+			OS:          osn,
+		})
+	}
 
 	return c.JSON(fiber.Map{"success": true, "message": "เปลี่ยนรหัสผ่านสำเร็จ กรุณาเข้าสู่ระบบใหม่"})
 }
@@ -713,14 +802,20 @@ func UploadAvatarHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update avatar"})
 	}
 
-	config.DB.Create(&models.SystemLog{
-		LogType:     "auth",
-		Severity:    "info",
-		ActorUserID: &userID,
-		Action:      "avatar_updated",
-		IPAddress:   c.IP(),
-		UserAgent:   c.Get("User-Agent"),
-	})
+	{
+		dt, br, osn := utils.ParseUserAgent(c.Get("User-Agent"))
+		config.DB.Create(&models.SystemLog{
+			LogType:     "auth",
+			Severity:    "info",
+			ActorUserID: &userID,
+			Action:      "avatar_updated",
+			IPAddress:   c.IP(),
+			UserAgent:   c.Get("User-Agent"),
+			DeviceType:  dt,
+			Browser:     br,
+			OS:          osn,
+		})
+	}
 
 	return c.JSON(fiber.Map{
 		"success": true,
@@ -747,14 +842,20 @@ func RemoveAvatarHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to remove avatar"})
 	}
 
-	config.DB.Create(&models.SystemLog{
-		LogType:     "auth",
-		Severity:    "info",
-		ActorUserID: &userID,
-		Action:      "avatar_removed",
-		IPAddress:   c.IP(),
-		UserAgent:   c.Get("User-Agent"),
-	})
+	{
+		dt, br, osn := utils.ParseUserAgent(c.Get("User-Agent"))
+		config.DB.Create(&models.SystemLog{
+			LogType:     "auth",
+			Severity:    "info",
+			ActorUserID: &userID,
+			Action:      "avatar_removed",
+			IPAddress:   c.IP(),
+			UserAgent:   c.Get("User-Agent"),
+			DeviceType:  dt,
+			Browser:     br,
+			OS:          osn,
+		})
+	}
 
 	return c.JSON(fiber.Map{
 		"success": true,
@@ -847,7 +948,7 @@ func GetSessionsHandler(c fiber.Ctx) error {
 // DELETE /api/auth/sessions/:sessionId
 // =============================================================================
 
-func RevokeSessionHandler(c fiber.Ctx) error {
+func (h *AuthHandler) RevokeSession(c fiber.Ctx) error {
 	userID, ok := middlewares.GetUserID(c)
 	if !ok {
 		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
@@ -868,6 +969,18 @@ func RevokeSessionHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to revoke session"})
 	}
 
+	reqID, traceID, ip := services.ExtractMeta(c)
+	h.auditLogger.LogSystem(c.Context(), services.SystemEvent{
+		ActorUserID: userID,
+		Action:      services.ActionAuthTokenRevoked,
+		LogType:     "auth",
+		Severity:    "warn",
+		IPAddress:   ip,
+		UserAgent:   c.Get("User-Agent"),
+		RequestID:   reqID,
+		TraceID:     traceID,
+		Detail:      map[string]any{"revoked_jti": token.JTI, "reason": "manual_revoke"},
+	})
 	return c.JSON(fiber.Map{"success": true, "message": "Session revoked successfully"})
 }
 

@@ -4,11 +4,13 @@ import (
 	"itii-assist/handlers"
 	"itii-assist/middlewares"
 	"itii-assist/repositories"
+	"itii-assist/services"
 
 	"github.com/gofiber/fiber/v3"
 )
 
-func SetupQueueRoutes(app *fiber.App) {
+func SetupQueueRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
+	queueHandler := handlers.NewQueueHandler(auditLogger)
 	public := app.Group("/api/queue")
 	public.Post("/verify-pin", handlers.VerifyQueuePINPublicHandler)
 	public.Post("/validate", handlers.ValidateQueueBookingInfoPublicHandler)
@@ -43,10 +45,10 @@ func SetupQueueRoutes(app *fiber.App) {
 	sessionMgmt.Post("/status", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionUpdateQueueSessions, "instructor", "ta"), handlers.UpdateQueueSessionStatusCompatHandler)
 	sessionMgmt.Delete("/", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionDeleteQueueSessions, "instructor", "ta"), handlers.DeleteQueueSessionHandler)
 	sessionMgmt.Post("/regenerate-pin", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionUpdateQueueSessions, "instructor", "ta"), handlers.RegenerateQueuePINHandler)
-	sessionMgmt.Post("/start", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionUpdateQueueSessions, "instructor", "ta"), handlers.StartQueueSessionHandler)
+	sessionMgmt.Post("/start", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionUpdateQueueSessions, "instructor", "ta"), queueHandler.StartQueueSession)
 	sessionMgmt.Post("/pause", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionUpdateQueueSessions, "instructor", "ta"), handlers.PauseQueueSessionHandler)
 	sessionMgmt.Post("/resume", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionUpdateQueueSessions, "instructor", "ta"), handlers.ResumeQueueSessionHandler)
-	sessionMgmt.Post("/close", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionUpdateQueueSessions, "instructor", "ta"), handlers.CloseQueueSessionHandler)
+	sessionMgmt.Post("/close", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionUpdateQueueSessions, "instructor", "ta"), queueHandler.CloseQueueSession)
 	sessionMgmt.Get("/workers", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionViewQueue, "instructor", "ta"), handlers.GetWorkersHandler)
 	sessionMgmt.Get("/desks", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionViewQueue, "instructor", "ta"), handlers.GetDeskStatusesHandler)
 	sessionMgmt.Get("/desk-statuses", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionViewQueue, "instructor", "ta"), handlers.GetQueueDeskStatusesPublicHandler)
@@ -63,7 +65,11 @@ func SetupQueueRoutes(app *fiber.App) {
 	// Student-accessible endpoints (any authenticated user)
 	student := base.Group("/sessions/:sessionId")
 	student.Post("/verify-pin", handlers.VerifyQueuePINHandler)
-	student.Post("/bookings", handlers.CreateBookingHandler)
+	student.Post("/bookings", queueHandler.CreateBooking)
 	student.Get("/bookings/student/:studentId", handlers.GetStudentBookingHandler)
 	student.Delete("/bookings/:bookingId", handlers.CancelBookingHandler)
+
+	// Admin-only: list all active queue sessions across all courses
+	adminQueue := app.Group("/api/admin/queue", middlewares.Protected(), middlewares.RequireRole("admin"))
+	adminQueue.Get("/sessions/active", handlers.GetActiveQueueSessionsAdminHandler)
 }

@@ -3,17 +3,19 @@ package routes
 import (
 	"itii-assist/handlers"
 	"itii-assist/middlewares"
+	"itii-assist/services"
 
 	"github.com/gofiber/fiber/v3"
 )
 
-func SetupAuthRoutes(app *fiber.App) {
+func SetupAuthRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
+	authHandler := handlers.NewAuthHandler(auditLogger)
 	api := app.Group("/api/auth")
 
 	// Public
-	api.Post("/login", handlers.LoginHandler)
+	api.Post("/login", authHandler.Login)
 	api.Post("/refresh", handlers.RefreshHandler)
-	api.Post("/logout", handlers.LogoutHandler)
+	api.Post("/logout", authHandler.Logout)
 	api.Post("/forgot-password", handlers.ForgotPasswordHandler)
 	api.Post("/validate-reset-token", handlers.ValidateResetTokenHandler)
 	api.Post("/reset-password", handlers.ResetPasswordHandler)
@@ -29,7 +31,7 @@ func SetupAuthRoutes(app *fiber.App) {
 
 	// Sessions
 	api.Get("/sessions", middlewares.Protected(), handlers.GetSessionsHandler)
-	api.Delete("/sessions/:sessionId", middlewares.Protected(), handlers.RevokeSessionHandler)
+	api.Delete("/sessions/:sessionId", middlewares.Protected(), authHandler.RevokeSession)
 	api.Post("/sessions/revoke-all", middlewares.Protected(), handlers.RevokeAllSessionsHandler)
 
 	// Google OAuth

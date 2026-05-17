@@ -8,10 +8,12 @@ import (
 
 	// เปลี่ยน "itii-assist" เป็นชื่อโมดูลของคุณในไฟล์ go.mod หากคุณตั้งชื่ออื่น
 	"itii-assist/config"
+	"itii-assist/middlewares"
 	"itii-assist/models"
 	"itii-assist/realtime"
 	"itii-assist/repositories"
 	"itii-assist/routes"
+	"itii-assist/services"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
@@ -105,7 +107,10 @@ func main() {
 
 	// 4. รัน Fiber Server
 	app := fiber.New()
+	app.Use(middlewares.RequestLogger())
 	app.Use(logger.New())
+
+	auditLogger := services.NewAuditLogger(config.DB)
 
 	// CORS — ต้องอยู่ก่อน middleware auth ทุกตัว
 	rawOrigins := os.Getenv("CORS_ALLOWED_ORIGINS")
@@ -138,21 +143,21 @@ func main() {
 	})
 	app.Get("/ws", realtime.Handler())
 
-	routes.SetupAuthRoutes(app)
-	routes.SetupUserRoutes(app)
+	routes.SetupAuthRoutes(app, auditLogger)
+	routes.SetupUserRoutes(app, auditLogger)
 	routes.SetupStudentRoutes(app)
-	routes.SetupCourseRoutes(app)
+	routes.SetupCourseRoutes(app, auditLogger)
 	routes.SetupCourseActivityLogRoutes(app)
 	routes.SetupTeamRoutes(app)
 	routes.SetupClassroomRoutes(app)
-	routes.SetupAttendanceRoutes(app)
+	routes.SetupAttendanceRoutes(app, auditLogger)
 	routes.SetupAssignmentRoutes(app)
-	routes.SetupScoreRoutes(app)
-	routes.SetupExamRoutes(app)
-	routes.SetupBonusScoreRoutes(app)
+	routes.SetupScoreRoutes(app, auditLogger)
+	routes.SetupExamRoutes(app, auditLogger)
+	routes.SetupBonusScoreRoutes(app, auditLogger)
 	routes.SetupFeedbackRoutes(app)
 	routes.SetupSystemRoutes(app)
-	routes.SetupQueueRoutes(app)
+	routes.SetupQueueRoutes(app, auditLogger)
 	routes.SetupNotificationRoutes(app)
 	routes.SetupOAuthRoutes(app)
 	routes.SetupUserNotificationRoutes(app)
