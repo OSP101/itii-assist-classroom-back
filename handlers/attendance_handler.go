@@ -1,9 +1,10 @@
-﻿package handlers
+package handlers
 
 import (
 	"fmt"
 	"itii-assist/config"
 	"itii-assist/models"
+	"itii-assist/observability"
 	"itii-assist/realtime"
 	"itii-assist/repositories"
 	"strconv"
@@ -265,6 +266,8 @@ func attendanceSessionDetailResponse(detail *repositories.AttendanceSessionDetai
 		"course_section_ids":     detail.CourseSectionIDs,
 		"title":                  detail.Title,
 		"pin_code":               detail.PinCode,
+		"pin_issued_at":          detail.PinIssuedAt,
+		"pin_rotates_at":         detail.PinRotatesAt,
 		"session_type":           detail.SessionType,
 		"check_location":         detail.CheckLocation,
 		"location_lat":           nullableAttendanceFloatString(detail.LocationLat),
@@ -301,6 +304,8 @@ func attendanceSessionPayload(session models.AttendanceSession, sectionIDs []uin
 		"course_section_ids":     uniqueUintValues(sectionIDs),
 		"title":                  session.Title,
 		"pin_code":               session.PinCode,
+		"pin_issued_at":          session.PinIssuedAt,
+		"pin_rotates_at":         session.PinRotatesAt,
 		"session_type":           session.SessionType,
 		"check_location":         session.CheckLocation,
 		"location_lat":           nullableAttendanceFloatString(session.LocationLat),
@@ -540,7 +545,7 @@ func CreateAttendanceSessionHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to create session"})
 	}
 	session.Status = repositories.ComputeSessionStatus(session)
-	writeCourseActivityLog(input.CourseID, userID, "create_attendance_session", "attendance", "attendance_session", session.ID, session.Title, fiber.Map{
+	logCourseActivity(c, input.CourseID, userID, "create_attendance_session", "attendance", "attendance_session", session.ID, session.Title, fiber.Map{
 		"course_section_ids": sectionIDs,
 		"start_time":         session.StartTime,
 		"end_time":           session.EndTime,
@@ -613,9 +618,20 @@ func UpdateAttendanceSessionHandler(c fiber.Ctx) error {
 	}
 	if input.PinCode != nil && strings.TrimSpace(*input.PinCode) != "" {
 		session.PinCode = strings.TrimSpace(*input.PinCode)
+		session.PreviousPinCode = ""
+		session.PinGraceUntil = nil
+		now := time.Now()
+		session.PinIssuedAt = &now
+		rotatesAt := now.Add(time.Duration(observability.AttendancePinRotationMinutes()) * time.Minute)
+		session.PinRotatesAt = &rotatesAt
 	}
 	if input.RegeneratePin {
-		session.PinCode = repositories.GeneratePIN()
+		session.PinCode = ""
+		session.PreviousPinCode = ""
+		session.PinIssuedAt = nil
+		session.PinGraceUntil = nil
+		session.PinRotatesAt = nil
+		observability.RecordAttendancePinManualRefresh()
 	}
 	if input.SessionType != nil && strings.TrimSpace(*input.SessionType) != "" {
 		session.SessionType = strings.TrimSpace(*input.SessionType)
@@ -659,13 +675,19 @@ func UpdateAttendanceSessionHandler(c fiber.Ctx) error {
 	if err := repositories.UpdateAttendanceSession(&session); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update session"})
 	}
+	if refreshedSession, pinChange, err := repositories.RefreshAttendanceSessionPinState(session.ID); err == nil && refreshedSession != nil {
+		session = *refreshedSession
+		if pinChange.Rotated || pinChange.Released || input.RegeneratePin {
+			emitAttendancePinUpdated(session)
+		}
+	}
 	if sectionsProvided {
 		if err := syncAttendanceSessionTargets(&session, sectionIDs); err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update session sections"})
 		}
 	}
 	session.Status = repositories.ComputeSessionStatus(session)
-	writeCourseActivityLog(session.CourseID, actorID, "update_attendance_session", "attendance", "attendance_session", session.ID, session.Title, fiber.Map{
+	logCourseActivity(c, session.CourseID, actorID, "update_attendance_session", "attendance", "attendance_session", session.ID, session.Title, fiber.Map{
 		"course_section_ids":     sectionIDs,
 		"status":                 session.Status,
 		"late_threshold_minutes": session.LateThresholdMinutes,
@@ -689,7 +711,7 @@ func DeleteAttendanceSessionHandler(c fiber.Ctx) error {
 	if err := repositories.DeleteAttendanceSession(uint(id)); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to delete session"})
 	}
-	writeCourseActivityLog(detail.CourseID, actorID, "delete_attendance_session", "attendance", "attendance_session", detail.ID, detail.Title, fiber.Map{"course_section_ids": detail.CourseSectionIDs})
+	logCourseActivity(c, detail.CourseID, actorID, "delete_attendance_session", "attendance", "attendance_session", detail.ID, detail.Title, fiber.Map{"course_section_ids": detail.CourseSectionIDs})
 	return c.JSON(fiber.Map{"success": true, "message": "Session deleted"})
 }
 
@@ -720,7 +742,7 @@ func UpdateAttendanceRecordHandler(c fiber.Ctx) error {
 	if err := repositories.UpdateAttendanceRecord(uint(sessionID), uint(studentID), input.Status, input.Note, updatedBy); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update record"})
 	}
-	writeCourseActivityLog(detail.CourseID, updatedBy, "update_attendance_record", "attendance", "attendance_session", detail.ID, detail.Title, fiber.Map{"student_id": studentID, "status": input.Status})
+	logCourseActivity(c, detail.CourseID, updatedBy, "update_attendance_record", "attendance", "attendance_session", detail.ID, detail.Title, fiber.Map{"student_id": studentID, "status": input.Status})
 	emitAttendanceRecordUpdated(uint(sessionID), uint(studentID))
 	return c.JSON(fiber.Map{"success": true, "message": "Record updated"})
 }
@@ -759,7 +781,7 @@ func UpdateAttendanceRecordByRecordIDHandler(c fiber.Ctx) error {
 
 	detail, err := repositories.GetAttendanceSession(uint(sessionID))
 	if err == nil {
-		writeCourseActivityLog(detail.CourseID, updatedBy, "update_attendance_record", "attendance", "attendance_session", detail.ID, detail.Title, fiber.Map{"student_id": record.StudentID, "record_id": record.ID, "status": record.Status})
+		logCourseActivity(c, detail.CourseID, updatedBy, "update_attendance_record", "attendance", "attendance_session", detail.ID, detail.Title, fiber.Map{"student_id": record.StudentID, "record_id": record.ID, "status": record.Status})
 	}
 	emitAttendanceRecordUpdated(uint(sessionID), record.StudentID)
 
@@ -850,9 +872,16 @@ func ActivateAttendanceSessionHandler(c fiber.Ctx) error {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to activate session"})
 		}
 	}
-	session.Status = repositories.ComputeSessionStatus(session)
+	if refreshedSession, pinChange, err := repositories.RefreshAttendanceSessionPinState(session.ID); err == nil && refreshedSession != nil {
+		session = *refreshedSession
+		if pinChange.Rotated || pinChange.StatusChanged || session.PinCode != "" {
+			emitAttendancePinUpdated(session)
+		}
+	} else {
+		session.Status = repositories.ComputeSessionStatus(session)
+	}
 	actorUID := c.Locals("user_id").(uint)
-	writeCourseActivityLog(session.CourseID, actorUID, "activate_attendance_session", "attendance", "attendance_session", session.ID, session.Title, fiber.Map{"status": session.Status})
+	logCourseActivity(c, session.CourseID, actorUID, "activate_attendance_session", "attendance", "attendance_session", session.ID, session.Title, fiber.Map{"status": session.Status})
 	go createNotificationsForCourseMembers(
 		session.CourseID, actorUID,
 		"attendance_started",
@@ -883,9 +912,14 @@ func CloseAttendanceSessionHandler(c fiber.Ctx) error {
 	if err := repositories.UpdateAttendanceSession(&session); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to close session"})
 	}
-	session.Status = repositories.ComputeSessionStatus(session)
+	if refreshedSession, _, err := repositories.RefreshAttendanceSessionPinState(session.ID); err == nil && refreshedSession != nil {
+		session = *refreshedSession
+	} else {
+		session.Status = repositories.ComputeSessionStatus(session)
+		session.PinCode = ""
+	}
 	actorCloseUID := c.Locals("user_id").(uint)
-	writeCourseActivityLog(session.CourseID, actorCloseUID, "close_attendance_session", "attendance", "attendance_session", session.ID, session.Title, fiber.Map{"status": session.Status})
+	logCourseActivity(c, session.CourseID, actorCloseUID, "close_attendance_session", "attendance", "attendance_session", session.ID, session.Title, fiber.Map{"status": session.Status})
 	go createNotificationsForCourseMembers(
 		session.CourseID, actorCloseUID,
 		"attendance_closed",
@@ -896,7 +930,20 @@ func CloseAttendanceSessionHandler(c fiber.Ctx) error {
 	)
 	realtime.EmitToAttendance(session.ID, "session-closed", fiber.Map{"session_id": session.ID})
 	realtime.EmitToAttendanceDisplay(session.ID, "session-closed", fiber.Map{"session_id": session.ID})
+	emitAttendancePinUpdated(session)
 	return c.JSON(fiber.Map{"success": true, "message": "Session closed", "data": attendanceSessionPayload(session, detail.CourseSectionIDs)})
+}
+
+func emitAttendancePinUpdated(session models.AttendanceSession) {
+	payload := fiber.Map{
+		"session_id":     session.ID,
+		"pin_code":       session.PinCode,
+		"pin_issued_at":  session.PinIssuedAt,
+		"pin_rotates_at": session.PinRotatesAt,
+		"status":         session.Status,
+	}
+	realtime.EmitToInstructor(session.ID, "attendance-pin-updated", payload)
+	realtime.EmitToAttendanceDisplay(session.ID, "attendance-pin-updated", payload)
 }
 
 func VerifyStudentHandler(c fiber.Ctx) error {
@@ -1295,7 +1342,7 @@ func ApplyTimeChangeHandler(c fiber.Ctx) error {
 	}
 
 	session.Status = repositories.ComputeSessionStatus(session)
-	writeCourseActivityLog(session.CourseID, updatedBy, "apply_attendance_time_change", "attendance", "attendance_session", session.ID, session.Title, fiber.Map{"invalidated": invalidated, "present_to_late": presentToLate, "late_to_present": lateToPresent, "recovered": recovered, "unchanged": unchanged})
+	logCourseActivity(c, session.CourseID, updatedBy, "apply_attendance_time_change", "attendance", "attendance_session", session.ID, session.Title, fiber.Map{"invalidated": invalidated, "present_to_late": presentToLate, "late_to_present": lateToPresent, "recovered": recovered, "unchanged": unchanged})
 	return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"session": attendanceSessionPayload(session, detail.CourseSectionIDs), "impact": fiber.Map{"total_records": len(records), "invalidated": invalidated, "present_to_late": presentToLate, "late_to_present": lateToPresent, "recovered": recovered, "unchanged": unchanged, "details": auditDetails}}})
 }
 
@@ -1321,6 +1368,6 @@ func BulkUpdateAttendanceRecordsHandler(c fiber.Ctx) error {
 	if err := repositories.BulkUpdateAttendanceRecords(uint(sessionID), input.Updates, updatedBy); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to bulk update records"})
 	}
-	writeCourseActivityLog(detail.CourseID, updatedBy, "bulk_update_attendance_records", "attendance", "attendance_session", detail.ID, detail.Title, fiber.Map{"count": len(input.Updates)})
+	logCourseActivity(c, detail.CourseID, updatedBy, "bulk_update_attendance_records", "attendance", "attendance_session", detail.ID, detail.Title, fiber.Map{"count": len(input.Updates)})
 	return c.JSON(fiber.Map{"success": true, "message": "Records updated"})
 }

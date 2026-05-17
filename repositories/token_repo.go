@@ -29,7 +29,13 @@ func RevokeRefreshToken(jti string) error {
 
 func RevokeAllUserRefreshTokens(userID uint) error {
 	return config.DB.Model(&models.RefreshToken{}).
-		Where("user_id = ? AND revoked = ?", userID, false).
+		Where("user_id = ? AND kind = 'u' AND revoked = ?", userID, false).
+		Update("revoked", true).Error
+}
+
+func RevokeAllStudentRefreshTokens(studentID uint) error {
+	return config.DB.Model(&models.RefreshToken{}).
+		Where("user_id = ? AND kind = 's' AND revoked = ?", studentID, false).
 		Update("revoked", true).Error
 }
 

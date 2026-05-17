@@ -11,6 +11,9 @@ func SetupStudentRoutes(app *fiber.App) {
 	// Student lookup — public for compatibility with the legacy student self-check flow
 	app.Get("/api/students/lookup/:student_id", handlers.LookupStudentHandler)
 
+	self := app.Group("/api/students/me", middlewares.Protected(), middlewares.RequireRole("student"))
+	self.Get("/courses/:courseId", handlers.GetMyStudentCourseHandler)
+
 	// Protected — Admin, Instructor, TA
 	read := app.Group("/api/students", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"))
 	read.Post("/search-by-ids", handlers.SearchStudentsByIDsCompatHandler)

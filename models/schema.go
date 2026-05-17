@@ -56,6 +56,7 @@ type RefreshToken struct {
 	ID        uint           `gorm:"primaryKey;autoIncrement" json:"id"`
 	JTI       string         `gorm:"type:varchar(100);uniqueIndex;not null" json:"jti"`
 	UserID    uint           `gorm:"not null;index" json:"user_id"`
+	Kind      string         `gorm:"type:varchar(1);not null;default:'u';index" json:"kind"` // "u" = user, "s" = student
 	Revoked   bool           `gorm:"type:boolean;default:false" json:"revoked"`
 	Meta      datatypes.JSON `gorm:"type:jsonb" json:"meta,omitempty"`
 	CreatedAt time.Time      `gorm:"type:timestamptz" json:"created_at"`
@@ -120,6 +121,11 @@ type Desk struct {
 	Y           int       `gorm:"default:0" json:"y"`
 	Type        string    `gorm:"type:varchar(20);default:'normal'" json:"type"` // computer, normal, teacher
 	IsEnabled   bool      `gorm:"type:boolean;default:true" json:"is_enabled"`
+	Hostname    string    `gorm:"type:varchar(100);default:''" json:"hostname"`
+	IPAddress   string    `gorm:"type:varchar(50);default:''" json:"ip_address"`
+	Brand       string    `gorm:"type:varchar(50);default:''" json:"brand"`
+	OS          string    `gorm:"type:varchar(50);default:''" json:"os"`
+	Notes       string    `gorm:"type:varchar(500);default:''" json:"notes"`
 	CreatedAt   time.Time `gorm:"type:timestamptz" json:"created_at"`
 	UpdatedAt   time.Time `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
 }
@@ -203,12 +209,16 @@ type CourseActivityLog struct {
 	ID          uint           `gorm:"primaryKey;autoIncrement" json:"id"`
 	CourseID    string         `gorm:"type:varchar(100);not null;index" json:"course_id"`
 	ActorUserID uint           `gorm:"not null;index" json:"actor_user_id"`
-	Action      string         `gorm:"type:varchar(50);not null" json:"action"`
+	ActorEmail  string         `gorm:"type:varchar(255)" json:"actor_email"` // snapshot at event time
+	ActorRole   string         `gorm:"type:varchar(30)" json:"actor_role"`   // snapshot at event time
+	Action      string         `gorm:"type:varchar(100);not null" json:"action"`
 	Category    string         `gorm:"type:varchar(30);default:'general'" json:"category"`
 	TargetType  string         `gorm:"type:varchar(50)" json:"target_type"`
 	TargetID    string         `gorm:"type:varchar(100)" json:"target_id"`
 	TargetName  string         `gorm:"type:varchar(255)" json:"target_name"`
 	Detail      datatypes.JSON `gorm:"type:jsonb" json:"detail,omitempty"`
+	IPAddress   string         `gorm:"type:varchar(45)" json:"ip_address"`  // IPv4 or IPv6
+	UserAgent   string         `gorm:"type:varchar(512)" json:"user_agent"` // device/browser
 	CreatedAt   time.Time      `gorm:"type:timestamptz" json:"created_at"`
 }
 
@@ -361,24 +371,28 @@ type ExamScore struct {
 // =============================================================================
 
 type AttendanceSession struct {
-	ID                   uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	CourseID             string    `gorm:"type:varchar(21);not null;index" json:"course_id"`
-	CourseSectionID      *uint     `gorm:"index" json:"course_section_id,omitempty"`
-	Title                string    `gorm:"type:varchar(255);default:'Attendance'" json:"title"`
-	PinCode              string    `gorm:"type:varchar(50)" json:"pin_code"`
-	SessionType          string    `gorm:"type:varchar(20);default:'lecture'" json:"session_type"` // lecture, lab, online
-	CheckLocation        bool      `gorm:"type:boolean;default:false" json:"check_location"`
-	LocationLat          *float64  `gorm:"type:decimal(10,7)" json:"location_lat,omitempty"`
-	LocationLng          *float64  `gorm:"type:decimal(10,7)" json:"location_lng,omitempty"`
-	RadiusMeters         int       `gorm:"default:50" json:"radius_meters"`
-	StartTime            time.Time `gorm:"type:timestamptz;not null" json:"start_time"`
-	EndTime              time.Time `gorm:"type:timestamptz;not null" json:"end_time"`
-	LateThresholdMinutes int       `gorm:"default:15" json:"late_threshold_minutes"`
-	LateThresholdTime    string    `gorm:"type:varchar(8)" json:"late_threshold_time"`     // เวลาที่ถือว่าสาย เช่น "08:15:00"
-	Status               string    `gorm:"type:varchar(20);default:'draft'" json:"status"` // draft, active, closed
-	CreatedBy            *uint     `gorm:"index" json:"created_by,omitempty"`
-	CreatedAt            time.Time `gorm:"type:timestamptz" json:"created_at"`
-	UpdatedAt            time.Time `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+	ID                   uint       `gorm:"primaryKey;autoIncrement" json:"id"`
+	CourseID             string     `gorm:"type:varchar(21);not null;index" json:"course_id"`
+	CourseSectionID      *uint      `gorm:"index" json:"course_section_id,omitempty"`
+	Title                string     `gorm:"type:varchar(255);default:'Attendance'" json:"title"`
+	PinCode              string     `gorm:"type:varchar(50)" json:"pin_code"`
+	PreviousPinCode      string     `gorm:"type:varchar(50)" json:"previous_pin_code"`
+	SessionType          string     `gorm:"type:varchar(20);default:'lecture'" json:"session_type"` // lecture, lab, online
+	CheckLocation        bool       `gorm:"type:boolean;default:false" json:"check_location"`
+	LocationLat          *float64   `gorm:"type:decimal(10,7)" json:"location_lat,omitempty"`
+	LocationLng          *float64   `gorm:"type:decimal(10,7)" json:"location_lng,omitempty"`
+	RadiusMeters         int        `gorm:"default:50" json:"radius_meters"`
+	StartTime            time.Time  `gorm:"type:timestamptz;not null" json:"start_time"`
+	EndTime              time.Time  `gorm:"type:timestamptz;not null" json:"end_time"`
+	PinIssuedAt          *time.Time `gorm:"type:timestamptz" json:"pin_issued_at,omitempty"`
+	PinGraceUntil        *time.Time `gorm:"type:timestamptz" json:"pin_grace_until,omitempty"`
+	PinRotatesAt         *time.Time `gorm:"type:timestamptz" json:"pin_rotates_at,omitempty"`
+	LateThresholdMinutes int        `gorm:"default:15" json:"late_threshold_minutes"`
+	LateThresholdTime    string     `gorm:"type:varchar(8)" json:"late_threshold_time"`     // เวลาที่ถือว่าสาย เช่น "08:15:00"
+	Status               string     `gorm:"type:varchar(20);default:'draft'" json:"status"` // draft, active, closed
+	CreatedBy            *uint      `gorm:"index" json:"created_by,omitempty"`
+	CreatedAt            time.Time  `gorm:"type:timestamptz" json:"created_at"`
+	UpdatedAt            time.Time  `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
 }
 
 type AttendanceSessionSection struct {

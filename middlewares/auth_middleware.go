@@ -23,6 +23,21 @@ func GetUserID(c fiber.Ctx) (uint, bool) {
 	return 0, false
 }
 
+// GetStudentID ดึง studentID จาก context อย่างปลอดภัย (เฉพาะ student session)
+func GetStudentID(c fiber.Ctx) (uint, bool) {
+	raw := c.Locals("student_id")
+	if raw == nil {
+		return 0, false
+	}
+	switch v := raw.(type) {
+	case uint:
+		return v, true
+	case float64:
+		return uint(v), true
+	}
+	return 0, false
+}
+
 // GetUserRole ดึง user role จาก context อย่างปลอดภัย
 func GetUserRole(c fiber.Ctx) (string, bool) {
 	raw := c.Locals("user_role")
@@ -67,9 +82,15 @@ func Protected() fiber.Handler {
 			}
 		}
 
-		c.Locals("user_id", claims.UserID)
-		c.Locals("user_role", claims.Role)
 		c.Locals("jti", claims.JTI)
+
+		// For student sessions: set student_id instead of user_id
+		if claims.Kind == "s" {
+			c.Locals("student_id", claims.UserID)
+		} else {
+			c.Locals("user_id", claims.UserID)
+		}
+		c.Locals("user_role", claims.Role)
 
 		return c.Next()
 	}

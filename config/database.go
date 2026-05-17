@@ -277,6 +277,14 @@ func MigratePerformanceIndexes() {
 			sql:  `CREATE INDEX IF NOT EXISTS idx_desks_classroom_number_enabled_type ON desks (classroom_id, number, is_enabled, type)`,
 		},
 		{
+			name: "attendance_sessions_pin_rotation",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_attendance_sessions_pin_rotation ON attendance_sessions (status, start_time, end_time, pin_rotates_at)`,
+		},
+		{
+			name: "attendance_sessions_pin_code_status",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_attendance_sessions_pin_code_status ON attendance_sessions (pin_code, status)`,
+		},
+		{
 			name: "queue_sessions_pin_code_status",
 			sql:  `CREATE INDEX IF NOT EXISTS idx_queue_sessions_pin_code_status ON queue_sessions (pin_code, status)`,
 		},
@@ -304,4 +312,43 @@ func MigratePerformanceIndexes() {
 	}
 
 	log.Printf("✅ Ensured %d performance indexes", ensuredCount)
+}
+
+func MigrateAttendancePinCompatibility() {
+	if DB == nil {
+		return
+	}
+
+	statements := []string{
+		`ALTER TABLE attendance_sessions ADD COLUMN IF NOT EXISTS previous_pin_code varchar(50) NOT NULL DEFAULT ''`,
+		`ALTER TABLE attendance_sessions ADD COLUMN IF NOT EXISTS pin_issued_at timestamptz`,
+		`ALTER TABLE attendance_sessions ADD COLUMN IF NOT EXISTS pin_grace_until timestamptz`,
+		`ALTER TABLE attendance_sessions ADD COLUMN IF NOT EXISTS pin_rotates_at timestamptz`,
+		`UPDATE attendance_sessions
+		 SET previous_pin_code = COALESCE(previous_pin_code, '')
+		 WHERE previous_pin_code IS NULL`,
+		`UPDATE attendance_sessions
+		 SET pin_issued_at = COALESCE(pin_issued_at, start_time),
+		     pin_rotates_at = COALESCE(pin_rotates_at, start_time + INTERVAL '1 minute')
+		 WHERE pin_code <> ''
+		   AND start_time <= NOW()
+		   AND end_time > NOW()`,
+		`UPDATE attendance_sessions
+		 SET pin_code = '',
+		     previous_pin_code = '',
+		     pin_issued_at = NULL,
+		     pin_grace_until = NULL,
+		     pin_rotates_at = NULL
+		 WHERE end_time <= NOW()
+		    OR (status = 'closed' AND (pin_code <> '' OR previous_pin_code <> ''))`,
+	}
+
+	for _, statement := range statements {
+		if err := DB.Exec(statement).Error; err != nil {
+			log.Printf("⚠️  Failed attendance PIN compatibility migration: %v", err)
+			return
+		}
+	}
+
+	log.Println("✅ Attendance PIN compatibility synchronized")
 }

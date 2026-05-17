@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"itii-assist/config"
+	"itii-assist/middlewares"
 	"itii-assist/models"
 	"itii-assist/realtime"
 	"itii-assist/repositories"
@@ -104,7 +105,7 @@ func CreateQueueSessionHandler(c fiber.Ctx) error {
 	if err := repositories.CreateQueueSession(&session); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to create queue session"})
 	}
-	writeCourseActivityLog(courseID, userID, "create_queue_session", "queue", "queue_session", session.ID, session.Title, fiber.Map{"classroom_id": session.ClassroomID, "linked_assignment_id": session.LinkedAssignmentID, "require_attendance": session.RequireAttendance})
+	logCourseActivity(c, courseID, userID, "create_queue_session", "queue", "queue_session", session.ID, session.Title, fiber.Map{"classroom_id": session.ClassroomID, "linked_assignment_id": session.LinkedAssignmentID, "require_attendance": session.RequireAttendance})
 	go createNotificationsForCourseMembers(courseID, userID, "queue_created", "สร้างคิว: "+session.Title, "มีการสร้างคิวใหม่ในวิชา", "/classroom/"+courseID+"/queue", buildNotifData(courseID, session.ID, "queue_session", ""))
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": session})
 }
@@ -166,7 +167,7 @@ func UpdateQueueSessionHandler(c fiber.Ctx) error {
 	if err := repositories.UpdateQueueSession(session); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update session"})
 	}
-	writeCourseActivityLog(session.CourseID, actorID, "update_queue_session", "queue", "queue_session", session.ID, session.Title, fiber.Map{"description": session.Description})
+	logCourseActivity(c, session.CourseID, actorID, "update_queue_session", "queue", "queue_session", session.ID, session.Title, fiber.Map{"description": session.Description})
 	go createNotificationsForCourseMembers(session.CourseID, actorID, "queue_updated", "แก้ไขคิว: "+session.Title, "มีการแก้ไขคิวในวิชา", "/classroom/"+session.CourseID+"/queue", buildNotifData(session.CourseID, session.ID, "queue_session", ""))
 	return c.JSON(fiber.Map{"success": true, "data": session})
 }
@@ -185,7 +186,7 @@ func DeleteQueueSessionHandler(c fiber.Ctx) error {
 	if err := repositories.DeleteQueueSession(sessionID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to delete session"})
 	}
-	writeCourseActivityLog(session.CourseID, actorID, "delete_queue_session", "queue", "queue_session", session.ID, session.Title, nil)
+	logCourseActivity(c, session.CourseID, actorID, "delete_queue_session", "queue", "queue_session", session.ID, session.Title, nil)
 	return c.JSON(fiber.Map{"success": true, "message": "Queue session deleted"})
 }
 
@@ -203,7 +204,7 @@ func StartQueueSessionHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to start session"})
 	}
 	actorID := c.Locals("user_id").(uint)
-	writeCourseActivityLog(session.CourseID, actorID, "start_queue_session", "queue", "queue_session", session.ID, session.Title, nil)
+	logCourseActivity(c, session.CourseID, actorID, "start_queue_session", "queue", "queue_session", session.ID, session.Title, nil)
 	go createNotificationsForCourseMembers(session.CourseID, actorID, "queue_opened", "เปิดคิว: "+session.Title, "มีการเปิดคิวในวิชา", "/classroom/"+session.CourseID+"/queue", buildNotifData(session.CourseID, session.ID, "queue_session", ""))
 	return c.JSON(fiber.Map{"success": true, "message": "Session started"})
 }
@@ -221,7 +222,7 @@ func PauseQueueSessionHandler(c fiber.Ctx) error {
 	if err := repositories.PauseQueueSession(sessionID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to pause session"})
 	}
-	writeCourseActivityLog(session.CourseID, c.Locals("user_id").(uint), "pause_queue_session", "queue", "queue_session", session.ID, session.Title, nil)
+	logCourseActivity(c, session.CourseID, c.Locals("user_id").(uint), "pause_queue_session", "queue", "queue_session", session.ID, session.Title, nil)
 	return c.JSON(fiber.Map{"success": true, "message": "Session paused"})
 }
 
@@ -238,7 +239,7 @@ func ResumeQueueSessionHandler(c fiber.Ctx) error {
 	if err := repositories.ResumeQueueSession(sessionID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to resume session"})
 	}
-	writeCourseActivityLog(session.CourseID, c.Locals("user_id").(uint), "resume_queue_session", "queue", "queue_session", session.ID, session.Title, nil)
+	logCourseActivity(c, session.CourseID, c.Locals("user_id").(uint), "resume_queue_session", "queue", "queue_session", session.ID, session.Title, nil)
 	return c.JSON(fiber.Map{"success": true, "message": "Session resumed"})
 }
 
@@ -256,7 +257,7 @@ func CloseQueueSessionHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to close session"})
 	}
 	actorID := c.Locals("user_id").(uint)
-	writeCourseActivityLog(session.CourseID, actorID, "close_queue_session", "queue", "queue_session", session.ID, session.Title, nil)
+	logCourseActivity(c, session.CourseID, actorID, "close_queue_session", "queue", "queue_session", session.ID, session.Title, nil)
 	go createNotificationsForCourseMembers(session.CourseID, actorID, "queue_closed", "ปิดคิว: "+session.Title, "มีการปิดคิวในวิชา", "/classroom/"+session.CourseID+"/queue", buildNotifData(session.CourseID, session.ID, "queue_session", ""))
 	return c.JSON(fiber.Map{"success": true, "message": "Session closed"})
 }
@@ -313,7 +314,7 @@ func CreateBookingHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
-	writeCourseActivityLog(session.CourseID, c.Locals("user_id").(uint), "create_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"queue_session_id": booking.QueueSessionID, "student_id": booking.StudentID, "desk_number": booking.DeskNumber, "booking_type": booking.BookingType})
+	logCourseActivity(c, session.CourseID, c.Locals("user_id").(uint), "create_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"queue_session_id": booking.QueueSessionID, "student_id": booking.StudentID, "desk_number": booking.DeskNumber, "booking_type": booking.BookingType})
 	emitQueueBookingChanged(sessionID, "new-booking", booking)
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": booking})
 }
@@ -614,7 +615,7 @@ func CancelBookingHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid booking ID"})
 	}
-	studentID := c.Locals("user_id").(uint)
+	studentID, _ := middlewares.GetStudentID(c)
 	booking, _ := repositories.GetBookingByID(uint(bookingID))
 	if booking != nil {
 		if session, sessionErr := repositories.GetQueueSessionByID(booking.QueueSessionID); sessionErr == nil {
@@ -628,7 +629,7 @@ func CancelBookingHandler(c fiber.Ctx) error {
 	}
 	if booking != nil {
 		if session, sessionErr := repositories.GetQueueSessionByID(booking.QueueSessionID); sessionErr == nil {
-			writeCourseActivityLog(session.CourseID, studentID, "cancel_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"booking_type": booking.BookingType, "desk_number": booking.DeskNumber})
+			logCourseActivity(c, session.CourseID, studentID, "cancel_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"booking_type": booking.BookingType, "desk_number": booking.DeskNumber})
 		}
 		emitQueueBookingChanged(booking.QueueSessionID, "booking-cancelled", booking)
 	}
@@ -683,7 +684,7 @@ func WorkerJoinHandler(c fiber.Ctx) error {
 		assignedBookingPayload = payload
 	}
 
-	writeCourseActivityLog(session.CourseID, userID, "join_queue_worker", "queue", "queue_session", session.ID, session.Title, fiber.Map{"accept_grading": input.AcceptGrading, "accept_help": input.AcceptHelp})
+	logCourseActivity(c, session.CourseID, userID, "join_queue_worker", "queue", "queue_session", session.ID, session.Title, fiber.Map{"accept_grading": input.AcceptGrading, "accept_help": input.AcceptHelp})
 	realtime.EmitToQueue(sessionID, "worker-joined", fiber.Map{"worker": worker, "timestamp": time.Now().UnixMilli()})
 	return c.JSON(fiber.Map{"success": true, "data": worker, "assignedBooking": assignedBookingPayload})
 }
@@ -732,7 +733,7 @@ func WorkerLeaveHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to leave worker session"})
 	}
 
-	writeCourseActivityLog(session.CourseID, userID, "leave_queue_worker", "queue", "queue_session", session.ID, session.Title, fiber.Map{"status": newStatus})
+	logCourseActivity(c, session.CourseID, userID, "leave_queue_worker", "queue", "queue_session", session.ID, session.Title, fiber.Map{"status": newStatus})
 	realtime.EmitToQueue(sessionID, "worker-left", fiber.Map{"worker_id": userID, "status": newStatus, "timestamp": time.Now().UnixMilli()})
 
 	return c.JSON(fiber.Map{"success": true, "message": message, "data": fiber.Map{"status": newStatus}})
@@ -833,7 +834,7 @@ func WorkerBookingActionHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update booking"})
 	}
 	if session, sessionErr := repositories.GetQueueSessionByID(booking.QueueSessionID); sessionErr == nil {
-		writeCourseActivityLog(session.CourseID, workerID, "update_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"action": input.Action, "score": input.Score, "booking_type": booking.BookingType})
+		logCourseActivity(c, session.CourseID, workerID, "update_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"action": input.Action, "score": input.Score, "booking_type": booking.BookingType})
 	}
 	emitQueueActionChanged(booking, input.Action)
 
@@ -898,7 +899,7 @@ func CompleteQueueBookingCompatHandler(c fiber.Ctx) error {
 	}
 
 	if session, sessionErr := repositories.GetQueueSessionByID(booking.QueueSessionID); sessionErr == nil {
-		writeCourseActivityLog(session.CourseID, workerID, "complete_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"booking_type": booking.BookingType, "score": input.Score})
+		logCourseActivity(c, session.CourseID, workerID, "complete_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"booking_type": booking.BookingType, "score": input.Score})
 	}
 	emitQueueBookingChanged(booking.QueueSessionID, "booking-completed", booking)
 	realtime.EmitToBooking(booking.ID, "your-booking-completed", fiber.Map{"booking": booking, "timestamp": time.Now().UnixMilli()})
@@ -951,7 +952,7 @@ func SkipQueueBookingCompatHandler(c fiber.Ctx) error {
 	}
 
 	if session, sessionErr := repositories.GetQueueSessionByID(booking.QueueSessionID); sessionErr == nil {
-		writeCourseActivityLog(session.CourseID, workerID, "skip_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"booking_type": booking.BookingType, "reason": input.Reason})
+		logCourseActivity(c, session.CourseID, workerID, "skip_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"booking_type": booking.BookingType, "reason": input.Reason})
 	}
 	emitQueueBookingChanged(booking.QueueSessionID, "booking-skipped", booking)
 	realtime.EmitToQueue(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
@@ -1719,6 +1720,10 @@ func updateQueueSessionStatusCompat(session *models.QueueSession, targetStatus s
 
 	switch targetStatus {
 	case "active":
+		// Block start/resume if another session is already active in the same classroom.
+		if err := repositories.CheckActiveQueueSessionForClassroom(session.ClassroomID, session.ID); err != nil {
+			return err
+		}
 		if session.Status == "draft" {
 			if !allowDraft {
 				return fmt.Errorf("ไม่สามารถเปลี่ยนสถานะจาก %s เป็น %s", session.Status, targetStatus)
@@ -2351,6 +2356,20 @@ func UpdateQueueSessionStatusPublicHandler(c fiber.Ctx) error {
 	}
 
 	if err := updateQueueSessionStatusCompat(session, input.Status, false); err != nil {
+		var conflictErr *repositories.ClassroomConflictError
+		if errors.As(err, &conflictErr) {
+			return c.Status(409).JSON(fiber.Map{
+				"success": false,
+				"message": conflictErr.Error(),
+				"classroom_conflict": fiber.Map{
+					"session_id":    conflictErr.SessionID,
+					"session_title": conflictErr.SessionTitle,
+					"course_id":     conflictErr.CourseID,
+					"course_name":   conflictErr.CourseName,
+					"started_at":    conflictErr.StartedAt,
+				},
+			})
+		}
 		return queueLegacyError(c, 400, err.Error())
 	}
 
@@ -2359,7 +2378,7 @@ func UpdateQueueSessionStatusPublicHandler(c fiber.Ctx) error {
 		return queueLegacyError(c, 500, err.Error())
 	}
 	if actorID, ok := queueOptionalActorID(c); ok {
-		writeCourseActivityLog(updatedSession.CourseID, actorID, "update_queue_session_status", "queue", "queue_session", updatedSession.ID, updatedSession.Title, fiber.Map{"status": updatedSession.Status, "source": "projector"})
+		logCourseActivity(c, updatedSession.CourseID, actorID, "update_queue_session_status", "queue", "queue_session", updatedSession.ID, updatedSession.Title, fiber.Map{"status": updatedSession.Status, "source": "projector"})
 	}
 	realtime.EmitToQueue(updatedSession.ID, "session-status-changed", fiber.Map{"status": updatedSession.Status, "session": updatedSession, "timestamp": time.Now().UnixMilli()})
 
@@ -2444,6 +2463,20 @@ func UpdateQueueSessionStatusCompatHandler(c fiber.Ctx) error {
 	}
 
 	if err := updateQueueSessionStatusCompat(session, input.Status, true); err != nil {
+		var conflictErr *repositories.ClassroomConflictError
+		if errors.As(err, &conflictErr) {
+			return c.Status(409).JSON(fiber.Map{
+				"success": false,
+				"message": conflictErr.Error(),
+				"classroom_conflict": fiber.Map{
+					"session_id":    conflictErr.SessionID,
+					"session_title": conflictErr.SessionTitle,
+					"course_id":     conflictErr.CourseID,
+					"course_name":   conflictErr.CourseName,
+					"started_at":    conflictErr.StartedAt,
+				},
+			})
+		}
 		return queueLegacyError(c, 400, err.Error())
 	}
 
@@ -2474,7 +2507,7 @@ func RegenerateQueuePINHandler(c fiber.Ctx) error {
 	if err != nil {
 		return queueLegacyError(c, 500, err.Error())
 	}
-	writeCourseActivityLog(session.CourseID, c.Locals("user_id").(uint), "regenerate_queue_pin", "queue", "queue_session", session.ID, session.Title, fiber.Map{"regenerated": true})
+	logCourseActivity(c, session.CourseID, c.Locals("user_id").(uint), "regenerate_queue_pin", "queue", "queue_session", session.ID, session.Title, fiber.Map{"regenerated": true})
 
 	return c.JSON(fiber.Map{
 		"success": true,

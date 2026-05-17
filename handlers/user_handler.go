@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"crypto/rand"
-	"itii-assist/config"
 	"itii-assist/models"
 	"itii-assist/repositories"
 	"itii-assist/utils"
@@ -143,10 +142,12 @@ func CreateUserHandler(c fiber.Ctx) error {
 	if input.Role != "admin" && input.Role != "instructor" && input.Role != "ta" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "role ต้องเป็น admin, instructor หรือ ta"})
 	}
-	if repositories.IsUsernameExists(input.Username, 0) {
+	// Only block if an *active* user already has this username.
+	// Disabled usernames are treated as archived and may be reused for new accounts.
+	if repositories.IsActiveUsernameExists(input.Username, 0) {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ชื่อผู้ใช้นี้มีอยู่ในระบบแล้ว"})
 	}
-	if input.Email != "" && repositories.IsEmailExists(input.Email, 0) {
+	if input.Email != "" && repositories.IsActiveEmailExists(input.Email, 0) {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "อีเมลนี้มีอยู่ในระบบแล้ว"})
 	}
 
@@ -178,14 +179,9 @@ func CreateUserHandler(c fiber.Ctx) error {
 	}
 
 	actorID := c.Locals("user_id").(uint)
-	config.DB.Create(&models.SystemLog{
-		Action:       "create_user",
-		LogType:      "auth",
-		Severity:     "info",
-		ActorUserID:  &actorID,
-		ResourceType: "users",
-		ResourceID:   strconv.FormatUint(uint64(newUser.ID), 10),
-		IPAddress:    c.IP(),
+	logPrivilegedAdminAction(c, actorID, "create_user", "info", "users", userIDString(newUser.ID), fiber.Map{
+		"target_type":     "user",
+		"target_snapshot": userSnapshotForAudit(&newUser),
 	})
 
 	return c.Status(201).JSON(fiber.Map{
@@ -208,7 +204,6 @@ func CreateUserHandler(c fiber.Ctx) error {
 type UpdateUserInput struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
-	Role     string `json:"role"`
 	FullName string `json:"full_name"`
 	Email    string `json:"email"`
 	IsActive *bool  `json:"is_active"`
@@ -232,19 +227,16 @@ func UpdateUserHandler(c fiber.Ctx) error {
 	}
 
 	if input.Username != "" && input.Username != user.Username {
-		if repositories.IsUsernameExists(input.Username, user.ID) {
+		if repositories.IsActiveUsernameExists(input.Username, user.ID) {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "ชื่อผู้ใช้นี้มีอยู่ในระบบแล้ว"})
 		}
 		user.Username = input.Username
 	}
 	if input.Email != "" && input.Email != user.Email {
-		if repositories.IsEmailExists(input.Email, user.ID) {
+		if repositories.IsActiveEmailExists(input.Email, user.ID) {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "อีเมลนี้มีอยู่ในระบบแล้ว"})
 		}
 		user.Email = input.Email
-	}
-	if input.Role != "" && (input.Role == "admin" || input.Role == "instructor" || input.Role == "ta") {
-		user.Role = input.Role
 	}
 	if input.FullName != "" {
 		user.FullName = input.FullName
@@ -268,14 +260,10 @@ func UpdateUserHandler(c fiber.Ctx) error {
 	}
 
 	actorID := c.Locals("user_id").(uint)
-	config.DB.Create(&models.SystemLog{
-		Action:       "update_user",
-		LogType:      "auth",
-		Severity:     "info",
-		ActorUserID:  &actorID,
-		ResourceType: "users",
-		ResourceID:   c.Params("id"),
-		IPAddress:    c.IP(),
+	logPrivilegedAdminAction(c, actorID, "update_user", "info", "users", c.Params("id"), fiber.Map{
+		"target_type":     "user",
+		"target_snapshot": userSnapshotForAudit(user),
+		"password_reset":  input.Password != "",
 	})
 
 	return c.JSON(fiber.Map{
@@ -300,9 +288,70 @@ func ToggleUserStatusHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไม่สามารถเปลี่ยนสถานะบัญชีของตัวเองได้"})
 	}
 
-	user, err := repositories.ToggleUserStatus(uint(id))
+	// Pre-fetch to know current state before toggling
+	user, err := repositories.FindUserByID(uint(id))
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบผู้ใช้"})
+	}
+
+	// If enabling a disabled user: detect username OR email conflict with an active account
+	if !user.IsActive {
+		var conflictUser *models.User
+		conflictField := ""
+		conflictValue := ""
+
+		uConflict, uErr := repositories.FindActiveUserByUsernameExcluding(user.Username, user.ID)
+		if uErr == nil && uConflict != nil {
+			conflictUser = uConflict
+			conflictField = "username"
+			conflictValue = user.Username
+		}
+
+		if conflictUser == nil && user.Email != "" {
+			eConflict, eErr := repositories.FindActiveUserByEmailExcluding(user.Email, user.ID)
+			if eErr == nil && eConflict != nil {
+				conflictUser = eConflict
+				conflictField = "email"
+				conflictValue = user.Email
+			}
+		}
+
+		if conflictUser != nil {
+			if c.Query("force") != "true" {
+				conflictMsg := "มีบัญชีที่ใช้งานอยู่แล้วด้วยชื่อผู้ใช้เดียวกัน"
+				if conflictField == "email" {
+					conflictMsg = "มีบัญชีที่ใช้งานอยู่แล้วด้วยอีเมลเดียวกัน"
+				}
+				// Return 409 with both user objects so the frontend can present a choice
+				return c.Status(409).JSON(fiber.Map{
+					"success": false,
+					"message": conflictMsg,
+					"conflict": fiber.Map{
+						"username":       user.Username,
+						"conflict_field": conflictField,
+						"conflict_value": conflictValue,
+						"conflict_user":  safeUser(conflictUser),
+						"target_user":    safeUser(user),
+					},
+				})
+			}
+			// force=true: disable the conflicting active account first
+			conflictUser.IsActive = false
+			if err := repositories.UpdateUser(conflictUser); err != nil {
+				return c.Status(500).JSON(fiber.Map{"success": false, "message": "ไม่สามารถปิดบัญชีที่ขัดแย้งได้"})
+			}
+			logPrivilegedAdminAction(c, actorID, "deactivate_user_conflict", "warn", "users", userIDString(conflictUser.ID), fiber.Map{
+				"target_type":     "user",
+				"conflict_field":  conflictField,
+				"conflict_value":  conflictValue,
+				"target_snapshot": userSnapshotForAudit(conflictUser),
+			})
+		}
+	}
+
+	user, err = repositories.ToggleUserStatus(uint(id))
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "เปลี่ยนสถานะไม่สำเร็จ"})
 	}
 
 	action := "deactivate_user"
@@ -312,14 +361,9 @@ func ToggleUserStatusHandler(c fiber.Ctx) error {
 		msg = "เปิดใช้งานผู้ใช้สำเร็จ"
 	}
 
-	config.DB.Create(&models.SystemLog{
-		Action:       action,
-		LogType:      "auth",
-		Severity:     "info",
-		ActorUserID:  &actorID,
-		ResourceType: "users",
-		ResourceID:   c.Params("id"),
-		IPAddress:    c.IP(),
+	logPrivilegedAdminAction(c, actorID, action, "warn", "users", c.Params("id"), fiber.Map{
+		"target_type":     "user",
+		"target_snapshot": userSnapshotForAudit(user),
 	})
 
 	return c.JSON(fiber.Map{
@@ -354,15 +398,14 @@ func DeleteUserHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ลบผู้ใช้ไม่สำเร็จ"})
 	}
 
-	config.DB.Create(&models.SystemLog{
-		Action:       "delete_user",
-		LogType:      "auth",
-		Severity:     "warn",
-		ActorUserID:  &actorID,
-		ResourceType: "users",
-		ResourceID:   c.Params("id"),
-		Detail:       []byte(`{"username":"` + username + `"}`),
-		IPAddress:    c.IP(),
+	logPrivilegedAdminAction(c, actorID, "delete_user", "critical", "users", c.Params("id"), fiber.Map{
+		"target_type": "user",
+		"target_snapshot": fiber.Map{
+			"id":       user.ID,
+			"username": username,
+			"email":    user.Email,
+			"role":     user.Role,
+		},
 	})
 
 	return c.JSON(fiber.Map{"success": true, "message": "ลบผู้ใช้สำเร็จ"})

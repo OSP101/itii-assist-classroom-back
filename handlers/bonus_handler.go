@@ -80,6 +80,12 @@ func GiveBonusScoreHandler(c fiber.Ctx) error {
 	student, _ := repositories.FindStudentByID(input.StudentID)
 	giver, _ := repositories.FindUserByID(givenBy)
 
+	studentName := ""
+	if student != nil {
+		studentName = student.FullName
+	}
+	logCourseActivity(c, input.CourseID, givenBy, "give_bonus_score", "score", "student", input.StudentID, studentName, fiber.Map{"score": score, "reason": input.Reason})
+
 	bonusScore := fiber.Map{
 		"id":         bonus.ID,
 		"course_id":  bonus.CourseID,

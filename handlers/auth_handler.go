@@ -157,6 +157,10 @@ func LoginHandler(c fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"success": false, "message": "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"})
 	}
 
+	if strings.EqualFold(strings.TrimSpace(user.Role), "student") {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "บัญชีนักศึกษาต้องเข้าสู่ระบบผ่าน Google"})
+	}
+
 	if !utils.CheckPasswordHash(input.Password, user.PasswordHash) {
 		return c.Status(401).JSON(fiber.Map{"success": false, "message": "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"})
 	}
@@ -247,6 +251,34 @@ func RefreshHandler(c fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Refresh Token ถูกยกเลิกแล้ว"})
 	}
 
+	// Student session refresh
+	if claims.Kind == "s" || tokenRecord.Kind == "s" {
+		student, studentErr := repositories.FindStudentByID(tokenRecord.UserID)
+		if studentErr != nil || !student.IsActive {
+			return c.Status(401).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูลนักศึกษาหรือถูกระงับการใช้งาน"})
+		}
+		if err := repositories.RevokeRefreshToken(claims.JTI); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "ไม่สามารถยกเลิก Token เดิมได้"})
+		}
+		accessToken, refreshToken, newJTI, err := utils.GenerateStudentTokenPair(student.ID)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "สร้าง Token ใหม่ไม่สำเร็จ"})
+		}
+		if err := repositories.CreateRefreshToken(&models.RefreshToken{
+			JTI:       newJTI,
+			UserID:    student.ID,
+			Kind:      "s",
+			ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
+		}); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึก Token ใหม่ไม่สำเร็จ"})
+		}
+		return c.JSON(fiber.Map{
+			"success": true,
+			"message": "ต่ออายุ Token สำเร็จ",
+			"data":    fiber.Map{"accessToken": accessToken, "refreshToken": refreshToken},
+		})
+	}
+
 	user, err := repositories.FindUserByID(tokenRecord.UserID)
 	if err != nil || !user.IsActive {
 		return c.Status(401).JSON(fiber.Map{"success": false, "message": "ไม่พบผู้ใช้หรือถูกระงับการใช้งาน"})
@@ -266,6 +298,7 @@ func RefreshHandler(c fiber.Ctx) error {
 	if err := repositories.CreateRefreshToken(&models.RefreshToken{
 		JTI:       newJTI,
 		UserID:    user.ID,
+		Kind:      "u",
 		ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
 	}); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึก Token ใหม่ไม่สำเร็จ"})
@@ -414,6 +447,37 @@ func ResetPasswordHandler(c fiber.Ctx) error {
 // =============================================================================
 
 func GetMeHandler(c fiber.Ctx) error {
+	// Student session: return student data from students table
+	if studentID, ok := middlewares.GetStudentID(c); ok {
+		student, err := repositories.FindStudentByID(studentID)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูลนักศึกษา"})
+		}
+		return c.JSON(fiber.Map{
+			"success": true,
+			"data": fiber.Map{
+				"user": fiber.Map{
+					"id":         student.ID,
+					"student_id": student.StudentID,
+					"username":   student.StudentID,
+					"full_name":  student.FullName,
+					"email":      student.Email,
+					"role":       "student",
+					"provider":   "google",
+					"is_active":  student.IsActive,
+					"avatar":     "",
+					"preferences": fiber.Map{
+						"theme":    "system",
+						"fontSize": "md",
+						"language": "th",
+					},
+					"created_at": student.CreatedAt,
+					"updated_at": student.UpdatedAt,
+				},
+			},
+		})
+	}
+
 	userID := c.Locals("user_id").(uint)
 	user, err := repositories.FindUserByID(userID)
 	if err != nil {

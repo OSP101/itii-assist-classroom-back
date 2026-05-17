@@ -47,6 +47,7 @@ type CourseWithCounts struct {
 	TAs          []UserBasic    `json:"tas"`
 	TaCount      int64          `json:"taCount"`
 	StudentCount int64          `json:"studentCount"`
+	MySectionNo  string         `json:"my_section_no"`
 }
 
 type CourseDetail struct {
@@ -100,6 +101,29 @@ type MyCourseStats struct {
 	Total    int64                 `json:"total"`
 	ByStatus CourseStatusBreakdown `json:"byStatus"`
 	Years    []int                 `json:"years"`
+}
+
+type CourseConflictParams struct {
+	Search   string
+	Year     int
+	Semester int
+	Limit    int
+}
+
+type CourseActivationConflict struct {
+	ConflictType       string `json:"conflict_type"`
+	CourseCode         string `json:"course_code"`
+	Year               int    `json:"year"`
+	Semester           int    `json:"semester"`
+	ActiveCourseID     string `json:"active_course_id"`
+	ActiveCourseName   string `json:"active_course_name"`
+	InactiveCourseID   string `json:"inactive_course_id"`
+	InactiveCourseName string `json:"inactive_course_name"`
+}
+
+type CourseConflictListResult struct {
+	Items []CourseActivationConflict `json:"items"`
+	Total int64                      `json:"total"`
 }
 
 type courseMemberRow struct {
@@ -425,6 +449,66 @@ func GetCourseStats() (CourseStats, error) {
 	}, nil
 }
 
+func GetCourseActivationConflicts(params CourseConflictParams) (CourseConflictListResult, error) {
+	db := config.DB
+
+	if params.Limit <= 0 {
+		params.Limit = 50
+	}
+	if params.Limit > 200 {
+		params.Limit = 200
+	}
+
+	baseQuery := db.Table("courses AS inactive").
+		Joins("JOIN courses AS active ON active.code = inactive.code AND active.year = inactive.year AND active.semester = inactive.semester AND active.id <> inactive.id").
+		Where("inactive.is_active = ?", false).
+		Where("active.is_active = ?", true)
+
+	if params.Search != "" {
+		search := "%" + strings.TrimSpace(params.Search) + "%"
+		baseQuery = baseQuery.Where(
+			"inactive.code ILIKE ? OR inactive.name ILIKE ? OR active.name ILIKE ?",
+			search,
+			search,
+			search,
+		)
+	}
+
+	if params.Year > 0 {
+		baseQuery = baseQuery.Where("inactive.year = ?", params.Year)
+	}
+
+	if params.Semester > 0 {
+		baseQuery = baseQuery.Where("inactive.semester = ?", params.Semester)
+	}
+
+	var total int64
+	if err := baseQuery.Count(&total).Error; err != nil {
+		return CourseConflictListResult{}, err
+	}
+
+	items := make([]CourseActivationConflict, 0)
+	err := baseQuery.
+		Select(`
+			'duplicate_active_course' AS conflict_type,
+			inactive.code AS course_code,
+			inactive.year,
+			inactive.semester,
+			active.id AS active_course_id,
+			active.name AS active_course_name,
+			inactive.id AS inactive_course_id,
+			inactive.name AS inactive_course_name
+		`).
+		Order("inactive.year DESC, inactive.semester DESC, inactive.code ASC, inactive.updated_at DESC").
+		Limit(params.Limit).
+		Scan(&items).Error
+	if err != nil {
+		return CourseConflictListResult{}, err
+	}
+
+	return CourseConflictListResult{Items: items, Total: total}, nil
+}
+
 func FindCourseByID(id string) (*CourseDetail, error) {
 	db := config.DB
 
@@ -615,6 +699,51 @@ func IsUserCourseTA(courseID string, userID uint) bool {
 	return count > 0
 }
 
+// IsUserEmailStudentInCourse checks (case-insensitive) whether any student
+// currently enrolled in the course shares the given email address.
+func IsUserEmailStudentInCourse(courseID string, email string) bool {
+	if email == "" {
+		return false
+	}
+	var count int64
+	config.DB.Raw(`
+		SELECT COUNT(*) FROM students s
+		JOIN course_section_students css ON css.student_id = s.id
+		JOIN course_sections cs ON cs.id = css.course_section_id
+		WHERE cs.course_id = ? AND s.email != '' AND LOWER(s.email) = LOWER(?)
+	`, courseID, email).Scan(&count)
+	return count > 0
+}
+
+// IsStudentEmailCourseTA checks (case-insensitive) whether any TA
+// in the course shares the given email address.
+func IsStudentEmailCourseTA(courseID string, email string) bool {
+	if email == "" {
+		return false
+	}
+	var count int64
+	config.DB.Raw(`
+		SELECT COUNT(*) FROM users u
+		JOIN course_tas ct ON ct.user_id = u.id
+		WHERE ct.course_id = ? AND u.email != '' AND LOWER(u.email) = LOWER(?)
+	`, courseID, email).Scan(&count)
+	return count > 0
+}
+
+// GetUserEmailByID returns the email of a User by its primary key (empty string if not found).
+func GetUserEmailByID(userID uint) string {
+	var u models.User
+	config.DB.Select("email").Where("id = ?", userID).First(&u)
+	return u.Email
+}
+
+// GetStudentEmailByID returns the email of a Student by its primary key (empty string if not found).
+func GetStudentEmailByID(studentID uint) string {
+	var s models.Student
+	config.DB.Select("email").Where("id = ?", studentID).First(&s)
+	return s.Email
+}
+
 // ============================================================
 // Section Management
 // ============================================================
@@ -785,6 +914,22 @@ func BulkAddCourseTAs(courseID string, userIDs []uint) (addedUsers []UserBasic, 
 		return []UserBasic{}, 0, nil
 	}
 
+	// Collect existing student emails in the course for cross-role conflict check
+	var studentEmailRows []struct{ Email string }
+	config.DB.Raw(`
+		SELECT LOWER(s.email) as email
+		FROM students s
+		JOIN course_section_students css ON css.student_id = s.id
+		JOIN course_sections cs ON cs.id = css.course_section_id
+		WHERE cs.course_id = ? AND s.email != ''
+	`, courseID).Scan(&studentEmailRows)
+	studentEmailSet := make(map[string]struct{}, len(studentEmailRows))
+	for _, r := range studentEmailRows {
+		if r.Email != "" {
+			studentEmailSet[r.Email] = struct{}{}
+		}
+	}
+
 	validIDs := make([]uint, 0, len(taUsers))
 	for _, user := range taUsers {
 		validIDs = append(validIDs, user.ID)
@@ -803,6 +948,12 @@ func BulkAddCourseTAs(courseID string, userIDs []uint) (addedUsers []UserBasic, 
 		if existingSet[user.ID] {
 			skipped++
 		} else {
+			if user.Email != "" {
+				if _, conflict := studentEmailSet[strings.ToLower(user.Email)]; conflict {
+					skipped++
+					continue
+				}
+			}
 			toCreate = append(toCreate, models.CourseTA{
 				CourseID: courseID, UserID: user.ID, Permissions: EncodeCourseMemberPermissions("ta", nil), AssignedAt: time.Now(),
 			})
@@ -921,7 +1072,30 @@ func AddStudentToSection(sectionID uint, studentID uint) error {
 	})
 }
 
-func BulkAddStudentsToSection(sectionID uint, studentIDs []uint) (added, skipped int, err error) {
+func BulkAddStudentsToSection(courseID string, sectionID uint, studentIDs []uint) (added, skipped int, err error) {
+	// Collect TA emails in this course for cross-role conflict check
+	var taEmailRows []struct{ Email string }
+	config.DB.Raw(`
+		SELECT LOWER(u.email) as email
+		FROM users u
+		JOIN course_tas ct ON ct.user_id = u.id
+		WHERE ct.course_id = ? AND u.email != ''
+	`, courseID).Scan(&taEmailRows)
+	taEmailSet := make(map[string]struct{}, len(taEmailRows))
+	for _, r := range taEmailRows {
+		if r.Email != "" {
+			taEmailSet[r.Email] = struct{}{}
+		}
+	}
+
+	// Load student emails for the requested IDs
+	var studentRecords []models.Student
+	config.DB.Select("id, email").Where("id IN ?", studentIDs).Find(&studentRecords)
+	studentEmailMap := make(map[uint]string, len(studentRecords))
+	for _, s := range studentRecords {
+		studentEmailMap[s.ID] = s.Email
+	}
+
 	// Find already enrolled in this section
 	var existing []models.CourseSectionStudent
 	config.DB.Where("course_section_id = ? AND student_id IN ?", sectionID, studentIDs).Find(&existing)
@@ -935,6 +1109,13 @@ func BulkAddStudentsToSection(sectionID uint, studentIDs []uint) (added, skipped
 		if existingSet[sid] {
 			skipped++
 		} else {
+			email := studentEmailMap[sid]
+			if email != "" {
+				if _, conflict := taEmailSet[strings.ToLower(email)]; conflict {
+					skipped++
+					continue
+				}
+			}
 			toCreate = append(toCreate, models.CourseSectionStudent{
 				CourseSectionID: sectionID,
 				StudentID:       sid,
@@ -1177,11 +1358,19 @@ func GetMyCourses(userID uint, role string, params CourseListParams) (CourseList
 
 	query := db.Model(&models.Course{})
 
+	var resolvedStudentID uint
+
 	// Filter by membership
 	if role == "instructor" {
 		query = query.Joins(`JOIN course_instructors ci ON ci.course_id = courses.id AND ci.user_id = ?`, userID)
 	} else if role == "ta" {
 		query = query.Joins(`JOIN course_tas ct ON ct.course_id = courses.id AND ct.user_id = ?`, userID)
+	} else if role == "student" {
+		// userID here IS the student.ID (from students table) — no User lookup needed
+		resolvedStudentID = userID
+		query = query.Joins(`JOIN course_sections cs ON cs.course_id = courses.id`).
+			Joins(`JOIN course_section_students css ON css.course_section_id = cs.id AND css.student_id = ?`, userID).
+			Distinct("courses.id")
 	}
 
 	// Search
@@ -1362,6 +1551,28 @@ func GetMyCourses(userID uint, role string, params CourseListParams) (CourseList
 		}
 	}
 
+	// For student role, look up which section they're enrolled in per course
+	if resolvedStudentID > 0 && len(courseIDs) > 0 {
+		type studentSectionRow struct {
+			CourseID  string
+			SectionNo string
+		}
+		var sectionRows []studentSectionRow
+		db.Raw(`
+			SELECT cs.course_id, cs.section_no
+			FROM course_sections cs
+			JOIN course_section_students css ON css.course_section_id = cs.id
+			WHERE css.student_id = ? AND cs.course_id IN ?
+		`, resolvedStudentID, courseIDs).Scan(&sectionRows)
+		sectionNoMap := map[string]string{}
+		for _, row := range sectionRows {
+			sectionNoMap[row.CourseID] = row.SectionNo
+		}
+		for i := range result {
+			result[i].MySectionNo = sectionNoMap[result[i].Course.ID]
+		}
+	}
+
 	totalPages := int(total) / params.Limit
 	if int(total)%params.Limit != 0 {
 		totalPages++
@@ -1412,4 +1623,147 @@ func GetMyCourseStats(userID uint, role string) (*MyCourseStats, error) {
 	}
 
 	return stats, nil
+}
+
+// BulkToggleCourseStatus enables or disables courses in bulk.
+// For enable=true, already-active courses and courses with an activation conflict are skipped.
+// For enable=false, all given courses are set to inactive.
+// Returns slices of courses that were toggled and courses that were skipped.
+func BulkToggleCourseStatus(ids []string, enable bool) (toggled []models.Course, skipped []models.Course, err error) {
+	toggled = []models.Course{}
+	skipped = []models.Course{}
+	if len(ids) == 0 {
+		return
+	}
+
+	var courses []models.Course
+	if err = config.DB.Where("id IN ?", ids).Find(&courses).Error; err != nil {
+		return
+	}
+
+	if !enable {
+		if len(courses) == 0 {
+			return
+		}
+		if err = config.DB.Model(&models.Course{}).Where("id IN ?", ids).Update("is_active", false).Error; err != nil {
+			return
+		}
+		toggled = courses
+		return
+	}
+
+	// Enable: skip already-active, skip conflicts
+	toUpdateIDs := make([]string, 0, len(courses))
+	for _, c := range courses {
+		if c.IsActive {
+			skipped = append(skipped, c)
+			continue
+		}
+		if IsActiveCourseExists(c.Code, c.Year, c.Semester, c.ID) {
+			skipped = append(skipped, c)
+			continue
+		}
+		toUpdateIDs = append(toUpdateIDs, c.ID)
+		toggled = append(toggled, c)
+	}
+
+	if len(toUpdateIDs) > 0 {
+		err = config.DB.Model(&models.Course{}).Where("id IN ?", toUpdateIDs).Update("is_active", true).Error
+	}
+	return
+}
+
+// CourseExportRow is a course with aggregated fields for CSV export.
+type CourseExportRow struct {
+	models.Course
+	InstructorNames string
+	SectionsCount   int64
+}
+
+// GetCoursesForExport returns up to 5000 courses matching the given filter params.
+func GetCoursesForExport(params CourseListParams) ([]CourseExportRow, error) {
+	db := config.DB
+
+	query := db.Model(&models.Course{})
+
+	if params.Search != "" {
+		like := "%" + strings.TrimSpace(params.Search) + "%"
+		query = query.Where("code ILIKE ? OR name ILIKE ?", like, like)
+	}
+	if params.Year > 0 {
+		query = query.Where("year = ?", params.Year)
+	}
+	if params.Semester > 0 {
+		query = query.Where("semester = ?", params.Semester)
+	}
+	switch params.Status {
+	case "active":
+		query = query.Where("is_active = true")
+	case "inactive":
+		query = query.Where("is_active = false")
+	}
+
+	var courses []models.Course
+	if err := query.Order("created_at DESC").Limit(5000).Find(&courses).Error; err != nil {
+		return nil, err
+	}
+
+	if len(courses) == 0 {
+		return []CourseExportRow{}, nil
+	}
+
+	courseIDs := make([]string, len(courses))
+	for i, c := range courses {
+		courseIDs[i] = c.ID
+	}
+
+	// Batch: instructors
+	var ciRows []courseInstructorMemberRow
+	db.Raw(`SELECT course_id, user_id, is_primary, assigned_at, permissions FROM course_instructors WHERE course_id IN ? ORDER BY course_id ASC, is_primary DESC, assigned_at ASC`, courseIDs).Scan(&ciRows)
+
+	userIDSet := map[uint]struct{}{}
+	for _, r := range ciRows {
+		userIDSet[r.UserID] = struct{}{}
+	}
+	userIDs := make([]uint, 0, len(userIDSet))
+	for uid := range userIDSet {
+		userIDs = append(userIDs, uid)
+	}
+	userNameMap := map[uint]string{}
+	if len(userIDs) > 0 {
+		var users []models.User
+		db.Where("id IN ?", userIDs).Find(&users)
+		for _, u := range users {
+			userNameMap[u.ID] = u.FullName
+		}
+	}
+
+	instructorNamesMap := map[string][]string{}
+	for _, r := range ciRows {
+		if name, ok := userNameMap[r.UserID]; ok {
+			instructorNamesMap[r.CourseID] = append(instructorNamesMap[r.CourseID], name)
+		}
+	}
+
+	// Batch: section counts
+	type secCountRow struct {
+		CourseID string
+		Cnt      int64
+	}
+	var secCounts []secCountRow
+	db.Raw(`SELECT course_id, COUNT(*) as cnt FROM course_sections WHERE course_id IN ? GROUP BY course_id`, courseIDs).Scan(&secCounts)
+	sectionCountMap := map[string]int64{}
+	for _, r := range secCounts {
+		sectionCountMap[r.CourseID] = r.Cnt
+	}
+
+	result := make([]CourseExportRow, len(courses))
+	for i, c := range courses {
+		result[i] = CourseExportRow{
+			Course:          c,
+			InstructorNames: strings.Join(instructorNamesMap[c.ID], ","),
+			SectionsCount:   sectionCountMap[c.ID],
+		}
+	}
+	return result, nil
 }

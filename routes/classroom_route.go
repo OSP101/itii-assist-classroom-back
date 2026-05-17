@@ -8,6 +8,9 @@ import (
 )
 
 func SetupClassroomRoutes(app *fiber.App) {
+	// Public desk lookup (used by QR scanner – no auth needed)
+	app.Get("/api/desks/:deskId", handlers.GetDeskPublicHandler)
+
 	api := app.Group("/api/classrooms", middlewares.Protected())
 
 	api.Get("/stats", middlewares.RequireRole("admin", "instructor", "ta"), handlers.GetClassroomStatsHandler)

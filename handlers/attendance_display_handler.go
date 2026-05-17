@@ -87,6 +87,26 @@ func BootstrapAttendanceDisplayHandler(c fiber.Ctx) error {
 	})
 }
 
+// GetAttendanceDisplayPairingStatusHandler returns the current pairing status for the
+// display that owns the bootstrap cookie. This is intentionally lightweight — it only
+// exposes { status } so the projector page can poll for "claimed" without auth.
+func GetAttendanceDisplayPairingStatusHandler(c fiber.Ctx) error {
+	bootstrapSecret := strings.TrimSpace(c.Cookies(attendanceDisplayBootstrapCookie))
+	if bootstrapSecret == "" {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Display bootstrap cookie is missing"})
+	}
+	pairingID := strings.TrimSpace(c.Query("pairing_id"))
+	if pairingID == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "pairing_id is required"})
+	}
+	status, err := repositories.GetPairingStatusByBootstrap(pairingID, bootstrapSecret)
+	if err != nil {
+		httpStatus, message := translateAttendanceDisplayError(err)
+		return c.Status(httpStatus).JSON(fiber.Map{"success": false, "message": message})
+	}
+	return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"status": status}})
+}
+
 func GetAttendanceDisplayPairingHandler(c fiber.Ctx) error {
 	view, err := repositories.GetAttendanceDisplayPairing(c.Params("token"))
 	if err != nil {

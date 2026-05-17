@@ -6,6 +6,8 @@ import (
 	"math"
 	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // ─── List / Search ───────────────────────────────────────────────────────────
@@ -106,6 +108,30 @@ func FindStudentByStudentID(studentID string) (*models.Student, error) {
 	return &s, err
 }
 
+func FindStudentByEmail(email string) (*models.Student, error) {
+	var s models.Student
+	err := config.DB.Where("LOWER(email) = LOWER(?)", strings.TrimSpace(email)).First(&s).Error
+	return &s, err
+}
+
+func ResolveStudentFromUser(user *models.User) (*models.Student, error) {
+	if user == nil {
+		return nil, gorm.ErrRecordNotFound
+	}
+
+	if student, err := FindStudentByStudentID(strings.TrimSpace(user.Username)); err == nil {
+		return student, nil
+	}
+
+	if strings.TrimSpace(user.Email) != "" {
+		if student, err := FindStudentByEmail(user.Email); err == nil {
+			return student, nil
+		}
+	}
+
+	return nil, gorm.ErrRecordNotFound
+}
+
 type LookupStudentStudent struct {
 	ID        uint   `json:"id"`
 	StudentID string `json:"student_id"`
@@ -114,7 +140,8 @@ type LookupStudentStudent struct {
 }
 
 type LookupStudentCourseSection struct {
-	ID uint `json:"id"`
+	ID        uint   `json:"id"`
+	SectionNo string `json:"section_no"`
 }
 
 type LookupStudentCourse struct {
@@ -151,6 +178,7 @@ type LookupStudentAssignment struct {
 	Grader            *string                          `json:"grader"`
 	GradedAt          *time.Time                       `json:"graded_at"`
 	Comment           *string                          `json:"comment"`
+	GradedVia         *string                          `json:"graded_via"`
 	IsGroupAssignment bool                             `json:"is_group_assignment"`
 	GroupInfo         *LookupStudentGroupInfo          `json:"group_info"`
 	SubItems          []LookupStudentAssignmentSubItem `json:"sub_items"`
@@ -223,6 +251,7 @@ type studentLookupEnrollmentRow struct {
 	Year      int    `gorm:"column:year"`
 	Semester  int    `gorm:"column:semester"`
 	IsActive  bool   `gorm:"column:is_active"`
+	SectionNo string `gorm:"column:section_no"`
 	SectionID uint   `gorm:"column:section_id"`
 }
 
@@ -242,6 +271,7 @@ type studentLookupMainScoreRow struct {
 	GraderName   string     `gorm:"column:grader_name"`
 	GradedAt     *time.Time `gorm:"column:graded_at"`
 	Comment      string     `gorm:"column:comment"`
+	GradedVia    string     `gorm:"column:graded_via"`
 }
 
 type studentLookupSubItemScoreRow struct {
@@ -290,6 +320,7 @@ type lookupStudentScoreSnapshot struct {
 	Comment   *string
 	IsGroup   bool
 	GroupInfo *LookupStudentGroupInfo
+	GradedVia string
 }
 
 type lookupStudentSubItemSnapshot struct {
@@ -319,7 +350,7 @@ func LookupStudentScores(studentID string) (*LookupStudentResult, error) {
 		Joins("JOIN course_sections AS cs ON cs.id = css.course_section_id").
 		Joins("JOIN courses AS c ON c.id = cs.course_id").
 		Where("css.student_id = ?", student.ID).
-		Select("c.id AS course_id, c.code, c.name, c.year, c.semester, c.is_active, cs.id AS section_id").
+		Select("c.id AS course_id, c.code, c.name, c.year, c.semester, c.is_active, cs.id AS section_id, cs.section_no AS section_no").
 		Order("c.id ASC, cs.id ASC").
 		Scan(&enrollments).Error; err != nil {
 		return nil, err
@@ -355,7 +386,7 @@ func LookupStudentScores(studentID string) (*LookupStudentResult, error) {
 			courseOrder = append(courseOrder, enrollment.CourseID)
 		}
 		if _, seen := sectionSets[enrollment.CourseID][enrollment.SectionID]; !seen {
-			courseEntry.Course.Sections = append(courseEntry.Course.Sections, LookupStudentCourseSection{ID: enrollment.SectionID})
+			courseEntry.Course.Sections = append(courseEntry.Course.Sections, LookupStudentCourseSection{ID: enrollment.SectionID, SectionNo: enrollment.SectionNo})
 			sectionSets[enrollment.CourseID][enrollment.SectionID] = struct{}{}
 		}
 	}
@@ -382,7 +413,9 @@ func LookupStudentScores(studentID string) (*LookupStudentResult, error) {
 	}
 
 	var assignments []models.Assignment
-	if err := config.DB.Where("course_id IN ? AND is_active = ? AND is_score_visible = ?", courseIDs, true, true).
+	if err := config.DB.
+		Where("course_id IN ?", courseIDs).
+		Where("is_active = ? AND is_draft = ? AND is_score_visible = ?", true, false, true).
 		Order("order_index ASC, created_at ASC").
 		Find(&assignments).Error; err != nil {
 		return nil, err
@@ -414,18 +447,25 @@ func LookupStudentScores(studentID string) (*LookupStudentResult, error) {
 		if err := config.DB.Table("scores AS s").
 			Joins("LEFT JOIN users AS u ON u.id = s.graded_by").
 			Where("s.assignment_id IN ? AND s.student_id = ? AND s.sub_item_id IS NULL", assignmentIDs, student.ID).
-			Select("s.assignment_id, s.group_id, s.score, s.status, s.graded_at, s.comment, u.full_name AS grader_name").
+			Select(`s.assignment_id, s.group_id, s.score, s.status, s.graded_at, s.comment, u.full_name AS grader_name,
+				CASE WHEN EXISTS (
+					SELECT 1 FROM queue_bookings qb
+					JOIN queue_sessions qs ON qs.id = qb.queue_session_id
+					WHERE qb.student_id = s.student_id AND qb.booking_type = 'grading' AND qb.status = 'completed'
+					AND qs.linked_assignment_id = s.assignment_id
+				) THEN 'queue' ELSE 'direct' END AS graded_via`).
 			Scan(&individualMainScores).Error; err != nil {
 			return nil, err
 		}
 		for _, score := range individualMainScores {
 			mainScoreMap[score.AssignmentID] = lookupStudentScoreSnapshot{
-				Score:    floatPointer(score.Score),
-				Status:   fallbackString(score.Status, "graded"),
-				Grader:   nullableStringPointer(score.GraderName),
-				GradedAt: cloneTimePointer(score.GradedAt),
-				Comment:  nullableStringPointer(score.Comment),
-				IsGroup:  false,
+				Score:     floatPointer(score.Score),
+				Status:    fallbackString(score.Status, "graded"),
+				Grader:    nullableStringPointer(score.GraderName),
+				GradedAt:  cloneTimePointer(score.GradedAt),
+				Comment:   nullableStringPointer(score.Comment),
+				IsGroup:   false,
+				GradedVia: score.GradedVia,
 			}
 		}
 
@@ -453,7 +493,13 @@ func LookupStudentScores(studentID string) (*LookupStudentResult, error) {
 			if err := config.DB.Table("scores AS s").
 				Joins("LEFT JOIN users AS u ON u.id = s.graded_by").
 				Where("s.assignment_id IN ? AND s.group_id IN ? AND s.sub_item_id IS NULL", assignmentIDs, groupIDs).
-				Select("s.assignment_id, s.group_id, s.score, s.status, s.graded_at, s.comment, u.full_name AS grader_name").
+				Select(`s.assignment_id, s.group_id, s.score, s.status, s.graded_at, s.comment, u.full_name AS grader_name,
+					CASE WHEN EXISTS (
+						SELECT 1 FROM queue_bookings qb
+						JOIN queue_sessions qs ON qs.id = qb.queue_session_id
+						WHERE qb.group_id = s.group_id AND qb.booking_type = 'grading' AND qb.status = 'completed'
+						AND qs.linked_assignment_id = s.assignment_id
+					) THEN 'queue' ELSE 'direct' END AS graded_via`).
 				Scan(&groupMainScores).Error; err != nil {
 				return nil, err
 			}
@@ -473,6 +519,7 @@ func LookupStudentScores(studentID string) (*LookupStudentResult, error) {
 					Comment:   nullableStringPointer(score.Comment),
 					IsGroup:   true,
 					GroupInfo: groupInfo,
+					GradedVia: score.GradedVia,
 				}
 			}
 
@@ -524,6 +571,9 @@ func LookupStudentScores(studentID string) (*LookupStudentResult, error) {
 			assignmentScore.Grader = cloneStringPointer(mainScore.Grader)
 			assignmentScore.GradedAt = cloneTimePointer(mainScore.GradedAt)
 			assignmentScore.Comment = cloneStringPointer(mainScore.Comment)
+			if mainScore.GradedVia != "" {
+				assignmentScore.GradedVia = &mainScore.GradedVia
+			}
 			assignmentScore.IsGroupAssignment = assignmentScore.IsGroupAssignment || mainScore.IsGroup
 			assignmentScore.GroupInfo = cloneGroupInfo(mainScore.GroupInfo)
 		}

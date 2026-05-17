@@ -138,6 +138,27 @@ func loadDisplayDeviceByBootstrapSecret(secret string) (*models.AttendanceDispla
 	return &device, nil
 }
 
+// GetPairingStatusByBootstrap returns the current status of the pairing that belongs
+// to the device identified by bootstrapSecret. It verifies ownership before returning
+// anything so an unauthenticated caller can only poll their own pairing.
+func GetPairingStatusByBootstrap(pairingID string, bootstrapSecret string) (string, error) {
+	device, err := loadDisplayDeviceByBootstrapSecret(bootstrapSecret)
+	if err != nil {
+		return "", ErrAttendanceDisplayUnauthorized
+	}
+	var pairing models.AttendanceDisplayPairing
+	if err := config.DB.Select("id", "status", "expires_at").
+		Where("id = ? AND display_device_id = ?", strings.TrimSpace(pairingID), device.ID).
+		First(&pairing).Error; err != nil {
+		return "", ErrAttendanceDisplayUnauthorized
+	}
+	if time.Now().After(pairing.ExpiresAt) && pairing.Status == "pending" {
+		_ = config.DB.Model(&pairing).Update("status", "expired").Error
+		return "expired", nil
+	}
+	return pairing.Status, nil
+}
+
 func loadDisplayGrantBySessionSecret(secret string) (*models.AttendanceDisplayGrant, error) {
 	var grant models.AttendanceDisplayGrant
 	if err := config.DB.Where("session_secret_hash = ?", hashDisplaySecret(secret)).First(&grant).Error; err != nil {

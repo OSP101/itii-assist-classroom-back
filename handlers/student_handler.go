@@ -2,13 +2,16 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"itii-assist/middlewares"
 	"itii-assist/models"
 	"itii-assist/repositories"
 	"strconv"
 
 	"github.com/gofiber/fiber/v3"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 // =============================================================================
@@ -102,6 +105,98 @@ func LookupStudentHandler(c fiber.Ctx) error {
 		"success": true,
 		"data":    result,
 	})
+}
+
+func GetMyStudentCourseHandler(c fiber.Ctx) error {
+	courseID := c.Params("courseId")
+	if courseID == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "กรุณาระบุรายวิชา"})
+	}
+
+	studentID, ok := middlewares.GetStudentID(c)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูล session นักศึกษา"})
+	}
+	student, err := repositories.FindStudentByID(studentID)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูลนักศึกษา"})
+	}
+
+	if !repositories.IsStudentInCourse(courseID, student.ID) {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบรายวิชานี้ในบัญชีนักศึกษา"})
+	}
+
+	result, err := repositories.LookupStudentScores(student.StudentID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "โหลดข้อมูลรายวิชาไม่สำเร็จ"})
+	}
+
+	queueSessions, err := repositories.GetQueueSessions(courseID, "")
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "โหลดข้อมูลคิวไม่สำเร็จ"})
+	}
+
+	queuePayload := make([]fiber.Map, 0)
+	for _, session := range queueSessions {
+		if session.QueueSession.Status != "active" && session.QueueSession.Status != "paused" {
+			continue
+		}
+
+		var myBooking fiber.Map
+		booking, bookingErr := repositories.GetStudentActiveBooking(session.QueueSession.ID, student.ID)
+		if bookingErr == nil {
+			myBooking = fiber.Map{
+				"id":           booking.ID,
+				"queue_number": booking.QueueNumber,
+				"booking_type": booking.BookingType,
+				"status":       booking.Status,
+				"desk_id":      booking.DeskID,
+				"desk_number":  booking.DeskNumber,
+				"note":         booking.Note,
+				"assigned_at":  booking.AssignedAt,
+				"started_at":   booking.StartedAt,
+				"created_at":   booking.CreatedAt,
+			}
+		} else if !errors.Is(bookingErr, gorm.ErrRecordNotFound) {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "โหลดข้อมูลการจองคิวไม่สำเร็จ"})
+		}
+
+		queuePayload = append(queuePayload, fiber.Map{
+			"id":                           session.QueueSession.ID,
+			"title":                        session.QueueSession.Title,
+			"description":                  session.QueueSession.Description,
+			"status":                       session.QueueSession.Status,
+			"require_attendance":           session.QueueSession.RequireAttendance,
+			"linked_assignment_id":         session.QueueSession.LinkedAssignmentID,
+			"linked_attendance_session_id": session.QueueSession.LinkedAttendanceSessionID,
+			"cutoff_at":                    session.QueueSession.CutoffAt,
+			"cutoff_note":                  session.QueueSession.CutoffNote,
+			"classroom":                    session.Classroom,
+			"linkedAssignment":             session.LinkedAssignment,
+			"linkedAttendanceSession":      session.LinkedAttendanceSession,
+			"stats":                        session.Stats,
+			"my_booking":                   myBooking,
+		})
+	}
+
+	for _, course := range result.Courses {
+		if course.Course.ID != courseID {
+			continue
+		}
+
+		return c.JSON(fiber.Map{
+			"success": true,
+			"data": fiber.Map{
+				"student": result.Student,
+				"course":  course,
+				"queue": fiber.Map{
+					"sessions": queuePayload,
+				},
+			},
+		})
+	}
+
+	return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูลรายวิชาสำหรับนักศึกษา"})
 }
 
 // =============================================================================

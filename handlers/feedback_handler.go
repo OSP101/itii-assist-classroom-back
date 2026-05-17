@@ -176,6 +176,22 @@ func fallbackSupportContact(contactEmail string) string {
 	return trimmed
 }
 
+func feedbackSnapshotForAudit(feedback *repositories.FeedbackWithUsers) fiber.Map {
+	if feedback == nil {
+		return fiber.Map{}
+	}
+
+	return fiber.Map{
+		"id":            feedback.ID,
+		"type":          feedback.Type,
+		"title":         feedback.Title,
+		"status":        feedback.Status,
+		"priority":      feedback.Priority,
+		"resolved_by":   feedback.ResolvedBy,
+		"contact_email": fallbackSupportContact(feedback.ContactEmail),
+	}
+}
+
 func dispatchSupportTicketAlerts(feedback models.Feedback) {
 	notifyAdminsOfSupportTicket(feedback)
 	if err := services.SendSupportTicketAlert(&feedback); err != nil {
@@ -316,6 +332,10 @@ func UpdateFeedbackHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid ID"})
 	}
+	existing, err := repositories.GetFeedbackByID(uint(id))
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Feedback not found"})
+	}
 	var input struct {
 		Status     string `json:"status"`
 		Priority   string `json:"priority"`
@@ -330,6 +350,12 @@ func UpdateFeedbackHandler(c fiber.Ctx) error {
 	if err2 != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update feedback"})
 	}
+	logPrivilegedAdminAction(c, resolvedBy, "update_feedback", "warn", "feedback", strconv.FormatUint(id, 10), fiber.Map{
+		"target_type":     "feedback",
+		"before_snapshot": feedbackSnapshotForAudit(existing),
+		"target_snapshot": feedbackSnapshotForAudit(feedback),
+		"admin_notes":     strings.TrimSpace(input.AdminNotes) != "",
+	})
 	return c.JSON(fiber.Map{"success": true, "message": "อัปเดต Feedback สำเร็จ", "data": feedback})
 }
 
@@ -339,8 +365,17 @@ func DeleteFeedbackHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid ID"})
 	}
+	actorID := c.Locals("user_id").(uint)
+	feedback, err := repositories.GetFeedbackByID(uint(id))
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Feedback not found"})
+	}
 	if err := repositories.DeleteFeedback(uint(id)); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to delete feedback"})
 	}
+	logPrivilegedAdminAction(c, actorID, "delete_feedback", "critical", "feedback", strconv.FormatUint(id, 10), fiber.Map{
+		"target_type":     "feedback",
+		"target_snapshot": feedbackSnapshotForAudit(feedback),
+	})
 	return c.JSON(fiber.Map{"success": true, "message": "ลบ Feedback สำเร็จ"})
 }

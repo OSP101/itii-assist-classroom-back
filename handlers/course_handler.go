@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"itii-assist/middlewares"
 	"itii-assist/models"
 	"itii-assist/repositories"
 	"itii-assist/utils"
@@ -159,14 +160,29 @@ func uniqueCourseUserIDs(values []uint) []uint {
 // =============================================================================
 
 func GetMyCoursesHandler(c fiber.Ctx) error {
-	userID := c.Locals("user_id").(uint)
 	role := c.Locals("user_role").(string)
 	page, _ := strconv.Atoi(c.Query("page", "1"))
 	limit, _ := strconv.Atoi(c.Query("limit", "12"))
 	year, _ := strconv.Atoi(c.Query("year", "0"))
 	semester, _ := strconv.Atoi(c.Query("semester", "0"))
 
-	result, err := repositories.GetMyCourses(userID, role, repositories.CourseListParams{
+	// Student sessions carry student_id, not user_id
+	var resolvedUserID uint
+	if role == "student" {
+		sid, ok := middlewares.GetStudentID(c)
+		if !ok {
+			return c.Status(401).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูล session นักศึกษา"})
+		}
+		resolvedUserID = sid
+	} else {
+		uid, ok := middlewares.GetUserID(c)
+		if !ok {
+			return c.Status(401).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูล session ผู้ใช้"})
+		}
+		resolvedUserID = uid
+	}
+
+	result, err := repositories.GetMyCourses(resolvedUserID, role, repositories.CourseListParams{
 		Page: page, Limit: limit,
 		Search:    c.Query("search"),
 		Year:      year,
@@ -219,6 +235,35 @@ func GetCourseStatsHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ดึงสถิติรายวิชาไม่สำเร็จ"})
 	}
 	return c.JSON(fiber.Map{"success": true, "data": stats})
+}
+
+// =============================================================================
+// GET /api/courses/conflicts?search=&year=&semester=&limit=
+// =============================================================================
+
+func GetCourseConflictsHandler(c fiber.Ctx) error {
+	year, _ := strconv.Atoi(strings.TrimSpace(c.Query("year", "0")))
+	semester, _ := strconv.Atoi(strings.TrimSpace(c.Query("semester", "0")))
+	limit, _ := strconv.Atoi(strings.TrimSpace(c.Query("limit", "50")))
+
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	result, err := repositories.GetCourseActivationConflicts(repositories.CourseConflictParams{
+		Search:   strings.TrimSpace(c.Query("search")),
+		Year:     year,
+		Semester: semester,
+		Limit:    limit,
+	})
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ดึงข้อมูลความขัดแย้งรายวิชาไม่สำเร็จ"})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "data": result})
 }
 
 // =============================================================================
@@ -364,7 +409,7 @@ func CreateCourseHandler(c fiber.Ctx) error {
 		repositories.ReplaceAllCourseInstructors(courseID, instructorIDs)
 	}
 
-	writeCourseActivityLog(courseID, actorID, "create_course", "course", "course", courseID, course.Name, fiber.Map{
+	logCourseActivity(c, courseID, actorID, "create_course", "course", "course", courseID, course.Name, fiber.Map{
 		"code":           course.Code,
 		"year":           course.Year,
 		"semester":       course.Semester,
@@ -498,7 +543,20 @@ func UpdateCourseHandler(c fiber.Ctx) error {
 	if shouldUpdateInstructors {
 		logDetail["instructor_ids"] = instructorIDs
 	}
-	writeCourseActivityLog(id, actorID, "update_course", "course", "course", id, updated.Name, logDetail)
+	logCourseActivity(c, id, actorID, "update_course", "course", "course", id, updated.Name, logDetail)
+	logPrivilegedAdminAction(c, actorID, "update_course", "warn", "courses", id, fiber.Map{
+		"target_type": "course",
+		"target_snapshot": fiber.Map{
+			"id":                  id,
+			"code":                updated.Code,
+			"name":                updated.Name,
+			"year":                updated.Year,
+			"semester":            updated.Semester,
+			"is_active":           updated.IsActive,
+			"attention_threshold": updated.AttentionThreshold,
+		},
+		"updated_instructors": shouldUpdateInstructors,
+	})
 
 	detail, _ := repositories.FindCourseByID(id)
 	return c.JSON(fiber.Map{
@@ -529,10 +587,20 @@ func DeleteCourseHandler(c fiber.Ctx) error {
 	if err := repositories.DeleteCourse(id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ลบรายวิชาไม่สำเร็จ"})
 	}
-	writeCourseActivityLog(id, actorID, "delete_course", "course", "course", id, course.Name, fiber.Map{
+	logCourseActivity(c, id, actorID, "delete_course", "course", "course", id, course.Name, fiber.Map{
 		"code":     course.Code,
 		"year":     course.Year,
 		"semester": course.Semester,
+	})
+	logPrivilegedAdminAction(c, actorID, "delete_course", "critical", "courses", id, fiber.Map{
+		"target_type": "course",
+		"target_snapshot": fiber.Map{
+			"id":       id,
+			"code":     course.Code,
+			"name":     course.Name,
+			"year":     course.Year,
+			"semester": course.Semester,
+		},
 	})
 	return c.JSON(fiber.Map{"success": true, "message": "ลบรายวิชาสำเร็จ"})
 }
@@ -571,7 +639,17 @@ func ToggleCourseStatusHandler(c fiber.Ctx) error {
 		msg = "เปิดใช้งานรายวิชาสำเร็จ"
 		action = "activate_course"
 	}
-	writeCourseActivityLog(id, actorID, action, "course", "course", id, updated.Name, fiber.Map{"is_active": updated.IsActive})
+	logCourseActivity(c, id, actorID, action, "course", "course", id, updated.Name, fiber.Map{"is_active": updated.IsActive})
+	logPrivilegedAdminAction(c, actorID, "toggle_course_status", "warn", "courses", id, fiber.Map{
+		"target_type": "course",
+		"target_snapshot": fiber.Map{
+			"id":        id,
+			"code":      updated.Code,
+			"name":      updated.Name,
+			"is_active": updated.IsActive,
+		},
+		"applied_action": action,
+	})
 	return c.JSON(fiber.Map{"success": true, "message": msg, "data": updated})
 }
 
@@ -610,6 +688,7 @@ func AddSectionHandler(c fiber.Ctx) error {
 	if err := repositories.CreateSection(&section); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "เพิ่มกลุ่มเรียนไม่สำเร็จ"})
 	}
+	logCourseActivity(c, courseID, actorID, "add_section", "member", "section", section.ID, section.SectionNo, fiber.Map{"section_no": section.SectionNo})
 	return c.Status(201).JSON(fiber.Map{"success": true, "message": "เพิ่มกลุ่มเรียนสำเร็จ", "data": section})
 }
 
@@ -646,6 +725,7 @@ func UpdateSectionHandler(c fiber.Ctx) error {
 	if err := repositories.UpdateSection(section); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "แก้ไขกลุ่มเรียนไม่สำเร็จ"})
 	}
+	logCourseActivity(c, courseID, actorID, "update_section", "member", "section", sectionID, section.SectionNo, fiber.Map{"section_no": section.SectionNo})
 	return c.JSON(fiber.Map{"success": true, "message": "แก้ไขกลุ่มเรียนสำเร็จ", "data": section})
 }
 
@@ -667,6 +747,7 @@ func RemoveSectionHandler(c fiber.Ctx) error {
 	if err := repositories.DeleteSection(uint(sectionID), courseID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ลบกลุ่มเรียนไม่สำเร็จ"})
 	}
+	logCourseActivity(c, courseID, actorID, "remove_section", "member", "section", sectionID, "", nil)
 	return c.JSON(fiber.Map{"success": true, "message": "ลบกลุ่มเรียนสำเร็จ"})
 }
 
@@ -701,9 +782,25 @@ func AddTAHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ผู้ช่วยสอนนี้อยู่ในรายวิชาแล้ว"})
 	}
 
+	// Cross-role check: reject if this user's email already belongs to an enrolled student
+	taUserEmail := repositories.GetUserEmailByID(input.UserID)
+	if repositories.IsUserEmailStudentInCourse(courseID, taUserEmail) {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ผู้ใช้นี้ลงทะเบียนเป็นนักศึกษาในรายวิชานี้อยู่แล้ว ไม่สามารถเพิ่มเป็นผู้ช่วยสอนได้"})
+	}
+
 	if err := repositories.AddCourseTA(courseID, input.UserID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "เพิ่มผู้ช่วยสอนไม่สำเร็จ"})
 	}
+	logCourseActivity(c, courseID, actorID, "add_ta", "member", "user", input.UserID, "", nil)
+	logPrivilegedAdminAction(c, actorID, "add_course_ta", "warn", "course_members", courseID, fiber.Map{
+		"target_type": "course_member",
+		"course_id":   courseID,
+		"member_role": "ta",
+		"target_snapshot": fiber.Map{
+			"user_id": input.UserID,
+			"role":    "ta",
+		},
+	})
 	return c.Status(201).JSON(fiber.Map{"success": true, "message": "เพิ่มผู้ช่วยสอนสำเร็จ"})
 }
 
@@ -742,6 +839,15 @@ func BulkAddTAsHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": message})
 	}
 	log.Printf("[courses] bulk add TAs result course=%s actor=%d added=%d skipped=%d added_user_ids=%v", courseID, actorID, len(addedUsers), skipped, userIDs)
+	logCourseActivity(c, courseID, actorID, "bulk_add_tas", "member", "course", courseID, "", fiber.Map{"added": len(addedUsers), "skipped": skipped})
+	logPrivilegedAdminAction(c, actorID, "bulk_add_course_tas", "warn", "course_members", courseID, fiber.Map{
+		"target_type":   "course_member_bulk",
+		"course_id":     courseID,
+		"member_role":   "ta",
+		"user_ids":      userIDs,
+		"added_count":   len(addedUsers),
+		"skipped_count": skipped,
+	})
 	return c.Status(201).JSON(fiber.Map{
 		"success": true,
 		"message": "เพิ่มผู้ช่วยสอน " + strconv.Itoa(len(addedUsers)) + " คนสำเร็จ",
@@ -776,6 +882,16 @@ func RemoveTAHandler(c fiber.Ctx) error {
 	if !repositories.RemoveCourseTA(courseID, uint(userID)) {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบผู้ช่วยสอนในรายวิชานี้"})
 	}
+	logCourseActivity(c, courseID, actorID, "remove_ta", "member", "user", userID, "", nil)
+	logPrivilegedAdminAction(c, actorID, "remove_course_ta", "warn", "course_members", courseID, fiber.Map{
+		"target_type": "course_member",
+		"course_id":   courseID,
+		"member_role": "ta",
+		"target_snapshot": fiber.Map{
+			"user_id": uint(userID),
+			"role":    "ta",
+		},
+	})
 	return c.JSON(fiber.Map{"success": true, "message": "นำผู้ช่วยสอนออกสำเร็จ"})
 }
 
@@ -817,6 +933,16 @@ func AddInstructorHandler(c fiber.Ctx) error {
 	if err := repositories.AddCourseInstructor(courseID, input.UserID, false); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "เพิ่มอาจารย์ไม่สำเร็จ"})
 	}
+	logCourseActivity(c, courseID, actorID, "add_instructor", "member", "user", input.UserID, "", nil)
+	logPrivilegedAdminAction(c, actorID, "add_course_instructor", "warn", "course_members", courseID, fiber.Map{
+		"target_type": "course_member",
+		"course_id":   courseID,
+		"member_role": "instructor",
+		"target_snapshot": fiber.Map{
+			"user_id": input.UserID,
+			"role":    "instructor",
+		},
+	})
 	return c.Status(201).JSON(fiber.Map{"success": true, "message": "เพิ่มอาจารย์สำเร็จ"})
 }
 
@@ -851,6 +977,15 @@ func BulkAddInstructorsHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "เพิ่มอาจารย์ไม่สำเร็จ"})
 	}
+	logCourseActivity(c, courseID, actorID, "bulk_add_instructors", "member", "course", courseID, "", fiber.Map{"added": len(addedUsers), "skipped": skipped})
+	logPrivilegedAdminAction(c, actorID, "bulk_add_course_instructors", "warn", "course_members", courseID, fiber.Map{
+		"target_type":   "course_member_bulk",
+		"course_id":     courseID,
+		"member_role":   "instructor",
+		"user_ids":      input.UserIDs,
+		"added_count":   len(addedUsers),
+		"skipped_count": skipped,
+	})
 	return c.Status(201).JSON(fiber.Map{
 		"success": true,
 		"message": "เพิ่มอาจารย์ " + strconv.Itoa(len(addedUsers)) + " คนสำเร็จ",
@@ -895,6 +1030,16 @@ func RemoveInstructorHandler(c fiber.Ctx) error {
 	if !ok {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบอาจารย์ในรายวิชานี้"})
 	}
+	logCourseActivity(c, courseID, actorID, "remove_instructor", "member", "user", userID, "", nil)
+	logPrivilegedAdminAction(c, actorID, "remove_course_instructor", "warn", "course_members", courseID, fiber.Map{
+		"target_type": "course_member",
+		"course_id":   courseID,
+		"member_role": "instructor",
+		"target_snapshot": fiber.Map{
+			"user_id": uint(userID),
+			"role":    "instructor",
+		},
+	})
 	return c.JSON(fiber.Map{"success": true, "message": "นำอาจารย์ออกสำเร็จ"})
 }
 
@@ -922,6 +1067,15 @@ func UpdateTAPermissionsHandler(c fiber.Ctx) error {
 		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึกสิทธิ์ผู้ช่วยสอนไม่สำเร็จ"})
 	}
+	logPrivilegedAdminAction(c, actorID, "update_course_ta_permissions", "critical", "course_member_permissions", courseID, fiber.Map{
+		"target_type": "course_permission",
+		"course_id":   courseID,
+		"member_role": "ta",
+		"target_snapshot": fiber.Map{
+			"user_id":     uint(userID),
+			"permissions": input.Permissions,
+		},
+	})
 
 	return c.JSON(fiber.Map{"success": true, "message": "อัปเดตสิทธิ์ผู้ช่วยสอนสำเร็จ"})
 }
@@ -930,6 +1084,7 @@ func UpdateTAPermissionsHandler(c fiber.Ctx) error {
 func UpdateInstructorPermissionsHandler(c fiber.Ctx) error {
 	courseID := c.Params("id")
 	userID, _ := strconv.ParseUint(c.Params("userId"), 10, 64)
+	actorID := c.Locals("user_id").(uint)
 
 	var input struct {
 		Permissions repositories.CourseMemberPermissions `json:"permissions"`
@@ -947,6 +1102,15 @@ func UpdateInstructorPermissionsHandler(c fiber.Ctx) error {
 		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึกสิทธิ์อาจารย์ไม่สำเร็จ"})
 	}
+	logPrivilegedAdminAction(c, actorID, "update_course_instructor_permissions", "critical", "course_member_permissions", courseID, fiber.Map{
+		"target_type": "course_permission",
+		"course_id":   courseID,
+		"member_role": "instructor",
+		"target_snapshot": fiber.Map{
+			"user_id":     uint(userID),
+			"permissions": input.Permissions,
+		},
+	})
 
 	return c.JSON(fiber.Map{"success": true, "message": "อัปเดตสิทธิ์อาจารย์สำเร็จ"})
 }
@@ -1003,9 +1167,16 @@ func AddStudentToSectionHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "นักศึกษานี้อยู่ในรายวิชานี้แล้ว"})
 	}
 
+	// Cross-role check: reject if this student's email belongs to a TA in the same course
+	studentEmail := repositories.GetStudentEmailByID(input.StudentID)
+	if repositories.IsStudentEmailCourseTA(courseID, studentEmail) {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "นักศึกษานี้เป็นผู้ช่วยสอนในรายวิชานี้อยู่แล้ว ไม่สามารถลงทะเบียนเป็นนักศึกษาได้"})
+	}
+
 	if err := repositories.AddStudentToSection(uint(sectionID), input.StudentID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "เพิ่มนักศึกษาไม่สำเร็จ"})
 	}
+	logCourseActivity(c, courseID, actorID, "add_student", "member", "student", input.StudentID, "", fiber.Map{"section_id": sectionID})
 	return c.Status(201).JSON(fiber.Map{"success": true, "message": "เพิ่มนักศึกษาสำเร็จ"})
 }
 
@@ -1031,10 +1202,11 @@ func BulkAddStudentsToSectionHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "กรุณาระบุรายชื่อนักศึกษา"})
 	}
 
-	added, skipped, err := repositories.BulkAddStudentsToSection(uint(sectionID), input.StudentIDs)
+	added, skipped, err := repositories.BulkAddStudentsToSection(courseID, uint(sectionID), input.StudentIDs)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "เพิ่มนักศึกษาไม่สำเร็จ"})
 	}
+	logCourseActivity(c, courseID, actorID, "bulk_add_students", "member", "section", sectionID, "", fiber.Map{"added": added, "skipped": skipped})
 	return c.Status(201).JSON(fiber.Map{
 		"success": true,
 		"message": "เพิ่มนักศึกษาสำเร็จ",
@@ -1062,6 +1234,7 @@ func RemoveStudentFromSectionHandler(c fiber.Ctx) error {
 	if !removed {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบนักศึกษาในกลุ่มเรียนนี้"})
 	}
+	logCourseActivity(c, courseID, actorID, "remove_student", "member", "student", studentID, "", fiber.Map{"section_id": sectionID})
 
 	return c.JSON(fiber.Map{
 		"success": true,
@@ -1151,4 +1324,163 @@ func hasCourseAccess(courseID string, userID uint, role string) bool {
 		return true
 	}
 	return false
+}
+
+// =============================================================================
+// PATCH /api/courses/bulk-toggle (admin only)
+// =============================================================================
+
+func BulkToggleCourseStatusHandler(c fiber.Ctx) error {
+	actorID := c.Locals("user_id").(uint)
+
+	var input struct {
+		CourseIDs []string `json:"course_ids"`
+		Action    string   `json:"action"`
+	}
+	if err := c.Bind().JSON(&input); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
+	}
+	if len(input.CourseIDs) == 0 || len(input.CourseIDs) > 50 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "course_ids ต้องมี 1-50 รายการ"})
+	}
+	if input.Action != "enable" && input.Action != "disable" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "action ต้องเป็น 'enable' หรือ 'disable'"})
+	}
+
+	enable := input.Action == "enable"
+	toggled, skipped, err := repositories.BulkToggleCourseStatus(input.CourseIDs, enable)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "เปลี่ยนสถานะไม่สำเร็จ"})
+	}
+
+	action := "deactivate_course"
+	if enable {
+		action = "activate_course"
+	}
+	for _, course := range toggled {
+		logCourseActivity(c, course.ID, actorID, action, "course", "course", course.ID, course.Name, fiber.Map{"is_active": enable})
+	}
+	logPrivilegedAdminAction(c, actorID, "bulk_toggle_course_status", "warn", "courses", strings.Join(input.CourseIDs, ","), fiber.Map{
+		"target_type":    "course_bulk",
+		"course_ids":     input.CourseIDs,
+		"applied_action": input.Action,
+		"toggled_count":  len(toggled),
+		"skipped_count":  len(skipped),
+	})
+
+	msg := "ปิดใช้งานสำเร็จ"
+	if enable {
+		msg = "เปิดใช้งานสำเร็จ"
+	}
+	return c.JSON(fiber.Map{
+		"success": true,
+		"toggled": len(toggled),
+		"skipped": len(skipped),
+		"message": msg,
+	})
+}
+
+// =============================================================================
+// DELETE /api/courses/bulk (admin only)
+// =============================================================================
+
+func BulkDeleteCoursesHandler(c fiber.Ctx) error {
+	actorID := c.Locals("user_id").(uint)
+
+	var input struct {
+		CourseIDs []string `json:"course_ids"`
+	}
+	if err := c.Bind().JSON(&input); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
+	}
+	if len(input.CourseIDs) == 0 || len(input.CourseIDs) > 50 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "course_ids ต้องมี 1-50 รายการ"})
+	}
+
+	deleted := 0
+	for _, id := range input.CourseIDs {
+		course, err := repositories.FindCourseByID(id)
+		if err != nil {
+			continue
+		}
+		if err := repositories.DeleteCourse(id); err != nil {
+			log.Printf("bulk delete course %s: %v", id, err)
+			continue
+		}
+		logCourseActivity(c, id, actorID, "delete_course", "course", "course", id, course.Name, fiber.Map{
+			"code":     course.Code,
+			"year":     course.Year,
+			"semester": course.Semester,
+		})
+		deleted++
+	}
+	logPrivilegedAdminAction(c, actorID, "bulk_delete_courses", "critical", "courses", strings.Join(input.CourseIDs, ","), fiber.Map{
+		"target_type":   "course_bulk",
+		"course_ids":    input.CourseIDs,
+		"deleted_count": deleted,
+	})
+	return c.JSON(fiber.Map{"success": true, "deleted": deleted})
+}
+
+// =============================================================================
+// GET /api/courses/export (admin only)
+// =============================================================================
+
+func ExportCoursesCSVHandler(c fiber.Ctx) error {
+	actorID := c.Locals("user_id").(uint)
+	year, _ := strconv.Atoi(c.Query("year", "0"))
+	semester, _ := strconv.Atoi(c.Query("semester", "0"))
+
+	rows, err := repositories.GetCoursesForExport(repositories.CourseListParams{
+		Search:   strings.TrimSpace(c.Query("search")),
+		Year:     year,
+		Semester: semester,
+		Status:   c.Query("status"),
+	})
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ดึงข้อมูลไม่สำเร็จ"})
+	}
+
+	var sb strings.Builder
+	sb.WriteString("code,name,year,semester,is_active,instructor,sections_count,created_at\n")
+	for _, r := range rows {
+		sb.WriteString(csvField(r.Code))
+		sb.WriteByte(',')
+		sb.WriteString(csvField(r.Name))
+		sb.WriteByte(',')
+		sb.WriteString(strconv.Itoa(r.Year))
+		sb.WriteByte(',')
+		sb.WriteString(strconv.Itoa(r.Semester))
+		sb.WriteByte(',')
+		sb.WriteString(strconv.FormatBool(r.IsActive))
+		sb.WriteByte(',')
+		sb.WriteString(csvField(r.InstructorNames))
+		sb.WriteByte(',')
+		sb.WriteString(strconv.FormatInt(r.SectionsCount, 10))
+		sb.WriteByte(',')
+		sb.WriteString(r.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
+		sb.WriteByte('\n')
+	}
+
+	c.Set("Content-Type", "text/csv; charset=utf-8")
+	c.Set("Content-Disposition", `attachment; filename="courses_export.csv"`)
+	logPrivilegedAdminAction(c, actorID, "export_courses_csv", "info", "courses", "export", fiber.Map{
+		"target_type": "course_export",
+		"filters": fiber.Map{
+			"search":   strings.TrimSpace(c.Query("search")),
+			"year":     year,
+			"semester": semester,
+			"status":   c.Query("status"),
+		},
+		"row_count": len(rows),
+	})
+	return c.SendString(sb.String())
+}
+
+func csvField(s string) string {
+	if strings.ContainsAny(s, "\",\n\r") {
+		s = strings.ReplaceAll(s, `"`, `""`)
+		return `"` + s + `"`
+	}
+	return s
 }

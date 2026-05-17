@@ -137,7 +137,7 @@ func GitHubLoginHandler(c fiber.Ctx) error {
 	action := c.Query("action")
 	linkToken := c.Query("link_token")
 
-	stateStr, err := signOAuthState(action, linkToken)
+	stateStr, err := signOAuthState(action, linkToken, "")
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to generate state"})
 	}
@@ -210,6 +210,9 @@ func GitHubCallbackHandler(c fiber.Ctx) error {
 		if err := config.DB.First(&existingUser, claims.UserID).Error; err != nil {
 			return redirectErr("/auth/link-callback", "User not found")
 		}
+		if strings.EqualFold(strings.TrimSpace(existingUser.Role), "student") {
+			return redirectErr("/auth/link-callback", "บัญชีนักศึกษาต้องเข้าสู่ระบบผ่าน Google")
+		}
 
 		providerUserID := fmt.Sprintf("%d", profile.ID)
 		var conflict models.UserOAuthAccount
@@ -251,6 +254,9 @@ func GitHubCallbackHandler(c fiber.Ctx) error {
 	}
 	if !user.IsActive {
 		return redirectErr("/login", "บัญชีนี้ถูกระงับการใช้งาน")
+	}
+	if strings.EqualFold(strings.TrimSpace(user.Role), "student") {
+		return redirectErr("/login", "บัญชีนักศึกษาต้องเข้าสู่ระบบผ่าน Google")
 	}
 
 	if oauthAccount != nil {

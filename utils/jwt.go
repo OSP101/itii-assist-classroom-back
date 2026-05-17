@@ -25,15 +25,26 @@ func getRefreshSecret() []byte {
 	return []byte(secret)
 }
 
-// GenerateTokenPair สร้าง access token (15 นาที) และ refresh token (7 วัน)
+// GenerateTokenPair สร้าง access token (15 นาที) และ refresh token (7 วัน) สำหรับ User
 // คืนค่า accessToken, refreshToken, jti (ใช้ผูก refresh token กับ DB), error
 func GenerateTokenPair(userID uint, role string) (string, string, string, error) {
+	return generateTokenPairWithKind(userID, role, "u")
+}
+
+// GenerateStudentTokenPair สร้าง token pair สำหรับ Student (ไม่มี User record)
+// sub = student.ID, kind = "s", role = "student"
+func GenerateStudentTokenPair(studentID uint) (string, string, string, error) {
+	return generateTokenPairWithKind(studentID, "student", "s")
+}
+
+func generateTokenPairWithKind(id uint, role string, kind string) (string, string, string, error) {
 	jti := uuid.New().String()
 
 	// Access Token
 	accessClaims := jwt.MapClaims{
-		"sub":  userID,
+		"sub":  id,
 		"role": role,
+		"kind": kind,
 		"jti":  jti,
 		"exp":  time.Now().Add(15 * time.Minute).Unix(),
 	}
@@ -44,9 +55,10 @@ func GenerateTokenPair(userID uint, role string) (string, string, string, error)
 
 	// Refresh Token
 	refreshClaims := jwt.MapClaims{
-		"sub": userID,
-		"jti": jti,
-		"exp": time.Now().Add(7 * 24 * time.Hour).Unix(),
+		"sub":  id,
+		"kind": kind,
+		"jti":  jti,
+		"exp":  time.Now().Add(7 * 24 * time.Hour).Unix(),
 	}
 	refreshToken, err := jwt.NewWithClaims(jwt.SigningMethodHS256, refreshClaims).SignedString(getRefreshSecret())
 	if err != nil {
@@ -60,6 +72,7 @@ type TokenClaims struct {
 	UserID uint
 	Role   string
 	JTI    string
+	Kind   string // "u" = user, "s" = student
 }
 
 func ValidateAccessToken(tokenString string) (*TokenClaims, error) {
@@ -76,7 +89,11 @@ func ValidateAccessToken(tokenString string) (*TokenClaims, error) {
 	userID := uint(claims["sub"].(float64))
 	role, _ := claims["role"].(string)
 	jti, _ := claims["jti"].(string)
-	return &TokenClaims{UserID: userID, Role: role, JTI: jti}, nil
+	kind, _ := claims["kind"].(string)
+	if kind == "" {
+		kind = "u"
+	}
+	return &TokenClaims{UserID: userID, Role: role, JTI: jti, Kind: kind}, nil
 }
 
 func ValidateRefreshToken(tokenString string) (*TokenClaims, error) {
@@ -92,7 +109,11 @@ func ValidateRefreshToken(tokenString string) (*TokenClaims, error) {
 	claims := token.Claims.(jwt.MapClaims)
 	userID := uint(claims["sub"].(float64))
 	jti, _ := claims["jti"].(string)
-	return &TokenClaims{UserID: userID, JTI: jti}, nil
+	kind, _ := claims["kind"].(string)
+	if kind == "" {
+		kind = "u"
+	}
+	return &TokenClaims{UserID: userID, JTI: jti, Kind: kind}, nil
 }
 
 // GenerateToken ใช้สำหรับ backward compat (access token เดิม 24 ชั่วโมง)

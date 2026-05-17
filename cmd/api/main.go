@@ -97,9 +97,11 @@ func main() {
 	}
 	log.Println("✅ All tables migrated successfully!")
 
+	config.MigrateAttendancePinCompatibility()
 	config.MigrateScoreSchemaCompatibility()
 	config.MigrateQueueSessionCounterCompatibility()
 	config.MigratePerformanceIndexes()
+	startAttendancePinLifecycleWorker()
 
 	// 4. รัน Fiber Server
 	app := fiber.New()
@@ -170,5 +172,93 @@ func main() {
 			}
 		}
 	}()
+	startQueueMidnightWorker()
 	log.Fatal(app.Listen(":8000"))
+}
+
+func startAttendancePinLifecycleWorker() {
+	ticker := time.NewTicker(5 * time.Second)
+
+	go func() {
+		defer ticker.Stop()
+		for range ticker.C {
+			changes, err := repositories.MaintainAttendanceSessionPins(time.Now())
+			if err != nil {
+				log.Printf("⚠️  Attendance PIN lifecycle worker failed: %v", err)
+				continue
+			}
+
+			for _, change := range changes {
+				if change.Rotated || change.Released || change.StatusChanged {
+					payload := fiber.Map{
+						"session_id":     change.SessionID,
+						"pin_code":       change.PinCode,
+						"pin_issued_at":  change.PinIssuedAt,
+						"pin_rotates_at": change.PinRotatesAt,
+						"status":         change.Status,
+					}
+					realtime.EmitToInstructor(change.SessionID, "attendance-pin-updated", payload)
+					realtime.EmitToAttendanceDisplay(change.SessionID, "attendance-pin-updated", payload)
+				}
+
+				if change.Status == "closed" && change.StatusChanged {
+					realtime.EmitToAttendance(change.SessionID, "session-closed", fiber.Map{"session_id": change.SessionID})
+					realtime.EmitToAttendanceDisplay(change.SessionID, "session-closed", fiber.Map{"session_id": change.SessionID})
+				}
+			}
+		}
+	}()
+}
+
+// startQueueMidnightWorker auto-closes any queue sessions that are still
+// active/paused but started on a previous calendar day (Asia/Bangkok time).
+//
+// Behaviour:
+//   - Runs immediately on startup (catches sessions left open if the server
+//     was restarted or was down at midnight).
+//   - Then checks every minute; when the wall-clock day rolls over it runs
+//     the cleanup again.
+//
+// Safety: only 'waiting' bookings are cancelled. Bookings that are already
+// 'in_progress' are left untouched so TAs can finish grading naturally.
+func startQueueMidnightWorker() {
+	loc, err := time.LoadLocation("Asia/Bangkok")
+	if err != nil {
+		log.Printf("⚠️  startQueueMidnightWorker: cannot load Asia/Bangkok, falling back to UTC: %v", err)
+		loc = time.UTC
+	}
+
+	runCleanup := func() {
+		closed, err := repositories.AutoCloseStaleQueueSessions(loc)
+		if err != nil {
+			log.Printf("⚠️  Queue midnight cleanup error: %v", err)
+			return
+		}
+		for _, s := range closed {
+			log.Printf("🌙 Auto-closed stale queue session %s (course %s, cancelled %d waiting booking(s))",
+				s.SessionID, s.CourseID, s.CancelledWaiting)
+			realtime.EmitToQueue(s.SessionID, "session-status-changed", fiber.Map{
+				"status":    "closed",
+				"reason":    "auto_midnight",
+				"timestamp": time.Now().UnixMilli(),
+			})
+		}
+	}
+
+	go func() {
+		// Run once at startup
+		runCleanup()
+
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+
+		lastDate := time.Now().In(loc).YearDay()
+		for range ticker.C {
+			today := time.Now().In(loc).YearDay()
+			if today != lastDate {
+				lastDate = today
+				runCleanup()
+			}
+		}
+	}()
 }

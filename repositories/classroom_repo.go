@@ -237,6 +237,11 @@ type DeskInput struct {
 	Y         int    `json:"y"`
 	Type      string `json:"type"`
 	IsEnabled bool   `json:"is_enabled"`
+	Hostname  string `json:"hostname"`
+	IPAddress string `json:"ip_address"`
+	Brand     string `json:"brand"`
+	OS        string `json:"os"`
+	Notes     string `json:"notes"`
 }
 
 type ZoneInput struct {
@@ -288,6 +293,11 @@ func UpdateLayout(classroomID string, deskInputs []DeskInput, zoneInputs []ZoneI
 				"y":          d.Y,
 				"type":       deskType,
 				"is_enabled": d.IsEnabled,
+				"hostname":   d.Hostname,
+				"ip_address": d.IPAddress,
+				"brand":      d.Brand,
+				"os":         d.OS,
+				"notes":      d.Notes,
 			})
 		} else {
 			deskID, err := utils.GenerateNanoID(21)
@@ -302,6 +312,11 @@ func UpdateLayout(classroomID string, deskInputs []DeskInput, zoneInputs []ZoneI
 				Y:           d.Y,
 				Type:        deskType,
 				IsEnabled:   d.IsEnabled,
+				Hostname:    d.Hostname,
+				IPAddress:   d.IPAddress,
+				Brand:       d.Brand,
+				OS:          d.OS,
+				Notes:       d.Notes,
 			})
 		}
 	}

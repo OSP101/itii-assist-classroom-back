@@ -15,6 +15,7 @@ func SetupAttendanceRoutes(app *fiber.App) {
 	app.Post("/api/attendance/verify-student", handlers.VerifyStudentHandler)
 	app.Post("/api/attendance/display/bootstrap", handlers.BootstrapAttendanceDisplayHandler)
 	app.Post("/api/attendance/display/confirm", handlers.ConfirmAttendanceDisplayHandler)
+	app.Get("/api/attendance/display/pairing-status", handlers.GetAttendanceDisplayPairingStatusHandler)
 	app.Get("/api/attendance/display/current", handlers.GetAttendanceDisplayCurrentHandler)
 	app.Get("/api/attendance/display/records", handlers.GetAttendanceDisplayRecordsHandler)
 	app.Get("/api/attendance/display/socket-ticket", handlers.GetAttendanceDisplaySocketTicketHandler)

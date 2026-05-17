@@ -5,9 +5,13 @@ import (
 	"fmt"
 	"itii-assist/config"
 	"itii-assist/models"
+	"itii-assist/observability"
 	"math"
 	"strings"
 	"time"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ============================================================
@@ -72,6 +76,8 @@ type AttendanceSessionInfo struct {
 	SessionType          string                  `json:"session_type"`
 	CheckLocation        bool                    `json:"check_location"`
 	PinCode              string                  `json:"pin_code"`
+	PinIssuedAt          *time.Time              `json:"pin_issued_at,omitempty"`
+	PinRotatesAt         *time.Time              `json:"pin_rotates_at,omitempty"`
 	LateThresholdMinutes int                     `json:"late_threshold_minutes"`
 	LateThresholdTime    string                  `json:"late_threshold_time"`
 	StartTime            time.Time               `json:"start_time"`
@@ -101,6 +107,18 @@ type AttendanceSessionDetailStats struct {
 	NotCheckedIn  int `json:"not_checked_in"`
 }
 
+type AttendancePinStateChange struct {
+	SessionID     uint
+	CourseID      string
+	Status        string
+	PinCode       string
+	PinIssuedAt   *time.Time
+	PinRotatesAt  *time.Time
+	Rotated       bool
+	Released      bool
+	StatusChanged bool
+}
+
 func ComputeSessionStatus(s models.AttendanceSession) string {
 	now := time.Now()
 	if now.Before(s.StartTime) {
@@ -117,6 +135,172 @@ func GeneratePIN() string {
 	rand.Read(b)
 	n := int(b[0])<<16 | int(b[1])<<8 | int(b[2])
 	return fmt.Sprintf("%06d", n%1000000)
+}
+
+func attendancePinRotationWindow() time.Duration {
+	return time.Duration(observability.AttendancePinRotationMinutes()) * time.Minute
+}
+
+func attendancePinGraceWindow() time.Duration {
+	return time.Duration(observability.AttendancePinGraceSeconds()) * time.Second
+}
+
+func nextDistinctAttendancePIN(current string) string {
+	pin := GeneratePIN()
+	for pin == current {
+		pin = GeneratePIN()
+	}
+	return pin
+}
+
+func applyAttendancePinState(tx *gorm.DB, session *models.AttendanceSession, now time.Time) (AttendancePinStateChange, error) {
+	change := AttendancePinStateChange{
+		SessionID: session.ID,
+		CourseID:  session.CourseID,
+		Status:    ComputeSessionStatus(*session),
+	}
+
+	updates := map[string]interface{}{}
+	if session.Status != change.Status {
+		updates["status"] = change.Status
+		change.StatusChanged = true
+	}
+	session.Status = change.Status
+
+	if change.Status != "active" {
+		if session.PinCode != "" || session.PreviousPinCode != "" || session.PinIssuedAt != nil || session.PinGraceUntil != nil || session.PinRotatesAt != nil {
+			updates["pin_code"] = ""
+			updates["previous_pin_code"] = ""
+			updates["pin_issued_at"] = nil
+			updates["pin_grace_until"] = nil
+			updates["pin_rotates_at"] = nil
+			change.Released = true
+		}
+		session.PinCode = ""
+		session.PreviousPinCode = ""
+		session.PinIssuedAt = nil
+		session.PinGraceUntil = nil
+		session.PinRotatesAt = nil
+	} else {
+		rotationWindow := attendancePinRotationWindow()
+		graceWindow := attendancePinGraceWindow()
+
+		if session.PreviousPinCode != "" && (session.PinGraceUntil == nil || !session.PinGraceUntil.After(now)) {
+			updates["previous_pin_code"] = ""
+			updates["pin_grace_until"] = nil
+			session.PreviousPinCode = ""
+			session.PinGraceUntil = nil
+		}
+
+		needsIssue := strings.TrimSpace(session.PinCode) == ""
+		needsRotate := !needsIssue && observability.AttendancePinAutoRotateEnabled() && (session.PinRotatesAt == nil || !session.PinRotatesAt.After(now))
+
+		if needsIssue || needsRotate {
+			nextPin := nextDistinctAttendancePIN(session.PinCode)
+			issuedAt := now
+			rotatesAt := now.Add(rotationWindow)
+			updates["pin_code"] = nextPin
+			updates["pin_issued_at"] = issuedAt
+			updates["pin_rotates_at"] = rotatesAt
+
+			if needsRotate && session.PinCode != "" {
+				graceUntil := now.Add(graceWindow)
+				updates["previous_pin_code"] = session.PinCode
+				updates["pin_grace_until"] = graceUntil
+				session.PreviousPinCode = session.PinCode
+				session.PinGraceUntil = &graceUntil
+				change.Rotated = true
+				observability.RecordAttendancePinRotation()
+			} else {
+				updates["previous_pin_code"] = ""
+				updates["pin_grace_until"] = nil
+				session.PreviousPinCode = ""
+				session.PinGraceUntil = nil
+			}
+
+			session.PinCode = nextPin
+			session.PinIssuedAt = &issuedAt
+			session.PinRotatesAt = &rotatesAt
+		} else {
+			if session.PinIssuedAt == nil {
+				issuedAt := now
+				updates["pin_issued_at"] = issuedAt
+				session.PinIssuedAt = &issuedAt
+			}
+			if session.PinRotatesAt == nil {
+				anchor := now
+				if session.PinIssuedAt != nil {
+					anchor = *session.PinIssuedAt
+				}
+				rotatesAt := anchor.Add(rotationWindow)
+				updates["pin_rotates_at"] = rotatesAt
+				session.PinRotatesAt = &rotatesAt
+			}
+		}
+	}
+
+	if len(updates) > 0 {
+		if err := tx.Model(&models.AttendanceSession{}).Where("id = ?", session.ID).Updates(updates).Error; err != nil {
+			return change, err
+		}
+	}
+
+	change.PinCode = session.PinCode
+	change.PinIssuedAt = session.PinIssuedAt
+	change.PinRotatesAt = session.PinRotatesAt
+	return change, nil
+}
+
+func syncAttendanceSessionPinState(db *gorm.DB, sessionID uint) (*models.AttendanceSession, AttendancePinStateChange, error) {
+	var session models.AttendanceSession
+	var change AttendancePinStateChange
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&session, sessionID).Error; err != nil {
+			return err
+		}
+		var err error
+		change, err = applyAttendancePinState(tx, &session, time.Now())
+		return err
+	})
+	if err != nil {
+		return nil, change, err
+	}
+	return &session, change, nil
+}
+
+func RefreshAttendanceSessionPinState(sessionID uint) (*models.AttendanceSession, AttendancePinStateChange, error) {
+	return syncAttendanceSessionPinState(config.DB, sessionID)
+}
+
+func MaintainAttendanceSessionPins(now time.Time) ([]AttendancePinStateChange, error) {
+	var candidates []models.AttendanceSession
+	if err := config.DB.
+		Where("pin_code <> '' OR previous_pin_code <> '' OR (start_time <= ? AND end_time > ?)", now, now).
+		Find(&candidates).Error; err != nil {
+		return nil, err
+	}
+
+	changes := make([]AttendancePinStateChange, 0, len(candidates))
+	for _, candidate := range candidates {
+		session := candidate
+		var change AttendancePinStateChange
+		if err := config.DB.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&session, candidate.ID).Error; err != nil {
+				return err
+			}
+			var err error
+			change, err = applyAttendancePinState(tx, &session, now)
+			return err
+		}); err != nil {
+			return nil, err
+		}
+
+		if change.Rotated || change.Released || change.StatusChanged {
+			changes = append(changes, change)
+		}
+	}
+
+	return changes, nil
 }
 
 func calculateDistanceMeters(lat1 float64, lng1 float64, lat2 float64, lng2 float64) int {
@@ -225,12 +409,14 @@ func GetAttendanceSessions(courseID string, status string) ([]AttendanceSessionW
 
 	result := make([]AttendanceSessionWithStats, len(sessions))
 	for i, s := range sessions {
+		syncedSession, _, err := syncAttendanceSessionPinState(db, s.ID)
+		if err == nil && syncedSession != nil {
+			s = *syncedSession
+		}
 		stats := AttendanceStats{}
 		if st := statsMap[s.ID]; st != nil {
 			stats = *st
 		}
-		// Compute status dynamically from time
-		s.Status = ComputeSessionStatus(s)
 		result[i] = AttendanceSessionWithStats{
 			AttendanceSession: s,
 			SectionIDs:        sectionMap[s.ID],
@@ -242,13 +428,10 @@ func GetAttendanceSessions(courseID string, status string) ([]AttendanceSessionW
 
 func GetAttendanceSession(id uint) (*AttendanceSessionDetail, error) {
 	db := config.DB
-	var session models.AttendanceSession
-	if err := db.First(&session, id).Error; err != nil {
+	session, _, err := syncAttendanceSessionPinState(db, id)
+	if err != nil {
 		return nil, err
 	}
-
-	// Compute status dynamically
-	session.Status = ComputeSessionStatus(session)
 
 	// Get section IDs
 	type sectionRow struct{ CourseSectionID uint }
@@ -414,7 +597,7 @@ func GetAttendanceSession(id uint) (*AttendanceSessionDetail, error) {
 	}
 
 	return &AttendanceSessionDetail{
-		AttendanceSession: session,
+		AttendanceSession: *session,
 		CourseSectionIDs:  sectionIDs,
 		Section:           section,
 		Course:            course,
@@ -426,9 +609,11 @@ func GetAttendanceSession(id uint) (*AttendanceSessionDetail, error) {
 
 func CreateAttendanceSession(session *models.AttendanceSession, sectionIDs []uint) error {
 	db := config.DB
-	if strings.TrimSpace(session.PinCode) == "" {
-		session.PinCode = GeneratePIN()
-	}
+	session.PinCode = ""
+	session.PreviousPinCode = ""
+	session.PinIssuedAt = nil
+	session.PinGraceUntil = nil
+	session.PinRotatesAt = nil
 	session.Status = "draft"
 	if err := db.Create(session).Error; err != nil {
 		return err
@@ -545,101 +730,118 @@ type AttendanceRecordUpdate struct {
 // Student check-in (public)
 func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, lng *float64, googleEmail string, googleID string) (*AttendanceCheckInResult, error) {
 	db := config.DB
-	var session models.AttendanceSession
-	if err := db.First(&session, sessionID).Error; err != nil {
-		return nil, fmt.Errorf("ไม่พบ session")
-	}
-
-	// Verify PIN
-	if strings.TrimSpace(pin) != session.PinCode {
-		return nil, fmt.Errorf("รหัส PIN ไม่ถูกต้อง")
-	}
-
-	// Check time window
-	now := time.Now()
-	if now.Before(session.StartTime) {
-		return nil, fmt.Errorf("ยังไม่ถึงเวลาเช็คชื่อ")
-	}
-	if now.After(session.EndTime) {
-		return nil, fmt.Errorf("หมดเวลาเช็คชื่อแล้ว")
-	}
-
-	var distanceMeters *int
-	locationVerified := false
-	if session.CheckLocation {
-		if lat == nil || lng == nil {
-			return nil, fmt.Errorf("กรุณาอนุญาตการเข้าถึงตำแหน่ง")
+	var result AttendanceCheckInResult
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var session models.AttendanceSession
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&session, sessionID).Error; err != nil {
+			return fmt.Errorf("ไม่พบ session")
 		}
-		if session.LocationLat == nil || session.LocationLng == nil {
-			return nil, fmt.Errorf("session นี้ยังไม่ได้กำหนดตำแหน่งสำหรับเช็คชื่อ")
+		if _, err := applyAttendancePinState(tx, &session, time.Now()); err != nil {
+			return err
 		}
 
-		distance := calculateDistanceMeters(*session.LocationLat, *session.LocationLng, *lat, *lng)
-		distanceMeters = &distance
-		if session.RadiusMeters > 0 && distance > session.RadiusMeters {
-			return nil, fmt.Errorf("คุณอยู่นอกพื้นที่ที่กำหนด (ห่าง %d เมตร)", distance)
+		now := time.Now()
+		if now.Before(session.StartTime) {
+			return fmt.Errorf("ยังไม่ถึงเวลาเช็คชื่อ")
 		}
-		locationVerified = true
-	}
+		if now.After(session.EndTime) || session.Status != "active" {
+			return fmt.Errorf("หมดเวลาเช็คชื่อแล้ว")
+		}
 
-	// Determine status (present or late)
-	status := "present"
-	lateTime := session.StartTime.Add(time.Duration(session.LateThresholdMinutes) * time.Minute)
-	if strings.TrimSpace(session.LateThresholdTime) != "" {
-		parts := strings.Split(session.LateThresholdTime, ":")
-		if len(parts) >= 2 {
-			hours := 0
-			minutes := 0
-			seconds := 0
-			fmt.Sscanf(parts[0], "%d", &hours)
-			fmt.Sscanf(parts[1], "%d", &minutes)
-			if len(parts) > 2 {
-				fmt.Sscanf(parts[2], "%d", &seconds)
+		providedPin := strings.TrimSpace(pin)
+		if providedPin == "" {
+			return fmt.Errorf("กรุณากรอกรหัส PIN")
+		}
+		pinAccepted := providedPin == session.PinCode
+		if !pinAccepted && session.PreviousPinCode != "" && session.PinGraceUntil != nil && session.PinGraceUntil.After(now) {
+			pinAccepted = providedPin == session.PreviousPinCode
+		}
+		if !pinAccepted {
+			return fmt.Errorf("รหัส PIN ไม่ถูกต้อง")
+		}
+
+		var distanceMeters *int
+		locationVerified := false
+		if session.CheckLocation {
+			if lat == nil || lng == nil {
+				return fmt.Errorf("กรุณาอนุญาตการเข้าถึงตำแหน่ง")
 			}
-			lateTime = time.Date(session.StartTime.Year(), session.StartTime.Month(), session.StartTime.Day(), hours, minutes, seconds, 0, session.StartTime.Location())
+			if session.LocationLat == nil || session.LocationLng == nil {
+				return fmt.Errorf("session นี้ยังไม่ได้กำหนดตำแหน่งสำหรับเช็คชื่อ")
+			}
+
+			distance := calculateDistanceMeters(*session.LocationLat, *session.LocationLng, *lat, *lng)
+			distanceMeters = &distance
+			if session.RadiusMeters > 0 && distance > session.RadiusMeters {
+				return fmt.Errorf("คุณอยู่นอกพื้นที่ที่กำหนด (ห่าง %d เมตร)", distance)
+			}
+			locationVerified = true
 		}
-	}
-	if now.After(lateTime) {
-		status = "late"
+
+		status := "present"
+		lateTime := session.StartTime.Add(time.Duration(session.LateThresholdMinutes) * time.Minute)
+		if strings.TrimSpace(session.LateThresholdTime) != "" {
+			parts := strings.Split(session.LateThresholdTime, ":")
+			if len(parts) >= 2 {
+				hours := 0
+				minutes := 0
+				seconds := 0
+				fmt.Sscanf(parts[0], "%d", &hours)
+				fmt.Sscanf(parts[1], "%d", &minutes)
+				if len(parts) > 2 {
+					fmt.Sscanf(parts[2], "%d", &seconds)
+				}
+				lateTime = time.Date(session.StartTime.Year(), session.StartTime.Month(), session.StartTime.Day(), hours, minutes, seconds, 0, session.StartTime.Location())
+			}
+		}
+		if now.After(lateTime) {
+			status = "late"
+		}
+
+		checkInTime := now
+		updates := map[string]interface{}{
+			"status":            status,
+			"check_in_time":     &checkInTime,
+			"pin_verified":      true,
+			"google_email":      googleEmail,
+			"google_id":         googleID,
+			"updated_at":        now,
+			"location_verified": locationVerified,
+			"distance_meters":   distanceMeters,
+		}
+		if lat != nil {
+			updates["location_lat"] = *lat
+			updates["location_lng"] = *lng
+		}
+
+		updateResult := tx.Model(&models.AttendanceRecord{}).
+			Where("attendance_session_id = ? AND student_id = ?", sessionID, studentID).
+			Updates(updates)
+		if updateResult.RowsAffected == 0 {
+			return fmt.Errorf("คุณไม่ได้ลงทะเบียนในรายวิชานี้")
+		}
+		if updateResult.Error != nil {
+			return updateResult.Error
+		}
+
+		result = AttendanceCheckInResult{
+			Status:           status,
+			CheckInTime:      checkInTime,
+			LocationVerified: locationVerified,
+			DistanceMeters:   distanceMeters,
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	checkInTime := now
-	updates := map[string]interface{}{
-		"status":            status,
-		"check_in_time":     &checkInTime,
-		"pin_verified":      true,
-		"google_email":      googleEmail,
-		"google_id":         googleID,
-		"updated_at":        now,
-		"location_verified": locationVerified,
-		"distance_meters":   distanceMeters,
-	}
-	if lat != nil {
-		updates["location_lat"] = *lat
-		updates["location_lng"] = *lng
-	}
-
-	result := db.Model(&models.AttendanceRecord{}).
-		Where("attendance_session_id = ? AND student_id = ?", sessionID, studentID).
-		Updates(updates)
-	if result.RowsAffected == 0 {
-		return nil, fmt.Errorf("คุณไม่ได้ลงทะเบียนในรายวิชานี้")
-	}
-	if result.Error != nil {
-		return nil, result.Error
-	}
-
-	return &AttendanceCheckInResult{
-		Status:           status,
-		CheckInTime:      checkInTime,
-		LocationVerified: locationVerified,
-		DistanceMeters:   distanceMeters,
-	}, nil
+	return &result, nil
 }
 
 func GetSessionInfo(sessionID uint) (*AttendanceSessionInfo, error) {
-	var session models.AttendanceSession
-	if err := config.DB.First(&session, sessionID).Error; err != nil {
+	session, _, err := syncAttendanceSessionPinState(config.DB, sessionID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -665,11 +867,13 @@ func GetSessionInfo(sessionID uint) (*AttendanceSessionInfo, error) {
 		SessionType:          session.SessionType,
 		CheckLocation:        session.CheckLocation,
 		PinCode:              session.PinCode,
+		PinIssuedAt:          session.PinIssuedAt,
+		PinRotatesAt:         session.PinRotatesAt,
 		LateThresholdMinutes: session.LateThresholdMinutes,
 		LateThresholdTime:    session.LateThresholdTime,
 		StartTime:            session.StartTime,
 		EndTime:              session.EndTime,
-		Status:               ComputeSessionStatus(session),
+		Status:               session.Status,
 		Course:               course,
 		Section:              section,
 	}, nil

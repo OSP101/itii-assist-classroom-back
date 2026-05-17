@@ -11,16 +11,18 @@ import (
 )
 
 type SystemLogListParams struct {
-	LogType   string
-	Severity  string
-	UserID    string
-	StartDate string
-	EndDate   string
-	Search    string
-	Page      int
-	Limit     int
-	SortBy    string
-	SortOrder string
+	LogType        string
+	Severity       string
+	UserID         string
+	ActionGroup    string
+	PrivilegedOnly bool
+	StartDate      string
+	EndDate        string
+	Search         string
+	Page           int
+	Limit          int
+	SortBy         string
+	SortOrder      string
 }
 
 type SystemLogListResult struct {
@@ -37,11 +39,12 @@ type SystemLogCountRow struct {
 }
 
 type SystemLogStats struct {
-	Total        int64               `json:"total"`
-	UniqueIPs    int64               `json:"uniqueIps"`
-	ByType       []SystemLogCountRow `json:"byType"`
-	BySeverity   []SystemLogCountRow `json:"bySeverity"`
-	ByStatusCode []SystemLogCountRow `json:"byStatusCode"`
+	Total         int64               `json:"total"`
+	UniqueIPs     int64               `json:"uniqueIps"`
+	ByType        []SystemLogCountRow `json:"byType"`
+	BySeverity    []SystemLogCountRow `json:"bySeverity"`
+	ByActionGroup []SystemLogCountRow `json:"byActionGroup"`
+	ByStatusCode  []SystemLogCountRow `json:"byStatusCode"`
 }
 
 type SystemLogTimelinePoint struct {
@@ -68,6 +71,33 @@ var validSystemLogSortFields = map[string]bool{
 
 var systemLogTypes = []string{"access", "error", "auth", "security"}
 var systemLogSeverities = []string{"debug", "info", "warn", "error", "critical"}
+
+var actionGroupPatterns = map[string][]string{
+	"permission_changes": {"%permission%"},
+	"member_changes":     {"%add_%", "%remove_%", "%bulk_add_%"},
+	"feedback_actions":   {"%feedback%"},
+	"course_governance":  {"%course%"},
+}
+
+func applySystemLogActionGroup(query *gorm.DB, actionGroup string) *gorm.DB {
+	group := strings.TrimSpace(strings.ToLower(actionGroup))
+	if group == "" {
+		return query
+	}
+	patterns, ok := actionGroupPatterns[group]
+	if !ok || len(patterns) == 0 {
+		return query
+	}
+
+	clauses := make([]string, 0, len(patterns))
+	args := make([]interface{}, 0, len(patterns))
+	for _, pattern := range patterns {
+		clauses = append(clauses, "action ILIKE ?")
+		args = append(args, pattern)
+	}
+
+	return query.Where("("+strings.Join(clauses, " OR ")+")", args...)
+}
 
 func applySystemLogDateRange(query *gorm.DB, startDate string, endDate string) *gorm.DB {
 	if startDate != "" {
@@ -117,6 +147,10 @@ func GetLogs(params SystemLogListParams) (*SystemLogListResult, error) {
 	if params.UserID != "" {
 		query = query.Where("actor_user_id = ?", params.UserID)
 	}
+	if params.PrivilegedOnly {
+		query = query.Where("detail ->> 'audit_scope' = ?", "admin_privileged")
+	}
+	query = applySystemLogActionGroup(query, params.ActionGroup)
 	query = applySystemLogDateRange(query, params.StartDate, params.EndDate)
 	if params.Search != "" {
 		like := "%" + params.Search + "%"
@@ -163,8 +197,15 @@ func GetLogByID(id string) (*models.SystemLog, error) {
 	return &log, err
 }
 
-func GetSystemLogStats(startDate string, endDate string) (*SystemLogStats, error) {
-	query := applySystemLogDateRange(config.DB.Model(&models.SystemLog{}), startDate, endDate)
+func applyPrivilegedSystemLogFilter(query *gorm.DB, privilegedOnly bool) *gorm.DB {
+	if privilegedOnly {
+		return query.Where("detail ->> 'audit_scope' = ?", "admin_privileged")
+	}
+	return query
+}
+
+func GetSystemLogStats(startDate string, endDate string, privilegedOnly bool) (*SystemLogStats, error) {
+	query := applyPrivilegedSystemLogFilter(applySystemLogDateRange(config.DB.Model(&models.SystemLog{}), startDate, endDate), privilegedOnly)
 
 	stats := &SystemLogStats{}
 	if err := query.Count(&stats.Total).Error; err != nil {
@@ -179,7 +220,7 @@ func GetSystemLogStats(startDate string, endDate string) (*SystemLogStats, error
 		Count int64
 	}
 	var byTypeRows []row
-	if err := applySystemLogDateRange(config.DB.Model(&models.SystemLog{}), startDate, endDate).
+	if err := applyPrivilegedSystemLogFilter(applySystemLogDateRange(config.DB.Model(&models.SystemLog{}), startDate, endDate), privilegedOnly).
 		Select("log_type as key, COUNT(*) as count").
 		Group("log_type").
 		Order("log_type ASC").
@@ -192,7 +233,7 @@ func GetSystemLogStats(startDate string, endDate string) (*SystemLogStats, error
 	}
 
 	var bySeverityRows []row
-	if err := applySystemLogDateRange(config.DB.Model(&models.SystemLog{}), startDate, endDate).
+	if err := applyPrivilegedSystemLogFilter(applySystemLogDateRange(config.DB.Model(&models.SystemLog{}), startDate, endDate), privilegedOnly).
 		Select("severity as key, COUNT(*) as count").
 		Group("severity").
 		Order("severity ASC").
@@ -205,7 +246,7 @@ func GetSystemLogStats(startDate string, endDate string) (*SystemLogStats, error
 	}
 
 	var byStatusRows []row
-	if err := applySystemLogDateRange(config.DB.Model(&models.SystemLog{}), startDate, endDate).
+	if err := applyPrivilegedSystemLogFilter(applySystemLogDateRange(config.DB.Model(&models.SystemLog{}), startDate, endDate), privilegedOnly).
 		Where("status_code IS NOT NULL").
 		Select("CAST(status_code AS TEXT) as key, COUNT(*) as count").
 		Group("status_code").
@@ -219,10 +260,24 @@ func GetSystemLogStats(startDate string, endDate string) (*SystemLogStats, error
 		stats.ByStatusCode[i] = SystemLogCountRow{Key: item.Key, Count: item.Count}
 	}
 
+	groupedCounts := make([]SystemLogCountRow, 0, len(actionGroupPatterns))
+	for key := range actionGroupPatterns {
+		groupedCounts = append(groupedCounts, SystemLogCountRow{Key: key, Count: 0})
+	}
+
+	for idx := range groupedCounts {
+		countQuery := applyPrivilegedSystemLogFilter(applySystemLogDateRange(config.DB.Model(&models.SystemLog{}), startDate, endDate), privilegedOnly)
+		countQuery = applySystemLogActionGroup(countQuery, groupedCounts[idx].Key)
+		if err := countQuery.Count(&groupedCounts[idx].Count).Error; err != nil {
+			return nil, err
+		}
+	}
+	stats.ByActionGroup = groupedCounts
+
 	return stats, nil
 }
 
-func GetSystemLogTimeline(startDate string, endDate string, interval string, logType string) ([]SystemLogTimelinePoint, error) {
+func GetSystemLogTimeline(startDate string, endDate string, interval string, logType string, privilegedOnly bool) ([]SystemLogTimelinePoint, error) {
 	bucket := "hour"
 	format := "2006-01-02 15:00"
 	switch strings.ToLower(interval) {
@@ -243,6 +298,10 @@ func GetSystemLogTimeline(startDate string, endDate string, interval string, log
 	if logType != "" {
 		query += " AND log_type = ?"
 		args = append(args, logType)
+	}
+	if privilegedOnly {
+		query += " AND detail ->> 'audit_scope' = ?"
+		args = append(args, "admin_privileged")
 	}
 	query += " GROUP BY time_bucket, log_type ORDER BY time_bucket ASC"
 

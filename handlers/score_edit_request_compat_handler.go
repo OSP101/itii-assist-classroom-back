@@ -556,7 +556,7 @@ func CreateScoreEditRequestCompatHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to create edit request"})
 	}
 
-	writeCourseActivityLog(context.CourseID, userID, "create_score_edit_request", "score", "assignment", context.AssignmentID, context.AssignmentName, fiber.Map{"score_id": scoreID, "new_score": newScore, "image_count": len(imagePaths)})
+	logCourseActivity(c, context.CourseID, userID, "create_score_edit_request", "score", "assignment", context.AssignmentID, context.AssignmentName, fiber.Map{"score_id": scoreID, "new_score": newScore, "image_count": len(imagePaths)})
 	go createNotificationsForCourseMembers(context.CourseID, userID, "score_edit_request", "ขอแก้ไขคะแนน: "+context.AssignmentName, "มีการส่งคำขอแก้ไขคะแนน", "/classroom/"+context.CourseID+"/approval", buildNotifData(context.CourseID, fmt.Sprint(context.AssignmentID), "score_edit_request", ""))
 
 	return c.Status(201).JSON(fiber.Map{
@@ -657,7 +657,7 @@ func CreateBatchScoreEditRequestCompatHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to create batch edit requests"})
 	}
 
-	writeCourseActivityLog(courseID, userID, "create_batch_score_edit_request", "score", "assignment", assignmentID, assignmentName, fiber.Map{"count": len(createdRequests), "new_score": newScore, "image_count": len(imagePaths)})
+	logCourseActivity(c, courseID, userID, "create_batch_score_edit_request", "score", "assignment", assignmentID, assignmentName, fiber.Map{"count": len(createdRequests), "new_score": newScore, "image_count": len(imagePaths)})
 
 	requests := make([]fiber.Map, 0, len(createdRequests))
 	for _, request := range createdRequests {
@@ -810,7 +810,7 @@ func CreateBatchDetailedScoreEditRequestCompatHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to create detailed batch edit requests"})
 	}
 
-	writeCourseActivityLog(courseID, userID, "create_detailed_batch_score_edit_request", "score", "assignment", assignmentID, assignmentName, fiber.Map{"count": len(createdRequests), "image_count": len(imagePaths)})
+	logCourseActivity(c, courseID, userID, "create_detailed_batch_score_edit_request", "score", "assignment", assignmentID, assignmentName, fiber.Map{"count": len(createdRequests), "image_count": len(imagePaths)})
 
 	requests := make([]fiber.Map, 0, len(createdRequests))
 	for _, request := range createdRequests {
@@ -876,7 +876,7 @@ func CancelScoreEditRequestCompatHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to cancel edit request"})
 	}
 	if context != nil {
-		writeCourseActivityLog(context.CourseID, userID, "cancel_score_edit_request", "score", "assignment", context.AssignmentID, context.AssignmentName, fiber.Map{"request_id": request.ID, "score_id": request.ScoreID})
+		logCourseActivity(c, context.CourseID, userID, "cancel_score_edit_request", "score", "assignment", context.AssignmentID, context.AssignmentName, fiber.Map{"request_id": request.ID, "score_id": request.ScoreID})
 	}
 
 	return c.JSON(fiber.Map{"success": true, "message": "Score edit request cancelled"})
@@ -904,7 +904,7 @@ func ApproveScoreEditRequestCompatHandler(c fiber.Ctx) error {
 		}
 		return c.Status(status).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
-	writeCourseActivityLog(courseID, reviewerID, "approve_score_edit_request", "score", "assignment", "", assignmentName, fiber.Map{"count": count, "request_id": id})
+	logCourseActivity(c, courseID, reviewerID, "approve_score_edit_request", "score", "assignment", "", assignmentName, fiber.Map{"count": count, "request_id": id})
 	if requesterID != 0 {
 		go createNotificationForUser(requesterID, courseID, "score_edit_approved", "คำขอแก้ไขคะแนนได้รับการอนุมัติ", "คำขอแก้ไขคะแนนของคุณได้รับการอนุมัติแล้ว", "/classroom/"+courseID+"/approval", buildNotifData(courseID, fmt.Sprint(id), "score_edit_request", ""))
 	}
@@ -935,7 +935,7 @@ func RejectScoreEditRequestCompatHandler(c fiber.Ctx) error {
 		}
 		return c.Status(status).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
-	writeCourseActivityLog(courseID, reviewerID, "reject_score_edit_request", "score", "assignment", "", assignmentName, fiber.Map{"count": count, "request_id": id})
+	logCourseActivity(c, courseID, reviewerID, "reject_score_edit_request", "score", "assignment", "", assignmentName, fiber.Map{"count": count, "request_id": id})
 	if requesterID != 0 {
 		go createNotificationForUser(requesterID, courseID, "score_edit_rejected", "คำขอแก้ไขคะแนนถูกปฏิเสธ", "คำขอแก้ไขคะแนนของคุณถูกปฏิเสธ", "/classroom/"+courseID+"/approval", buildNotifData(courseID, fmt.Sprint(id), "score_edit_request", ""))
 	}
@@ -964,7 +964,7 @@ func BatchApproveScoreEditRequestsCompatHandler(c fiber.Ctx) error {
 		}
 		return c.Status(status).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
-	writeCourseActivityLog(courseID, reviewerID, "batch_approve_score_edit_requests", "score", "assignment", "", assignmentName, fiber.Map{"count": count})
+	logCourseActivity(c, courseID, reviewerID, "batch_approve_score_edit_requests", "score", "assignment", "", assignmentName, fiber.Map{"count": count})
 	notifiedUsers := map[uint]bool{}
 	for reqID, requesterID := range requesterMap {
 		if requesterID == 0 || notifiedUsers[requesterID] {
@@ -1001,7 +1001,7 @@ func BatchRejectScoreEditRequestsCompatHandler(c fiber.Ctx) error {
 		}
 		return c.Status(status).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
-	writeCourseActivityLog(courseID, reviewerID, "batch_reject_score_edit_requests", "score", "assignment", "", assignmentName, fiber.Map{"count": count})
+	logCourseActivity(c, courseID, reviewerID, "batch_reject_score_edit_requests", "score", "assignment", "", assignmentName, fiber.Map{"count": count})
 	notifiedUsers := map[uint]bool{}
 	for reqID, requesterID := range requesterMap {
 		if requesterID == 0 || notifiedUsers[requesterID] {

@@ -7,6 +7,7 @@ import (
 	"itii-assist/realtime"
 	"itii-assist/repositories"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -207,7 +208,9 @@ func GetUserNotificationsHandler(c fiber.Ctx) error {
 		offset = o
 	}
 
-	notifications, total, err := repositories.GetUserNotifications(userID, limit, offset)
+	courseID := strings.TrimSpace(c.Query("course_id", ""))
+
+	notifications, total, err := repositories.GetUserNotifications(userID, limit, offset, courseID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch notifications"})
 	}

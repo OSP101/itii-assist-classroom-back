@@ -15,11 +15,15 @@ func CreateUserNotifications(notifications []models.UserNotification) error {
 }
 
 // GetUserNotifications returns paginated notifications for a user (newest first).
-func GetUserNotifications(userID uint, limit, offset int) ([]models.UserNotification, int64, error) {
+// If courseID is non-empty, only notifications for that course are returned.
+func GetUserNotifications(userID uint, limit, offset int, courseID string) ([]models.UserNotification, int64, error) {
 	var notifications []models.UserNotification
 	var total int64
 
 	base := config.DB.Model(&models.UserNotification{}).Where("user_id = ?", userID)
+	if courseID != "" {
+		base = base.Where("course_id = ?", courseID)
+	}
 	if err := base.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}

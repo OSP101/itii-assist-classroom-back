@@ -26,6 +26,82 @@ func generateQueuePIN() (string, error) {
 	return fmt.Sprintf("%06d", n), nil
 }
 
+// generateUniqueQueuePIN generates a PIN that does not collide with any
+// currently active or paused queue session. Retries up to 20 times.
+func generateUniqueQueuePIN() (string, error) {
+	for i := 0; i < 20; i++ {
+		pin, err := generateQueuePIN()
+		if err != nil {
+			return "", err
+		}
+		var count int64
+		config.DB.Model(&models.QueueSession{}).
+			Where("pin_code = ? AND status IN ('active','paused')", pin).
+			Count(&count)
+		if count == 0 {
+			return pin, nil
+		}
+	}
+	// Fallback: return a plain random PIN (collision chance is negligible)
+	return generateQueuePIN()
+}
+
+// ---------- ClassroomConflictError ----------
+
+// ClassroomConflictError is returned when a classroom already has an active
+// queue session belonging to a different (or the same) course.
+type ClassroomConflictError struct {
+	SessionID    string
+	SessionTitle string
+	CourseID     string
+	CourseName   string
+	StartedAt    *time.Time
+}
+
+func (e *ClassroomConflictError) Error() string {
+	return fmt.Sprintf("ห้องนี้กำลังถูกใช้งานโดยคิว '%s' ของวิชา '%s'", e.SessionTitle, e.CourseName)
+}
+
+// CheckActiveQueueSessionForClassroom returns a *ClassroomConflictError when
+// any queue session with status='active' exists for classroomID, excluding
+// the session identified by excludeSessionID (the one being started/resumed).
+// Returns nil when the classroom is free.
+func CheckActiveQueueSessionForClassroom(classroomID, excludeSessionID string) error {
+	if classroomID == "" {
+		return nil
+	}
+	type conflictRow struct {
+		SessionID    string     `gorm:"column:session_id"`
+		SessionTitle string     `gorm:"column:session_title"`
+		CourseID     string     `gorm:"column:course_id"`
+		CourseName   string     `gorm:"column:course_name"`
+		StartedAt    *time.Time `gorm:"column:started_at"`
+	}
+	var row conflictRow
+	q := config.DB.
+		Table("queue_sessions qs").
+		Select("qs.id AS session_id, qs.title AS session_title, qs.course_id AS course_id, c.name AS course_name, qs.start_time AS started_at").
+		Joins("JOIN courses c ON c.id = qs.course_id").
+		Where("qs.classroom_id = ? AND qs.status = 'active'", classroomID)
+	if excludeSessionID != "" {
+		q = q.Where("qs.id != ?", excludeSessionID)
+	}
+	err := q.Limit(1).Scan(&row).Error
+	if err != nil {
+		return err
+	}
+	if row.SessionID == "" {
+		return nil
+	}
+	return &ClassroomConflictError{
+		SessionID:    row.SessionID,
+		SessionTitle: row.SessionTitle,
+		CourseID:     row.CourseID,
+		CourseName:   row.CourseName,
+		StartedAt:    row.StartedAt,
+	}
+}
+
 // ---------- QueueSession ----------
 
 type QueueSessionStats struct {
@@ -249,7 +325,7 @@ func CreateQueueSession(s *models.QueueSession) error {
 		return err
 	}
 	s.ID = id
-	pin, err := generateQueuePIN()
+	pin, err := generateUniqueQueuePIN()
 	if err != nil {
 		return err
 	}
@@ -270,9 +346,14 @@ func DeleteQueueSession(id string) error {
 func StartQueueSession(id string, classroomID string) error {
 	db := config.DB
 	now := time.Now()
+	newPIN, err := generateUniqueQueuePIN()
+	if err != nil {
+		return err
+	}
 	if err := db.Model(&models.QueueSession{}).Where("id = ?", id).Updates(map[string]interface{}{
 		"status":     "active",
 		"start_time": now,
+		"pin_code":   newPIN,
 	}).Error; err != nil {
 		return err
 	}
@@ -307,7 +388,14 @@ func CloseQueueSession(id string) error {
 }
 
 func ResumeQueueSession(id string) error {
-	return config.DB.Model(&models.QueueSession{}).Where("id = ?", id).Update("status", "active").Error
+	newPIN, err := generateUniqueQueuePIN()
+	if err != nil {
+		return err
+	}
+	return config.DB.Model(&models.QueueSession{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"status":   "active",
+		"pin_code": newPIN,
+	}).Error
 }
 
 // ---------- QueueBooking ----------
@@ -812,7 +900,7 @@ func VerifySessionPIN(sessionID string, pin string) bool {
 }
 
 func RegenerateQueueSessionPIN(sessionID string) (string, error) {
-	pin, err := generateQueuePIN()
+	pin, err := generateUniqueQueuePIN()
 	if err != nil {
 		return "", err
 	}
@@ -822,6 +910,76 @@ func RegenerateQueueSessionPIN(sessionID string) (string, error) {
 	}
 
 	return pin, nil
+}
+
+// ---------- Auto-close stale sessions ----------
+
+// AutoClosedQueueSession is returned by AutoCloseStaleQueueSessions for each
+// session that was force-closed so the caller can broadcast realtime events.
+type AutoClosedQueueSession struct {
+	SessionID        string
+	CourseID         string
+	CancelledWaiting int // number of waiting bookings cancelled
+}
+
+// AutoCloseStaleQueueSessions closes every queue session whose status is
+// 'active' or 'paused' and whose start_time is on a calendar day BEFORE
+// today (in Asia/Bangkok time).
+//
+// Safety rules:
+//   - Bookings with status='waiting'   → cancelled  (was in the queue but queue never processed them)
+//   - Bookings with status='in_progress' → left alone (TA is currently reviewing; they finish naturally)
+//   - Session status → 'closed', end_time = now
+func AutoCloseStaleQueueSessions(loc *time.Location) ([]AutoClosedQueueSession, error) {
+	if loc == nil {
+		loc = time.UTC
+	}
+	now := time.Now().In(loc)
+	// Midnight of today in the given timezone expressed as UTC for the DB query
+	todayMidnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+
+	// Find stale sessions: started before today and still open
+	var sessions []models.QueueSession
+	if err := config.DB.
+		Where("status IN ('active','paused') AND start_time < ?", todayMidnight).
+		Find(&sessions).Error; err != nil {
+		return nil, err
+	}
+	if len(sessions) == 0 {
+		return nil, nil
+	}
+
+	var results []AutoClosedQueueSession
+	endTime := now.UTC()
+
+	for _, s := range sessions {
+		// Cancel waiting bookings (not in_progress – those finish naturally)
+		res := config.DB.Model(&models.QueueBooking{}).
+			Where("queue_session_id = ? AND status = 'waiting'", s.ID).
+			Update("status", "cancelled")
+		if res.Error != nil {
+			return results, res.Error
+		}
+		cancelled := int(res.RowsAffected)
+
+		// Close the session
+		if err := config.DB.Model(&models.QueueSession{}).
+			Where("id = ?", s.ID).
+			Updates(map[string]interface{}{
+				"status":   "closed",
+				"end_time": endTime,
+			}).Error; err != nil {
+			return results, err
+		}
+
+		results = append(results, AutoClosedQueueSession{
+			SessionID:        s.ID,
+			CourseID:         s.CourseID,
+			CancelledWaiting: cancelled,
+		})
+	}
+
+	return results, nil
 }
 
 // ---------- DeskStatus ----------

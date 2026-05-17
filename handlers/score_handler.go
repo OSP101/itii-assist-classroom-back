@@ -1173,7 +1173,7 @@ func SubmitScoreHandler(c fiber.Ctx) error {
 	if err := repositories.SubmitScore(&score); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to submit score"})
 	}
-	writeCourseActivityLog(assignment.CourseID, userID, "submit_score", "score", "assignment", input.AssignmentID, assignment.Name, fiber.Map{"student_id": input.StudentID, "group_id": input.GroupID, "sub_item_id": input.SubItemID, "score": input.Score})
+	logCourseActivity(c, assignment.CourseID, userID, "submit_score", "score", "assignment", input.AssignmentID, assignment.Name, fiber.Map{"student_id": input.StudentID, "group_id": input.GroupID, "sub_item_id": input.SubItemID, "score": input.Score})
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": score})
 }
 
@@ -1215,7 +1215,7 @@ func BulkSubmitScoresHandler(c fiber.Ctx) error {
 	if err := repositories.BulkUpsertScores(scores); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to bulk submit scores"})
 	}
-	writeCourseActivityLog(assignment.CourseID, userID, "bulk_submit_scores", "score", "assignment", input.AssignmentID, assignment.Name, fiber.Map{"count": len(scores)})
+	logCourseActivity(c, assignment.CourseID, userID, "bulk_submit_scores", "score", "assignment", input.AssignmentID, assignment.Name, fiber.Map{"count": len(scores)})
 	return c.JSON(fiber.Map{"success": true, "message": "Scores submitted", "count": len(scores)})
 }
 
@@ -1298,7 +1298,7 @@ func SubmitGroupScoreHandler(c fiber.Ctx) error {
 		}
 	}
 
-	writeCourseActivityLog(assignment.CourseID, userID, "submit_group_score", "score", "assignment", assignment.ID, assignment.Name, fiber.Map{"group_id": input.GroupID, "student_count": len(targetStudentIDs), "score": input.Score, "sub_item_id": input.SubItemID})
+	logCourseActivity(c, assignment.CourseID, userID, "submit_group_score", "score", "assignment", assignment.ID, assignment.Name, fiber.Map{"group_id": input.GroupID, "student_count": len(targetStudentIDs), "score": input.Score, "sub_item_id": input.SubItemID})
 
 	return c.JSON(fiber.Map{"success": true, "message": fmt.Sprintf("Score submitted for %d group members", len(targetStudentIDs))})
 }
@@ -1332,7 +1332,7 @@ func CreateScoreEditRequestHandler(c fiber.Ctx) error {
 	if err := config.DB.Select("id", "assignment_id").First(&score, input.ScoreID).Error; err == nil {
 		var assignment models.Assignment
 		if assignmentErr := config.DB.Select("id", "course_id", "name").First(&assignment, score.AssignmentID).Error; assignmentErr == nil {
-			writeCourseActivityLog(assignment.CourseID, userID, "create_score_edit_request", "score", "assignment", assignment.ID, assignment.Name, fiber.Map{"score_id": input.ScoreID, "new_score": input.NewScore})
+			logCourseActivity(c, assignment.CourseID, userID, "create_score_edit_request", "score", "assignment", assignment.ID, assignment.Name, fiber.Map{"score_id": input.ScoreID, "new_score": input.NewScore})
 		}
 	}
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": req})
@@ -1407,7 +1407,7 @@ func ReviewEditRequestHandler(c fiber.Ctx) error {
 				if input.Approved {
 					action = "approve_score_edit_request"
 				}
-				writeCourseActivityLog(assignment.CourseID, reviewerID, action, "score", "assignment", assignment.ID, assignment.Name, fiber.Map{"request_id": existingRequest.ID, "score_id": existingRequest.ScoreID})
+				logCourseActivity(c, assignment.CourseID, reviewerID, action, "score", "assignment", assignment.ID, assignment.Name, fiber.Map{"request_id": existingRequest.ID, "score_id": existingRequest.ScoreID})
 			}
 		}
 	}

@@ -153,12 +153,16 @@ func GetCourseActivityLogsHandler(c fiber.Ctx) error {
 			"id":            log.ID,
 			"course_id":     log.CourseID,
 			"actor_user_id": log.ActorUserID,
+			"actor_email":   log.ActorEmail,
+			"actor_role":    log.ActorRole,
 			"action":        log.Action,
 			"category":      log.Category,
 			"target_type":   log.TargetType,
 			"target_id":     log.TargetID,
 			"target_name":   log.TargetName,
 			"detail":        log.Detail,
+			"ip_address":    log.IPAddress,
+			"user_agent":    log.UserAgent,
 			"created_at":    log.CreatedAt,
 		}
 		if actor, ok := usersByID[log.ActorUserID]; ok {
@@ -182,6 +186,84 @@ func GetCourseActivityLogsHandler(c fiber.Ctx) error {
 				"limit":      limit,
 				"totalPages": totalPages,
 			},
+		},
+	})
+}
+
+// GET /api/courses/:courseId/activity-logs/export
+func ExportCourseActivityLogsHandler(c fiber.Ctx) error {
+	courseID := c.Params("courseId")
+
+	query := config.DB.Model(&models.CourseActivityLog{}).Where("course_id = ?", courseID)
+	if category := c.Query("category"); category != "" {
+		query = query.Where("category = ?", category)
+	}
+	if action := c.Query("action"); action != "" {
+		query = query.Where("action = ?", action)
+	}
+	if actorID := c.Query("actorId"); actorID != "" {
+		query = query.Where("actor_user_id = ?", actorID)
+	}
+	if startDate := c.Query("startDate"); startDate != "" {
+		if parsed, err := time.Parse("2006-01-02", startDate); err == nil {
+			query = query.Where("created_at >= ?", parsed)
+		}
+	}
+	if endDate := c.Query("endDate"); endDate != "" {
+		if parsed, err := time.Parse("2006-01-02", endDate); err == nil {
+			query = query.Where("created_at <= ?", parsed.Add(24*time.Hour-time.Nanosecond))
+		}
+	}
+	if search := c.Query("search"); search != "" {
+		like := "%" + search + "%"
+		query = query.Where("target_name ILIKE ? OR action ILIKE ?", like, like)
+	}
+
+	var logs []models.CourseActivityLog
+	if err := query.Order("created_at ASC").Limit(10000).Find(&logs).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to export activity logs"})
+	}
+
+	actorIDs := make([]uint, 0, len(logs))
+	actorSet := map[uint]struct{}{}
+	for _, log := range logs {
+		if _, ok := actorSet[log.ActorUserID]; !ok {
+			actorSet[log.ActorUserID] = struct{}{}
+			actorIDs = append(actorIDs, log.ActorUserID)
+		}
+	}
+
+	usersByID, _ := fetchUsersByID(actorIDs)
+
+	items := make([]fiber.Map, 0, len(logs))
+	for _, log := range logs {
+		item := fiber.Map{
+			"id":            log.ID,
+			"course_id":     log.CourseID,
+			"actor_user_id": log.ActorUserID,
+			"actor_email":   log.ActorEmail,
+			"actor_role":    log.ActorRole,
+			"action":        log.Action,
+			"category":      log.Category,
+			"target_type":   log.TargetType,
+			"target_id":     log.TargetID,
+			"target_name":   log.TargetName,
+			"detail":        log.Detail,
+			"ip_address":    log.IPAddress,
+			"user_agent":    log.UserAgent,
+			"created_at":    log.CreatedAt,
+		}
+		if actor, ok := usersByID[log.ActorUserID]; ok {
+			item["actor"] = buildActorPayload(actor)
+		}
+		items = append(items, item)
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data": fiber.Map{
+			"logs":  items,
+			"total": len(items),
 		},
 	})
 }

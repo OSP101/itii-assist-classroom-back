@@ -15,15 +15,22 @@ func SetupCourseRoutes(app *fiber.App) {
 	protected.Get("/instructors", middlewares.RequireRole("admin", "instructor", "ta"), handlers.GetInstructorsListHandler)
 	protected.Get("/tas-list", middlewares.RequireRole("admin", "instructor", "ta"), handlers.GetTAsListHandler)
 
-	// My courses (instructor, ta)
-	protected.Get("/my-courses", middlewares.RequireRole("instructor", "ta"), handlers.GetMyCoursesHandler)
+	// My courses (instructor, ta, student)
+	protected.Get("/my-courses", middlewares.RequireRole("instructor", "ta", "student"), handlers.GetMyCoursesHandler)
 	protected.Get("/my-courses/stats", middlewares.RequireRole("instructor", "ta"), handlers.GetMyCoursesStatsHandler)
 
 	// Stats (admin, instructor)
 	protected.Get("/stats", middlewares.RequireRole("admin", "instructor"), handlers.GetCourseStatsHandler)
+	protected.Get("/conflicts", middlewares.RequireRole("admin"), handlers.GetCourseConflictsHandler)
 
 	// Course CRUD
 	protected.Get("/", middlewares.RequireRole("admin", "instructor", "ta"), handlers.GetCoursesHandler)
+
+	// Admin-only bulk / export endpoints (must be before /:id dynamic routes)
+	protected.Patch("/bulk-toggle", middlewares.RequireRole("admin"), handlers.BulkToggleCourseStatusHandler)
+	protected.Delete("/bulk", middlewares.RequireRole("admin"), handlers.BulkDeleteCoursesHandler)
+	protected.Get("/export", middlewares.RequireRole("admin"), handlers.ExportCoursesCSVHandler)
+
 	protected.Get("/:id/overview", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), handlers.GetCourseOverviewHandler)
 	protected.Get("/:id", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), handlers.GetCourseByIDHandler)
 	protected.Post("/", middlewares.RequireRole("admin", "instructor"), handlers.CreateCourseHandler)

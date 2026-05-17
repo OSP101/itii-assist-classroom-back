@@ -183,3 +183,49 @@ func IsEmailExists(email string, excludeID uint) bool {
 	db.Count(&count)
 	return count > 0
 }
+
+// IsActiveEmailExists checks if an *active* user with the given email exists.
+// Used on creation so that disabled users' emails can be reused for new accounts.
+func IsActiveEmailExists(email string, excludeID uint) bool {
+	var count int64
+	db := config.DB.Model(&models.User{}).Where("LOWER(email) = LOWER(?) AND is_active = ?", email, true)
+	if excludeID > 0 {
+		db = db.Where("id != ?", excludeID)
+	}
+	db.Count(&count)
+	return count > 0
+}
+
+// IsActiveUsernameExists checks if an *active* user with the given username exists.
+// Used on creation so that disabled usernames can be reused for new accounts.
+func IsActiveUsernameExists(username string, excludeID uint) bool {
+	var count int64
+	db := config.DB.Model(&models.User{}).Where("username = ? AND is_active = ?", username, true)
+	if excludeID > 0 {
+		db = db.Where("id != ?", excludeID)
+	}
+	db.Count(&count)
+	return count > 0
+}
+
+// FindActiveUserByUsernameExcluding returns the active user whose username matches,
+// excluding the given ID. Used to detect conflicts before re-enabling a disabled user.
+func FindActiveUserByUsernameExcluding(username string, excludeID uint) (*models.User, error) {
+	var user models.User
+	err := config.DB.Where("username = ? AND is_active = ? AND id != ?", username, true, excludeID).First(&user).Error
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+// FindActiveUserByEmailExcluding returns the active user whose email matches (case-insensitive),
+// excluding the given ID. Used to detect email conflicts before re-enabling a disabled user.
+func FindActiveUserByEmailExcluding(email string, excludeID uint) (*models.User, error) {
+	var user models.User
+	err := config.DB.Where("LOWER(email) = LOWER(?) AND is_active = ? AND id != ?", email, true, excludeID).First(&user).Error
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}

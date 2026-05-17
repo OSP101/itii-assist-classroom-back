@@ -94,7 +94,7 @@ func CreateAssignmentHandler(c fiber.Ctx) error {
 	if err := repositories.CreateAssignment(&assignment, subItems); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to create assignment"})
 	}
-	writeCourseActivityLog(input.CourseID, userID, "create_assignment", "assignment", "assignment", assignment.ID, assignment.Name, fiber.Map{
+	logCourseActivity(c, input.CourseID, userID, "create_assignment", "assignment", "assignment", assignment.ID, assignment.Name, fiber.Map{
 		"assignment_type": assignment.AssignmentType,
 		"week_number":     assignment.WeekNumber,
 		"max_score":       assignment.MaxScore,
@@ -106,14 +106,16 @@ func CreateAssignmentHandler(c fiber.Ctx) error {
 		"name":         assignment.Name,
 		"actor_id":     userID,
 	})
-	go createNotificationsForCourseMembers(
-		input.CourseID, userID,
-		"assignment_created",
-		"งานใหม่: "+assignment.Name,
-		"มีการสร้างงานใหม่ในวิชา",
-		"/classroom/"+input.CourseID+"/assignments",
-		buildNotifData(input.CourseID, strconv.FormatUint(uint64(assignment.ID), 10), "assignment", ""),
-	)
+	if !assignment.IsDraft {
+		go createNotificationsForCourseMembers(
+			input.CourseID, userID,
+			"assignment_created",
+			"งานใหม่: "+assignment.Name,
+			"มีการสร้างงานใหม่ในวิชา",
+			"/classroom/"+input.CourseID+"/assignments",
+			buildNotifData(input.CourseID, strconv.FormatUint(uint64(assignment.ID), 10), "assignment", ""),
+		)
+	}
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": assignment})
 }
 
@@ -194,26 +196,37 @@ func UpdateAssignmentHandler(c fiber.Ctx) error {
 	if err := repositories.UpdateAssignment(&a, subItemsPtr); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update assignment"})
 	}
-	writeCourseActivityLog(a.CourseID, actorID, "update_assignment", "assignment", "assignment", a.ID, a.Name, fiber.Map{
+	logCourseActivity(c, a.CourseID, actorID, "update_assignment", "assignment", "assignment", a.ID, a.Name, fiber.Map{
 		"assignment_type":   a.AssignmentType,
 		"week_number":       a.WeekNumber,
 		"max_score":         a.MaxScore,
 		"replace_sub_items": subItemsPtr != nil,
 	})
+	wasPublished := existingAssignment.IsDraft && !a.IsDraft
 	realtime.EmitDataUpdate("assignment", "update", a.ID, fiber.Map{
 		"courseId":     a.CourseID,
 		"assignmentId": a.ID,
 		"name":         a.Name,
 		"actor_id":     actorID,
 	})
-	go createNotificationsForCourseMembers(
-		a.CourseID, actorID,
-		"assignment_updated",
-		"แก้ไขงาน: "+a.Name,
-		"มีการแก้ไขงานในวิชา",
-		"/classroom/"+a.CourseID+"/assignments",
-		buildNotifData(a.CourseID, strconv.FormatUint(uint64(a.ID), 10), "assignment", ""),
-	)
+	if !a.IsDraft {
+		notifType := "assignment_updated"
+		notifTitle := "แก้ไขงาน: " + a.Name
+		notifBody := "มีการแก้ไขงานในวิชา"
+		if wasPublished {
+			notifType = "assignment_created"
+			notifTitle = "งานใหม่: " + a.Name
+			notifBody = "มีการเผยแพร่งานใหม่ในวิชา"
+		}
+		go createNotificationsForCourseMembers(
+			a.CourseID, actorID,
+			notifType,
+			notifTitle,
+			notifBody,
+			"/classroom/"+a.CourseID+"/assignments",
+			buildNotifData(a.CourseID, strconv.FormatUint(uint64(a.ID), 10), "assignment", ""),
+		)
+	}
 	return c.JSON(fiber.Map{"success": true, "data": a})
 }
 
@@ -231,7 +244,7 @@ func DeleteAssignmentHandler(c fiber.Ctx) error {
 	if err := repositories.SoftDeleteAssignment(uint(id)); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to delete assignment"})
 	}
-	writeCourseActivityLog(assignment.CourseID, actorID, "delete_assignment", "assignment", "assignment", assignment.ID, assignment.Name, fiber.Map{
+	logCourseActivity(c, assignment.CourseID, actorID, "delete_assignment", "assignment", "assignment", assignment.ID, assignment.Name, fiber.Map{
 		"assignment_type": assignment.AssignmentType,
 		"week_number":     assignment.WeekNumber,
 	})
@@ -256,7 +269,7 @@ func ReorderAssignmentsHandler(c fiber.Ctx) error {
 	if err := repositories.ReorderAssignments(input.CourseID, input.OrderedIDs); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to reorder assignments"})
 	}
-	writeCourseActivityLog(input.CourseID, c.Locals("user_id").(uint), "reorder_assignments", "assignment", "course", input.CourseID, "", fiber.Map{"ordered_ids": input.OrderedIDs})
+	logCourseActivity(c, input.CourseID, c.Locals("user_id").(uint), "reorder_assignments", "assignment", "course", input.CourseID, "", fiber.Map{"ordered_ids": input.OrderedIDs})
 	realtime.EmitDataUpdate("assignment", "update", nil, fiber.Map{
 		"courseId":    input.CourseID,
 		"ordered_ids": input.OrderedIDs,
@@ -284,7 +297,7 @@ func LinkAttendanceSessionsHandler(c fiber.Ctx) error {
 	if err := repositories.LinkAttendanceSessions(uint(id), input.SessionIDs); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update links"})
 	}
-	writeCourseActivityLog(assignment.CourseID, c.Locals("user_id").(uint), "link_assignment_attendance", "assignment", "assignment", assignment.ID, assignment.Name, fiber.Map{"session_ids": input.SessionIDs})
+	logCourseActivity(c, assignment.CourseID, c.Locals("user_id").(uint), "link_assignment_attendance", "assignment", "assignment", assignment.ID, assignment.Name, fiber.Map{"session_ids": input.SessionIDs})
 	realtime.EmitDataUpdate("assignment", "update", assignment.ID, fiber.Map{
 		"courseId":     assignment.CourseID,
 		"assignmentId": assignment.ID,

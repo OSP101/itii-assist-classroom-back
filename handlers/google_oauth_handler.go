@@ -64,9 +64,10 @@ type oauthStatePayload struct {
 	Nonce     string `json:"n"`
 	Action    string `json:"a"` // "" | "link"
 	LinkToken string `json:"l"`
+	Audience  string `json:"u,omitempty"` // "" | "student"
 }
 
-func signOAuthState(action, linkToken string) (string, error) {
+func signOAuthState(action, linkToken, audience string) (string, error) {
 	nonce := make([]byte, 12)
 	if _, err := rand.Read(nonce); err != nil {
 		return "", err
@@ -75,6 +76,7 @@ func signOAuthState(action, linkToken string) (string, error) {
 		Nonce:     base64.RawURLEncoding.EncodeToString(nonce),
 		Action:    action,
 		LinkToken: linkToken,
+		Audience:  audience,
 	}
 	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
@@ -154,47 +156,124 @@ func findUserByOAuthAccount(provider, providerUserID, providerEmail string) (*mo
 // =============================================================================
 
 type googleProfile struct {
-	Sub     string `json:"sub"`
-	Email   string `json:"email"`
-	Name    string `json:"name"`
-	Picture string `json:"picture"`
+	Sub           string `json:"sub"`
+	Email         string `json:"email"`
+	EmailVerified bool   `json:"email_verified"`
+	Name          string `json:"name"`
+	Picture       string `json:"picture"`
 }
 
 // =============================================================================
 // Find user by Google profile — checks UserOAuthAccount then legacy google_id
 // =============================================================================
 
-func findUserByGoogle(profile googleProfile) (*models.User, *models.UserOAuthAccount) {
+func upsertGoogleOAuthAccount(userID uint, profile googleProfile) *models.UserOAuthAccount {
+	var linked models.UserOAuthAccount
+	if err := config.DB.Where("provider = ? AND provider_user_id = ?", "google", profile.Sub).First(&linked).Error; err == nil && linked.UserID != userID {
+		return nil
+	}
+
+	acc := models.UserOAuthAccount{
+		UserID:         userID,
+		Provider:       "google",
+		ProviderUserID: profile.Sub,
+		ProviderEmail:  profile.Email,
+		ProviderName:   profile.Name,
+		ProviderAvatar: profile.Picture,
+		LinkedAt:       time.Now(),
+	}
+	config.DB.Where("user_id = ? AND provider = ?", userID, "google").FirstOrCreate(&acc, acc)
+	config.DB.Model(&acc).Updates(map[string]interface{}{
+		"provider_user_id": profile.Sub,
+		"provider_email":   profile.Email,
+		"provider_name":    profile.Name,
+		"provider_avatar":  profile.Picture,
+	})
+	return &acc
+}
+
+func findGeneralUserByGoogle(profile googleProfile) (*models.User, *models.UserOAuthAccount) {
 	if user, acc := findUserByOAuthAccount("google", profile.Sub, profile.Email); user != nil {
+		if strings.EqualFold(strings.TrimSpace(user.Role), "student") {
+			return nil, nil
+		}
 		return user, acc
 	}
 
-	var acc models.UserOAuthAccount
-	if err := config.DB.Where("provider = ? AND provider_user_id = ?", "google", profile.Sub).
-		First(&acc).Error; err == nil {
-		var u models.User
-		if err := config.DB.First(&u, acc.UserID).Error; err == nil {
-			return &u, &acc
-		}
-	}
-
-	// Legacy: google_id column on users
 	var u models.User
 	if err := config.DB.Where("google_id = ?", profile.Sub).First(&u).Error; err == nil {
-		newAcc := models.UserOAuthAccount{
-			UserID:         u.ID,
-			Provider:       "google",
-			ProviderUserID: profile.Sub,
-			ProviderEmail:  profile.Email,
-			ProviderName:   profile.Name,
-			ProviderAvatar: profile.Picture,
-			LinkedAt:       time.Now(),
+		if strings.EqualFold(strings.TrimSpace(u.Role), "student") {
+			return nil, nil
 		}
-		config.DB.Where("user_id = ? AND provider = ?", u.ID, "google").FirstOrCreate(&newAcc)
-		return &u, &newAcc
+		return &u, upsertGoogleOAuthAccount(u.ID, profile)
+	}
+
+	trimmedEmail := strings.ToLower(strings.TrimSpace(profile.Email))
+	if profile.EmailVerified && trimmedEmail != "" {
+		var existingUser models.User
+		if err := config.DB.Where("LOWER(email) = ?", trimmedEmail).First(&existingUser).Error; err == nil {
+			if strings.EqualFold(strings.TrimSpace(existingUser.Role), "student") {
+				return nil, nil
+			}
+			updates := map[string]interface{}{}
+			if strings.TrimSpace(existingUser.GoogleID) == "" {
+				updates["google_id"] = profile.Sub
+			}
+			if strings.TrimSpace(existingUser.Avatar) == "" && strings.TrimSpace(profile.Picture) != "" {
+				updates["avatar"] = profile.Picture
+			}
+			if len(updates) > 0 {
+				config.DB.Model(&existingUser).Updates(updates)
+			}
+			return &existingUser, upsertGoogleOAuthAccount(existingUser.ID, profile)
+		}
 	}
 
 	return nil, nil
+}
+
+func findOrProvisionStudentByGoogle(profile googleProfile) *models.Student {
+	trimmedEmail := strings.ToLower(strings.TrimSpace(profile.Email))
+	if !profile.EmailVerified || trimmedEmail == "" {
+		return nil
+	}
+
+	student, err := repositories.FindStudentByEmail(trimmedEmail)
+	if err != nil || student == nil || !student.IsActive {
+		return nil
+	}
+
+	return student
+}
+
+func findUserByGoogle(profile googleProfile, audience string) (*models.User, *models.UserOAuthAccount) {
+	if audience == "student" {
+		return nil, nil
+	}
+
+	return findGeneralUserByGoogle(profile)
+}
+
+// issueStudentOAuthSession สร้าง session สำหรับ Student (ไม่มี User record)
+func issueStudentOAuthSession(c fiber.Ctx, student *models.Student) (at, rt string, err error) {
+	at, rt, jti, err := utils.GenerateStudentTokenPair(student.ID)
+	if err != nil {
+		return
+	}
+	meta := sessionMeta{
+		IP:        c.IP(),
+		UserAgent: string(c.Request().Header.UserAgent()),
+		Provider:  "google",
+	}
+	metaJSON, _ := json.Marshal(meta)
+	err = repositories.CreateRefreshToken(&models.RefreshToken{
+		JTI:       jti,
+		UserID:    student.ID,
+		Kind:      "s",
+		ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
+		Meta:      datatypes.JSON(metaJSON),
+	})
+	return
 }
 
 // =============================================================================
@@ -238,8 +317,12 @@ func GoogleLoginHandler(c fiber.Ctx) error {
 
 	action := c.Query("action")
 	linkToken := c.Query("link_token")
+	audience := strings.ToLower(strings.TrimSpace(c.Query("audience")))
+	if audience != "student" {
+		audience = ""
+	}
 
-	stateStr, err := signOAuthState(action, linkToken)
+	stateStr, err := signOAuthState(action, linkToken, audience)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to generate state"})
 	}
@@ -267,10 +350,14 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 	}
 
 	isLinkAction := payload.Action == "link"
+	loginPath := "/login"
+	if payload.Audience == "student" {
+		loginPath = "/student/login"
+	}
 
 	// --- Handle Google error (user cancelled, etc.) ---
 	if errParam := c.Query("error"); errParam != "" {
-		path := "/login"
+		path := loginPath
 		if isLinkAction {
 			path = "/auth/link-callback"
 		}
@@ -280,25 +367,25 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 	// --- Exchange code ---
 	code := c.Query("code")
 	if code == "" {
-		return redirectErr("/login", "No authorization code received")
+		return redirectErr(loginPath, "No authorization code received")
 	}
 	oauthToken, err := getGoogleOAuthConfig().Exchange(context.Background(), code)
 	if err != nil {
-		return redirectErr("/login", "Failed to exchange OAuth code: "+err.Error())
+		return redirectErr(loginPath, "Failed to exchange OAuth code: "+err.Error())
 	}
 
 	// --- Fetch Google profile ---
 	client := getGoogleOAuthConfig().Client(context.Background(), oauthToken)
 	resp, err := client.Get("https://www.googleapis.com/oauth2/v3/userinfo")
 	if err != nil || resp.StatusCode != http.StatusOK {
-		return redirectErr("/login", "Failed to fetch Google profile")
+		return redirectErr(loginPath, "Failed to fetch Google profile")
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
 	var profile googleProfile
 	if err := json.Unmarshal(body, &profile); err != nil || profile.Sub == "" {
-		return redirectErr("/login", "Invalid Google profile data")
+		return redirectErr(loginPath, "Invalid Google profile data")
 	}
 
 	// =========================================================================
@@ -356,12 +443,29 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 	// =========================================================================
 	// Normal login
 	// =========================================================================
-	user, oauthAccount := findUserByGoogle(profile)
+
+	// Student audience — bypass user table entirely
+	if payload.Audience == "student" {
+		student := findOrProvisionStudentByGoogle(profile)
+		if student == nil {
+			return redirectErr(loginPath, "ไม่พบบัญชีนักศึกษาที่ใช้งานได้สำหรับอีเมลนี้")
+		}
+		at, rt, err := issueStudentOAuthSession(c, student)
+		if err != nil {
+			return redirectErr(loginPath, "Failed to create student session")
+		}
+		return c.Redirect().To(fmt.Sprintf(
+			"%s/auth/callback?accessToken=%s&refreshToken=%s",
+			frontendURL, at, rt,
+		))
+	}
+
+	user, oauthAccount := findUserByGoogle(profile, payload.Audience)
 	if user == nil {
-		return redirectErr("/login", "ไม่พบบัญชีที่ผูกกับ Google นี้ กรุณาติดต่อผู้ดูแลระบบ")
+		return redirectErr(loginPath, "ไม่พบบัญชีที่ใช้งานได้สำหรับการเข้าสู่ระบบนี้")
 	}
 	if !user.IsActive {
-		return redirectErr("/login", "บัญชีนี้ถูกระงับการใช้งาน")
+		return redirectErr(loginPath, "บัญชีนี้ถูกระงับการใช้งาน")
 	}
 
 	// Refresh cached profile info
@@ -388,7 +492,7 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 
 	at, rt, err := issueOAuthSession(c, user, "google")
 	if err != nil {
-		return redirectErr("/login", "Failed to create session")
+		return redirectErr(loginPath, "Failed to create session")
 	}
 	return c.Redirect().To(fmt.Sprintf(
 		"%s/auth/callback?accessToken=%s&refreshToken=%s",

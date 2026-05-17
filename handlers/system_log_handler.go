@@ -14,6 +14,15 @@ import (
 	"github.com/gofiber/fiber/v3"
 )
 
+func isPrivilegedOnlyFilterEnabled(value string) bool {
+	switch value {
+	case "true", "1", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
 func attachActorUserToLog(log models.SystemLog) fiber.Map {
 	raw, _ := json.Marshal(log)
 	data := fiber.Map{}
@@ -43,16 +52,18 @@ func GetLogsHandler(c fiber.Ctx) error {
 	limit, _ := strconv.Atoi(c.Query("limit", "50"))
 
 	result, err := repositories.GetLogs(repositories.SystemLogListParams{
-		LogType:   c.Query("log_type"),
-		Severity:  c.Query("severity"),
-		UserID:    c.Query("user_id"),
-		StartDate: c.Query("start_date"),
-		EndDate:   c.Query("end_date"),
-		Search:    c.Query("search"),
-		Page:      page,
-		Limit:     limit,
-		SortBy:    c.Query("sort_by", "created_at"),
-		SortOrder: c.Query("sort_order", "desc"),
+		LogType:        c.Query("log_type"),
+		Severity:       c.Query("severity"),
+		UserID:         c.Query("user_id"),
+		ActionGroup:    c.Query("action_group"),
+		PrivilegedOnly: isPrivilegedOnlyFilterEnabled(c.Query("privileged_only")),
+		StartDate:      c.Query("start_date"),
+		EndDate:        c.Query("end_date"),
+		Search:         c.Query("search"),
+		Page:           page,
+		Limit:          limit,
+		SortBy:         c.Query("sort_by", "created_at"),
+		SortOrder:      c.Query("sort_order", "desc"),
 	})
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ดึงข้อมูลบันทึกระบบไม่สำเร็จ"})
@@ -93,7 +104,7 @@ func GetLogByIDHandler(c fiber.Ctx) error {
 }
 
 func GetLogStatsHandler(c fiber.Ctx) error {
-	stats, err := repositories.GetSystemLogStats(c.Query("start_date"), c.Query("end_date"))
+	stats, err := repositories.GetSystemLogStats(c.Query("start_date"), c.Query("end_date"), isPrivilegedOnlyFilterEnabled(c.Query("privileged_only")))
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ดึงสถิติ log ไม่สำเร็จ"})
 	}
@@ -106,6 +117,7 @@ func GetLogsTimelineHandler(c fiber.Ctx) error {
 		c.Query("end_date"),
 		c.Query("interval", "hour"),
 		c.Query("log_type"),
+		isPrivilegedOnlyFilterEnabled(c.Query("privileged_only")),
 	)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ดึง timeline log ไม่สำเร็จ"})
@@ -137,16 +149,18 @@ func GetLogFiltersHandler(c fiber.Ctx) error {
 
 func ExportLogsHandler(c fiber.Ctx) error {
 	result, err := repositories.GetLogs(repositories.SystemLogListParams{
-		LogType:   c.Query("log_type"),
-		Severity:  c.Query("severity"),
-		UserID:    c.Query("user_id"),
-		StartDate: c.Query("start_date"),
-		EndDate:   c.Query("end_date"),
-		Search:    c.Query("search"),
-		Page:      1,
-		Limit:     10000,
-		SortBy:    c.Query("sort_by", "created_at"),
-		SortOrder: c.Query("sort_order", "desc"),
+		LogType:        c.Query("log_type"),
+		Severity:       c.Query("severity"),
+		UserID:         c.Query("user_id"),
+		ActionGroup:    c.Query("action_group"),
+		PrivilegedOnly: isPrivilegedOnlyFilterEnabled(c.Query("privileged_only")),
+		StartDate:      c.Query("start_date"),
+		EndDate:        c.Query("end_date"),
+		Search:         c.Query("search"),
+		Page:           1,
+		Limit:          10000,
+		SortBy:         c.Query("sort_by", "created_at"),
+		SortOrder:      c.Query("sort_order", "desc"),
 	})
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ส่งออก log ไม่สำเร็จ"})

@@ -101,6 +101,8 @@ func UpsertExamScoreHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to upsert exam score"})
 	}
+	courseID := c.Params("courseId")
+	logCourseActivity(c, courseID, gradedBy, "submit_exam_score", "score", "student", input.StudentID, "", fiber.Map{"exam_setting_id": input.ExamSettingID, "score": input.Score})
 	return c.JSON(fiber.Map{"success": true, "data": saved, "message": "บันทึกคะแนนสำเร็จ"})
 }
 
@@ -197,6 +199,9 @@ func BulkUpsertExamScoresHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "exam_setting_id and scores or entries required"})
 	}
 
+	if savedCount > 0 {
+		logCourseActivity(c, courseID, gradedBy, "bulk_submit_exam_scores", "score", "course", courseID, "", fiber.Map{"saved": savedCount, "errors": len(errorsList)})
+	}
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data": fiber.Map{
