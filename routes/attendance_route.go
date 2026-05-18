@@ -13,7 +13,7 @@ func SetupAttendanceRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	attendanceHandler := handlers.NewAttendanceHandler(auditLogger)
 	// Public check-in endpoints (no auth)
 	app.Get("/api/attendance/check-in/:sessionId/info", handlers.GetSessionInfoHandler)
-	app.Post("/api/attendance/check-in/:sessionId", handlers.StudentCheckInHandler)
+	app.Post("/api/attendance/check-in/:sessionId", middlewares.AttendanceCheckInGuard(), handlers.StudentCheckInHandler)
 	app.Post("/api/attendance/verify-student", handlers.VerifyStudentHandler)
 	app.Post("/api/attendance/display/bootstrap", handlers.BootstrapAttendanceDisplayHandler)
 	app.Post("/api/attendance/display/confirm", handlers.ConfirmAttendanceDisplayHandler)
