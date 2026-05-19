@@ -369,6 +369,52 @@ type ExamScore struct {
 }
 
 // =============================================================================
+// 6.5 ระบบที่นั่งสอบ
+// =============================================================================
+
+type ExamSession struct {
+	ID            uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	CourseID      string    `gorm:"type:varchar(21);not null;index" json:"course_id"`
+	ExamSettingID uint      `gorm:"not null;index" json:"exam_setting_id"`
+	ExamDate      time.Time `gorm:"type:timestamptz;not null" json:"exam_date"`
+	StartTime     string    `gorm:"type:varchar(8);not null" json:"start_time"` // e.g. "17:00"
+	EndTime       string    `gorm:"type:varchar(8);not null" json:"end_time"`   // e.g. "19:00"
+	Notes         string    `gorm:"type:text" json:"notes"`
+	SeatNumberStart int     `gorm:"default:1" json:"seat_number_start"`
+	SeatNumberStep  int     `gorm:"default:1" json:"seat_number_step"`
+	CreatedAt     time.Time `gorm:"type:timestamptz" json:"created_at"`
+	UpdatedAt     time.Time `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+
+	ExamSetting ExamSetting `gorm:"foreignKey:ExamSettingID" json:"exam_setting,omitempty"`
+	Rooms       []ExamSessionRoom `gorm:"foreignKey:ExamSessionID" json:"rooms,omitempty"`
+	Seats       []ExamSeat        `gorm:"foreignKey:ExamSessionID" json:"seats,omitempty"`
+}
+
+type ExamSessionRoom struct {
+	ID            uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	ExamSessionID uint      `gorm:"not null;index" json:"exam_session_id"`
+	ClassroomID   string    `gorm:"type:varchar(21);not null;index" json:"classroom_id"`
+	SortOrder     int       `gorm:"default:0" json:"sort_order"`
+	CreatedAt     time.Time `gorm:"type:timestamptz" json:"created_at"`
+	UpdatedAt     time.Time `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+
+	Classroom Classroom `gorm:"foreignKey:ClassroomID;references:ID" json:"classroom,omitempty"`
+}
+
+type ExamSeat struct {
+	ID            uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	ExamSessionID uint      `gorm:"not null;index" json:"exam_session_id"`
+	StudentRefID  uint      `gorm:"column:student_id;not null;index" json:"student_id"`
+	DeskID        string    `gorm:"type:varchar(21);not null" json:"desk_id"`
+	SeatNumber    int       `gorm:"default:0" json:"seat_number"`
+	CreatedAt     time.Time `gorm:"type:timestamptz" json:"created_at"`
+	UpdatedAt     time.Time `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+
+	Student Student `gorm:"foreignKey:StudentRefID;references:ID" json:"student,omitempty"`
+	Desk    Desk    `gorm:"foreignKey:DeskID;references:ID" json:"desk,omitempty"`
+}
+
+// =============================================================================
 // 7. ระบบเช็คชื่อ
 // =============================================================================
 

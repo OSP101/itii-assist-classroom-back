@@ -20,9 +20,10 @@ func ConnectDB() {
 	password := os.Getenv("DB_PASSWORD")
 	dbname := os.Getenv("DB_NAME")
 	port := os.Getenv("DB_PORT")
-	requestedMaxOpenConns := getEnvInt("DB_MAX_OPEN_CONNS", 50)
-	maxIdleConns := getEnvInt("DB_MAX_IDLE_CONNS", 10)
+	requestedMaxOpenConns := getEnvInt("DB_MAX_OPEN_CONNS", 100)
+	maxIdleConns := getEnvInt("DB_MAX_IDLE_CONNS", 20)
 	connMaxLifetimeMinutes := getEnvInt("DB_CONN_MAX_LIFETIME_MINUTES", 30)
+	connMaxIdleTimeMinutes := getEnvInt("DB_CONN_MAX_IDLE_TIME_MINUTES", 10)
 
 	// จัดรูปแบบ Data Source Name (DSN)
 	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=disable TimeZone=Asia/Bangkok",
@@ -47,8 +48,9 @@ func ConnectDB() {
 	sqlDB.SetMaxOpenConns(maxOpenConns)                                           // จำนวน connection สูงสุดที่เปิดพร้อมกัน
 	sqlDB.SetMaxIdleConns(maxIdleConns)                                           // จำนวน connection ที่เก็บไว้ใช้ซ้ำ
 	sqlDB.SetConnMaxLifetime(time.Duration(connMaxLifetimeMinutes) * time.Minute) // อายุ connection สูงสุด
+	sqlDB.SetConnMaxIdleTime(time.Duration(connMaxIdleTimeMinutes) * time.Minute) // ปล่อย idle connection ที่ไม่ใช้งาน
 
-	log.Printf("✅ Database connection successfully opened (pool: max=%d, idle=%d, lifetime=%dm)", maxOpenConns, maxIdleConns, connMaxLifetimeMinutes)
+	log.Printf("✅ Database connection successfully opened (pool: max=%d, idle=%d, lifetime=%dm, idletime=%dm)", maxOpenConns, maxIdleConns, connMaxLifetimeMinutes, connMaxIdleTimeMinutes)
 	DB = database
 }
 
@@ -299,6 +301,22 @@ func MigratePerformanceIndexes() {
 		{
 			name: "queue_workers_session_user_unique",
 			sql:  `CREATE UNIQUE INDEX IF NOT EXISTS uq_queue_workers_session_user ON queue_workers (queue_session_id, user_id)`,
+		},
+		{
+			name: "exam_seats_session_student_unique",
+			sql:  `CREATE UNIQUE INDEX IF NOT EXISTS uq_exam_seats_session_student ON exam_seats (exam_session_id, student_id)`,
+		},
+		{
+			name: "exam_seats_session_desk_unique",
+			sql:  `CREATE UNIQUE INDEX IF NOT EXISTS uq_exam_seats_session_desk ON exam_seats (exam_session_id, desk_id)`,
+		},
+		{
+			name: "exam_session_rooms_session_classroom_unique",
+			sql:  `CREATE UNIQUE INDEX IF NOT EXISTS uq_exam_session_rooms_session_classroom ON exam_session_rooms (exam_session_id, classroom_id)`,
+		},
+		{
+			name: "exam_seats_session_seat_number_unique",
+			sql:  `CREATE UNIQUE INDEX IF NOT EXISTS uq_exam_seats_session_seat_number ON exam_seats (exam_session_id, seat_number) WHERE seat_number > 0`,
 		},
 		{
 			name: "queue_bookings_session_status_assigned_worker",

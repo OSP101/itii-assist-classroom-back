@@ -72,6 +72,9 @@ func main() {
 		// การสอบ
 		&models.ExamSetting{},
 		&models.ExamScore{},
+		&models.ExamSession{},
+		&models.ExamSessionRoom{},
+		&models.ExamSeat{},
 		// เช็คชื่อ
 		&models.AttendanceSession{},
 		&models.AttendanceSessionSection{},
@@ -106,7 +109,11 @@ func main() {
 	startAttendancePinLifecycleWorker()
 
 	// 4. รัน Fiber Server
-	app := fiber.New()
+	app := fiber.New(fiber.Config{
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	})
 	app.Use(middlewares.RequestLogger())
 	app.Use(logger.New())
 
