@@ -502,6 +502,21 @@ func GetCourseMemberPermissionProfile(courseID string, userID uint) (*CourseMemb
 		return nil, err
 	}
 
+	// Backward compatibility: older courses may only set courses.instructor_id
+	// without creating a course_instructors row. Treat that owner as primary instructor.
+	var course models.Course
+	if err := config.DB.Select("id", "instructor_id").Where("id = ?", courseID).First(&course).Error; err == nil {
+		if course.InstructorID != nil && *course.InstructorID == userID {
+			return &CourseMemberPermissionProfile{
+				Role:        "instructor",
+				IsPrimary:   true,
+				Permissions: DefaultInstructorCoursePermissions(),
+			}, nil
+		}
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
 	return nil, gorm.ErrRecordNotFound
 }
 

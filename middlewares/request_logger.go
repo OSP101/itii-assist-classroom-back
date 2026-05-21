@@ -78,11 +78,17 @@ func RequestLogger() fiber.Handler {
 		// Duration
 		durationMs := time.Since(start).Milliseconds()
 
-		// User ID
-		userIDRaw := c.Locals("userID")
+		// User ID (staff sessions use user_id, student sessions use student_id)
+		userIDRaw := c.Locals("user_id")
+		if userIDRaw == nil {
+			userIDRaw = c.Locals("userID")
+		}
+		if userIDRaw == nil {
+			userIDRaw = c.Locals("student_id")
+		}
 		userIDStr := ""
 		if userIDRaw != nil {
-			userIDStr = fmt.Sprintf("%v", userIDRaw)
+			userIDStr = strings.TrimSpace(fmt.Sprintf("%v", userIDRaw))
 		}
 
 		status := c.Response().StatusCode()

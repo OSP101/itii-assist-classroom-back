@@ -98,18 +98,38 @@ func Protected() fiber.Handler {
 
 func RequireRole(allowedRoles ...string) fiber.Handler {
 	return func(c fiber.Ctx) error {
-		userRole, ok := c.Locals("user_role").(string)
-		if !ok {
+		allowedRoleSet := make(map[string]struct{}, len(allowedRoles))
+		for _, role := range allowedRoles {
+			normalized := strings.ToLower(strings.TrimSpace(role))
+			if normalized != "" {
+				allowedRoleSet[normalized] = struct{}{}
+			}
+		}
+
+		userRole, _ := c.Locals("user_role").(string)
+		userRole = strings.ToLower(strings.TrimSpace(userRole))
+		if _, ok := allowedRoleSet[userRole]; ok {
+			return c.Next()
+		}
+
+		userID, hasUserID := GetUserID(c)
+		if hasUserID {
+			if user, err := repositories.FindUserByID(userID); err == nil {
+				dbRole := strings.ToLower(strings.TrimSpace(user.Role))
+				if dbRole != "" {
+					c.Locals("user_role", dbRole)
+					if _, ok := allowedRoleSet[dbRole]; ok {
+						return c.Next()
+					}
+				}
+			}
+		}
+
+		if userRole == "" && !hasUserID {
 			return c.Status(403).JSON(fiber.Map{
 				"success": false,
 				"message": "ไม่สามารถตรวจสอบสิทธิ์ได้",
 			})
-		}
-
-		for _, role := range allowedRoles {
-			if userRole == role {
-				return c.Next()
-			}
 		}
 
 		return c.Status(403).JSON(fiber.Map{

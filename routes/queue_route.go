@@ -35,11 +35,11 @@ func SetupQueueRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	base := app.Group("/api/courses/:courseId/queue", middlewares.Protected())
 
 	// Session management (instructor/ta level)
-	mgmt := base.Group("/sessions", middlewares.RequireRole("admin", "instructor", "ta"))
+	mgmt := base.Group("/sessions")
 	mgmt.Get("/", middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("courseId"), repositories.PermissionViewQueue, "instructor", "ta"), handlers.GetQueueSessionsHandler)
 	mgmt.Post("/", middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("courseId"), repositories.PermissionCreateQueueSessions, "instructor", "ta"), handlers.CreateQueueSessionHandler)
 
-	sessionMgmt := base.Group("/sessions/:sessionId", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromQueueSessionParam("sessionId"), "instructor", "ta"))
+	sessionMgmt := base.Group("/sessions/:sessionId", middlewares.RequireCourseAccess(middlewares.CourseIDFromQueueSessionParam("sessionId"), "instructor", "ta"))
 	sessionMgmt.Get("/", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionViewQueue, "instructor", "ta"), handlers.GetQueueSessionHandler)
 	sessionMgmt.Put("/", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionUpdateQueueSessions, "instructor", "ta"), handlers.UpdateQueueSessionHandler)
 	sessionMgmt.Post("/status", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionUpdateQueueSessions, "instructor", "ta"), handlers.UpdateQueueSessionStatusCompatHandler)
