@@ -45,6 +45,8 @@ func SetupAuthRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	twofa.Post("/verify-login", handlers.VerifyLoginWith2FAHandler)
 	twofa.Post("/send-login-code", handlers.SendLoginCodeHandler)
 	twofa.Post("/complete-login", handlers.CompleteTwoFALoginHandler)
+	twofa.Post("/step-up/challenge", middlewares.Protected(), handlers.RequestStepUpChallengeHandler)
+	twofa.Post("/step-up/verify", middlewares.Protected(), handlers.VerifyStepUpChallengeHandler)
 
 	// 2FA — protected endpoints (setup/manage)
 	twofa.Get("/status", middlewares.Protected(), handlers.Get2FAStatusHandler)

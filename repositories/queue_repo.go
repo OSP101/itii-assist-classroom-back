@@ -14,6 +14,13 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+const (
+	queueOfferTimeoutSeconds      = 20 * time.Second
+	queueOfferPauseDuration       = 3 * time.Minute
+	queueOfferReassignGraceWindow = 90 * time.Second
+	queueOfferPauseThreshold      = 2
+)
+
 // ---------- helpers ----------
 
 func generateQueuePIN() (string, error) {
@@ -614,18 +621,21 @@ func WorkerJoin(sessionID string, userID uint, acceptGrading, acceptHelp bool) (
 	if err != nil {
 		// Create new
 		w = models.QueueWorker{
-			QueueSessionID: sessionID,
-			UserID:         userID,
-			AcceptGrading:  acceptGrading,
-			AcceptHelp:     acceptHelp,
-			Status:         "online",
-			LastActiveAt:   &now,
+			QueueSessionID:   sessionID,
+			UserID:           userID,
+			AcceptGrading:    acceptGrading,
+			AcceptHelp:       acceptHelp,
+			Status:           "online",
+			OfferPausedUntil: nil,
+			LastActiveAt:     &now,
 		}
 		return &w, config.DB.Create(&w).Error
 	}
 	w.Status = "online"
 	w.AcceptGrading = acceptGrading
 	w.AcceptHelp = acceptHelp
+	w.OfferPausedUntil = nil
+	w.ConsecutiveOfferTimeouts = 0
 	w.LastActiveAt = &now
 	return &w, config.DB.Save(&w).Error
 }
@@ -645,19 +655,181 @@ func WorkerUpdateStatus(sessionID string, userID uint, status string) error {
 		Updates(map[string]interface{}{"status": status, "last_active_at": now}).Error
 }
 
+func assignBookingOfferToWorker(tx *gorm.DB, booking *models.QueueBooking, worker *models.QueueWorker, now time.Time) error {
+	if booking == nil || worker == nil {
+		return fmt.Errorf("invalid booking or worker")
+	}
+
+	expiresAt := now.Add(queueOfferTimeoutSeconds)
+	bookingUpdates := map[string]interface{}{
+		"assigned_worker_id":      worker.UserID,
+		"assigned_at":             now,
+		"offer_expires_at":        expiresAt,
+		"started_at":              nil,
+		"status":                  "waiting",
+		"last_offer_worker_id":    worker.UserID,
+		"last_offer_timed_out_at": nil,
+		"updated_at":              now,
+	}
+	if err := tx.Model(&models.QueueBooking{}).Where("id = ?", booking.ID).Updates(bookingUpdates).Error; err != nil {
+		return err
+	}
+
+	if err := tx.Model(&models.QueueWorker{}).
+		Where("queue_session_id = ? AND user_id = ?", booking.QueueSessionID, worker.UserID).
+		Updates(map[string]interface{}{"status": "busy", "current_booking_id": booking.ID, "last_active_at": now}).Error; err != nil {
+		return err
+	}
+
+	return updateDeskStatus(tx, booking.QueueSessionID, booking.DeskID, booking.BookingType, "waiting", booking.ID)
+}
+
+func assignTimedOutBookingToOtherWorker(tx *gorm.DB, booking *models.QueueBooking, excludeWorkerID uint, now time.Time) error {
+	if booking == nil {
+		return nil
+	}
+
+	query := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+		Where("queue_session_id = ? AND user_id <> ? AND status = ? AND current_booking_id IS NULL AND (offer_paused_until IS NULL OR offer_paused_until <= ?)", booking.QueueSessionID, excludeWorkerID, "online", now)
+	if booking.BookingType == "grading" {
+		query = query.Where("accept_grading = ?", true)
+	} else {
+		query = query.Where("accept_help = ?", true)
+	}
+
+	var candidate models.QueueWorker
+	if err := query.Order("(total_grading_completed + total_help_completed) ASC, user_id ASC").First(&candidate).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+
+	return assignBookingOfferToWorker(tx, booking, &candidate, now)
+}
+
+// ProcessQueueOfferTimeouts requeues expired offers and immediately tries to route them to another ready worker.
+func ProcessQueueOfferTimeouts(sessionID string) (int, error) {
+	now := time.Now()
+	processedCount := 0
+
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
+		var expired []models.QueueBooking
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+			Where("queue_session_id = ? AND status = ? AND assigned_worker_id IS NOT NULL AND offer_expires_at IS NOT NULL AND offer_expires_at <= ?", sessionID, "waiting", now).
+			Order("offer_expires_at ASC, id ASC").
+			Find(&expired).Error; err != nil {
+			return err
+		}
+
+		for _, booking := range expired {
+			if booking.AssignedWorkerID == nil {
+				continue
+			}
+			workerID := *booking.AssignedWorkerID
+
+			var worker models.QueueWorker
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("queue_session_id = ? AND user_id = ?", sessionID, workerID).
+				First(&worker).Error; err != nil {
+				return err
+			}
+
+			workerStatus := "online"
+			workerUpdates := map[string]interface{}{
+				"status":                     workerStatus,
+				"current_booking_id":         nil,
+				"offer_timeout_count":        gorm.Expr("offer_timeout_count + 1"),
+				"consecutive_offer_timeouts": gorm.Expr("consecutive_offer_timeouts + 1"),
+				"last_active_at":             now,
+			}
+			if worker.Status == "paused" {
+				workerStatus = "paused"
+				workerUpdates["status"] = workerStatus
+			}
+
+			if worker.Status != "paused" && worker.ConsecutiveOfferTimeouts+1 >= queueOfferPauseThreshold {
+				workerUpdates["status"] = "offline"
+				workerUpdates["offer_paused_until"] = now.Add(queueOfferPauseDuration)
+				workerUpdates["consecutive_offer_timeouts"] = 0
+			}
+
+			if err := tx.Model(&models.QueueWorker{}).
+				Where("queue_session_id = ? AND user_id = ?", sessionID, workerID).
+				Updates(workerUpdates).Error; err != nil {
+				return err
+			}
+
+			if err := tx.Model(&models.QueueBooking{}).
+				Where("id = ?", booking.ID).
+				Updates(map[string]interface{}{
+					"assigned_worker_id":      nil,
+					"assigned_at":             nil,
+					"offer_expires_at":        nil,
+					"last_offer_worker_id":    workerID,
+					"last_offer_timed_out_at": now,
+					"timeout_count":           gorm.Expr("timeout_count + 1"),
+					"updated_at":              now,
+				}).Error; err != nil {
+				return err
+			}
+
+			requeued := booking
+			requeued.AssignedWorkerID = nil
+			requeued.AssignedAt = nil
+			requeued.OfferExpiresAt = nil
+			requeued.LastOfferWorkerID = &workerID
+			timedOutAt := now
+			requeued.LastOfferTimedOutAt = &timedOutAt
+
+			if err := assignTimedOutBookingToOtherWorker(tx, &requeued, workerID, now); err != nil {
+				return err
+			}
+
+			processedCount++
+		}
+
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	return processedCount, nil
+}
+
 // AssignNextWaitingBookingToWorker attempts to atomically assign the next matching waiting booking
 // to the specified worker. It returns (booking, assignedNow, error).
 // assignedNow is true only when this call newly assigned a booking.
 func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.QueueBooking, bool, error) {
+	if _, err := ProcessQueueOfferTimeouts(sessionID); err != nil {
+		return nil, false, err
+	}
+
 	var bookingResult models.QueueBooking
 	assignedNow := false
 
 	err := config.DB.Transaction(func(tx *gorm.DB) error {
+		now := time.Now()
+
 		var worker models.QueueWorker
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("queue_session_id = ? AND user_id = ?", sessionID, workerID).
 			First(&worker).Error; err != nil {
 			return err
+		}
+
+		if worker.OfferPausedUntil != nil && worker.OfferPausedUntil.After(now) {
+			return nil
+		}
+		if worker.OfferPausedUntil != nil && worker.OfferPausedUntil.Before(now) && worker.Status == "offline" {
+			if err := tx.Model(&models.QueueWorker{}).
+				Where("queue_session_id = ? AND user_id = ?", sessionID, workerID).
+				Updates(map[string]interface{}{"status": "online", "offer_paused_until": nil, "consecutive_offer_timeouts": 0, "last_active_at": now}).Error; err != nil {
+				return err
+			}
+			worker.Status = "online"
+			worker.OfferPausedUntil = nil
 		}
 
 		// If worker already has an assigned active booking, return it without reassignment.
@@ -693,6 +865,7 @@ func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.
 		var waiting models.QueueBooking
 		waitingErr := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
 			Where("queue_session_id = ? AND status = ? AND assigned_worker_id IS NULL AND booking_type IN ?", sessionID, "waiting", bookingTypes).
+			Where("last_offer_worker_id IS NULL OR last_offer_worker_id <> ? OR last_offer_timed_out_at IS NULL OR last_offer_timed_out_at < ?", workerID, now.Add(-queueOfferReassignGraceWindow)).
 			Order("queue_number ASC, created_at ASC, id ASC").
 			First(&waiting).Error
 		if errors.Is(waitingErr, gorm.ErrRecordNotFound) {
@@ -702,25 +875,7 @@ func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.
 			return waitingErr
 		}
 
-		now := time.Now()
-		bookingUpdates := map[string]interface{}{
-			"assigned_worker_id": workerID,
-			"assigned_at":        now,
-			"started_at":         now,
-			"status":             "in_progress",
-			"updated_at":         now,
-		}
-		if err := tx.Model(&models.QueueBooking{}).Where("id = ?", waiting.ID).Updates(bookingUpdates).Error; err != nil {
-			return err
-		}
-
-		if err := tx.Model(&models.QueueWorker{}).
-			Where("queue_session_id = ? AND user_id = ?", sessionID, workerID).
-			Updates(map[string]interface{}{"status": "busy", "current_booking_id": waiting.ID, "last_active_at": now}).Error; err != nil {
-			return err
-		}
-
-		if err := updateDeskStatus(tx, waiting.QueueSessionID, waiting.DeskID, waiting.BookingType, "in_progress", waiting.ID); err != nil {
+		if err := assignBookingOfferToWorker(tx, &waiting, &worker, now); err != nil {
 			return err
 		}
 
@@ -744,7 +899,7 @@ func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.
 
 // Worker starts / completes a booking
 func WorkerUpdateBooking(bookingID uint, workerID uint, action string, score *float64, workerNote string) (*models.QueueBooking, error) {
-	if action != "start" && action != "complete" && action != "no_show" {
+	if action != "start" && action != "complete" && action != "no_show" && action != "reject" {
 		return nil, fmt.Errorf("invalid action")
 	}
 
@@ -768,14 +923,18 @@ func WorkerUpdateBooking(bookingID uint, workerID uint, action string, score *fl
 			if b.Status != "waiting" {
 				return fmt.Errorf("booking is not waiting")
 			}
-			if b.AssignedWorkerID != nil && *b.AssignedWorkerID != workerID {
-				return fmt.Errorf("booking already assigned to another worker")
+			if b.AssignedWorkerID == nil || *b.AssignedWorkerID != workerID {
+				return fmt.Errorf("booking is not assigned to this worker")
+			}
+			if b.OfferExpiresAt != nil && now.After(*b.OfferExpiresAt) {
+				return fmt.Errorf("offer expired")
 			}
 
 			updates := map[string]interface{}{
 				"status":             "in_progress",
 				"assigned_worker_id": workerID,
 				"assigned_at":        now,
+				"offer_expires_at":   nil,
 				"started_at":         now,
 				"updated_at":         now,
 			}
@@ -787,7 +946,49 @@ func WorkerUpdateBooking(bookingID uint, workerID uint, action string, score *fl
 			}
 			if err := tx.Model(&models.QueueWorker{}).
 				Where("queue_session_id = ? AND user_id = ?", b.QueueSessionID, workerID).
-				Updates(map[string]interface{}{"status": "busy", "current_booking_id": b.ID, "last_active_at": now}).Error; err != nil {
+				Updates(map[string]interface{}{"status": "busy", "current_booking_id": b.ID, "last_active_at": now, "offer_accept_count": gorm.Expr("offer_accept_count + 1"), "consecutive_offer_timeouts": 0}).Error; err != nil {
+				return err
+			}
+
+		case "reject":
+			if b.Status != "waiting" {
+				return fmt.Errorf("booking is not waiting")
+			}
+			if b.AssignedWorkerID == nil || *b.AssignedWorkerID != workerID {
+				return fmt.Errorf("booking is not assigned to this worker")
+			}
+
+			updates := map[string]interface{}{
+				"assigned_worker_id":      nil,
+				"assigned_at":             nil,
+				"offer_expires_at":        nil,
+				"last_offer_worker_id":    workerID,
+				"last_offer_timed_out_at": nil,
+				"reject_count":            gorm.Expr("reject_count + 1"),
+				"worker_note":             workerNote,
+				"updated_at":              now,
+			}
+			if err := tx.Model(&models.QueueBooking{}).Where("id = ?", b.ID).Updates(updates).Error; err != nil {
+				return err
+			}
+
+			workerUpdates := map[string]interface{}{
+				"current_booking_id": nil,
+				"last_active_at":     now,
+				"offer_reject_count": gorm.Expr("offer_reject_count + 1"),
+			}
+			if worker.Status == "paused" {
+				workerUpdates["status"] = "paused"
+			} else {
+				workerUpdates["status"] = "online"
+			}
+			if err := tx.Model(&models.QueueWorker{}).
+				Where("queue_session_id = ? AND user_id = ?", b.QueueSessionID, workerID).
+				Updates(workerUpdates).Error; err != nil {
+				return err
+			}
+
+			if err := updateDeskStatus(tx, b.QueueSessionID, b.DeskID, b.BookingType, "waiting", b.ID); err != nil {
 				return err
 			}
 

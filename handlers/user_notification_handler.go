@@ -270,3 +270,18 @@ func ClearReadNotificationsHandler(c fiber.Ctx) error {
 	}
 	return c.JSON(fiber.Map{"success": true, "message": "Read notifications cleared"})
 }
+
+// POST /api/notifications/announcements/:id/ack
+func AcknowledgeAnnouncementFromInboxHandler(c fiber.Ctx) error {
+	userID := c.Locals("user_id").(uint)
+	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid announcement ID"})
+	}
+
+	if err := repositories.AcknowledgeAnnouncement(uint(id), userID); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Failed to acknowledge announcement"})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "message": "Acknowledged"})
+}

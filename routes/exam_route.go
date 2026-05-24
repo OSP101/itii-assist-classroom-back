@@ -12,6 +12,7 @@ import (
 func SetupExamRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	examHandler := handlers.NewExamHandler(auditLogger)
 	api := app.Group("/api/courses/:courseId", middlewares.Protected())
+	api.Use(middlewares.RequireAdminFeature("menu.exams"))
 
 	api.Get("/exam-settings", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("courseId"), repositories.PermissionViewExamScores, "instructor", "ta"), handlers.GetExamSettingsHandler)
 	api.Put("/exam-settings/:id", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("courseId"), repositories.PermissionUpdateExamSettings, "instructor", "ta"), handlers.UpdateExamSettingHandler)

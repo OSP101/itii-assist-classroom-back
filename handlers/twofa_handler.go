@@ -802,6 +802,143 @@ func SendLoginCodeHandler(c fiber.Ctx) error {
 }
 
 // =============================================================================
+// POST /api/auth/2fa/step-up/challenge (protected)
+// =============================================================================
+
+type StepUpChallengeInput struct {
+	Action string `json:"action"`
+}
+
+var privilegedStepUpActions = map[string]struct{}{
+	"system_settings.maintenance.update":   {},
+	"system_settings.feature_flags.update": {},
+	"system_settings.backups.run_now":      {},
+	"system_settings.backups.restore":      {},
+	"system_settings.backups.download":     {},
+	"system_logs.cleanup":                  {},
+}
+
+func normalizeStepUpAction(action string) string {
+	return strings.TrimSpace(strings.ToLower(action))
+}
+
+func isStepUpActionAllowed(action string) bool {
+	_, ok := privilegedStepUpActions[normalizeStepUpAction(action)]
+	return ok
+}
+
+func RequestStepUpChallengeHandler(c fiber.Ctx) error {
+	userID, ok := middlewares.GetUserID(c)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
+	}
+
+	var input StepUpChallengeInput
+	if err := c.Bind().JSON(&input); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
+	}
+	action := normalizeStepUpAction(input.Action)
+	if !isStepUpActionAllowed(action) {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "action ไม่รองรับ"})
+	}
+
+	var user models.User
+	if err := config.DB.First(&user, userID).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "User not found"})
+	}
+	if !user.TwoFactorEnabled {
+		return c.Status(403).JSON(fiber.Map{"success": false, "code": "2FA_NOT_ENABLED", "message": "กรุณาเปิดใช้งาน 2FA ก่อนทำรายการสำคัญ"})
+	}
+
+	if user.TwoFactorMethod == "email" {
+		if user.Email == "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไม่พบอีเมลในโปรไฟล์"})
+		}
+		emailCode := generateNumericCode(6)
+		emailCodeExp := time.Now().Add(5 * time.Minute)
+		expiresAt := time.Now().Add(15 * time.Minute)
+
+		config.DB.Where("user_id = ? AND method = ?", user.ID, "email").Delete(&models.TwoFactorPending{})
+		config.DB.Create(&models.TwoFactorPending{
+			UserID:             user.ID,
+			Method:             "email",
+			Secret:             "stepup:" + action,
+			EmailCode:          emailCode,
+			EmailCodeExpiresAt: &emailCodeExp,
+			ExpiresAt:          expiresAt,
+		})
+
+		if err := services.SendTwoFactorCodeEmail(&user, emailCode, "stepup"); err != nil {
+			services.LogEmailDeliveryError("2fa step-up code", err)
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "ไม่สามารถส่งอีเมลรหัสยืนยันได้ในขณะนี้"})
+		}
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data": fiber.Map{
+			"action":      action,
+			"method":      user.TwoFactorMethod,
+			"maskedEmail": maskEmail(user.Email),
+			"expiresIn":   300,
+		},
+	})
+}
+
+// =============================================================================
+// POST /api/auth/2fa/step-up/verify (protected)
+// =============================================================================
+
+type StepUpVerifyInput struct {
+	Action string `json:"action"`
+	Code   string `json:"code"`
+}
+
+func VerifyStepUpChallengeHandler(c fiber.Ctx) error {
+	userID, ok := middlewares.GetUserID(c)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
+	}
+
+	var input StepUpVerifyInput
+	if err := c.Bind().JSON(&input); err != nil || strings.TrimSpace(input.Code) == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "กรุณากรอกรหัสยืนยัน"})
+	}
+	action := normalizeStepUpAction(input.Action)
+	if !isStepUpActionAllowed(action) {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "action ไม่รองรับ"})
+	}
+
+	var user models.User
+	if err := config.DB.First(&user, userID).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "User not found"})
+	}
+	if !user.TwoFactorEnabled {
+		return c.Status(403).JSON(fiber.Map{"success": false, "code": "2FA_NOT_ENABLED", "message": "กรุณาเปิดใช้งาน 2FA ก่อนทำรายการสำคัญ"})
+	}
+
+	isValid, usedBackupCode := verify2FACodeForLogin(&user, strings.TrimSpace(input.Code))
+	if !isValid {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "รหัสยืนยันไม่ถูกต้อง"})
+	}
+
+	stepUpToken, expiresAt, err := middlewares.GenerateStepUpToken(user.ID, action, 10*time.Minute)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ไม่สามารถสร้าง step-up token ได้"})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data": fiber.Map{
+			"action":         action,
+			"stepUpToken":    stepUpToken,
+			"expiresAt":      expiresAt,
+			"usedBackupCode": usedBackupCode,
+		},
+	})
+}
+
+// =============================================================================
 // Utility
 // =============================================================================
 

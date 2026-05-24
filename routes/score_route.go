@@ -14,6 +14,7 @@ func SetupScoreRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	serHandler := handlers.NewScoreEditRequestHandler(auditLogger)
 
 	api := app.Group("/api/scores", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"))
+	api.Use(middlewares.RequireAdminFeature("menu.scores"))
 
 	api.Get("/", middlewares.RequireCourseAccess(middlewares.CourseIDFromAssignmentQuery("assignment_id"), "instructor", "ta"), middlewares.RequireAnyCoursePermission(middlewares.CourseIDFromAssignmentQuery("assignment_id"), []string{repositories.PermissionGradeAssignments, repositories.PermissionEditScores, repositories.PermissionViewScoreSummary}, "instructor", "ta"), handlers.GetScoresHandler)
 	api.Get("/summary", middlewares.RequireCourseAccess(middlewares.CourseIDFromQuery("course_id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromQuery("course_id"), repositories.PermissionViewScoreSummary, "instructor", "ta"), handlers.GetStudentScoresSummaryHandler)
@@ -30,6 +31,7 @@ func SetupScoreRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 
 	// /api/score-edit-requests — separate prefix used by frontend
 	ser := app.Group("/api/score-edit-requests", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"))
+	ser.Use(middlewares.RequireAdminFeature("menu.scores"))
 	ser.Get("/", middlewares.RequireCourseAccess(middlewares.CourseIDFromQuery("course_id"), "instructor", "ta"), middlewares.RequireAnyCoursePermission(middlewares.CourseIDFromQuery("course_id"), []string{repositories.PermissionReviewOwnScoreRequests, repositories.PermissionReviewAllScoreRequests}, "instructor", "ta"), handlers.GetScoreEditRequestsCompatHandler)
 	ser.Post("/", middlewares.RequireCourseAccess(middlewares.CourseIDFromScoreBody("score_id"), "instructor", "ta"), handlers.CreateScoreEditRequestCompatHandler)
 	ser.Post("/batch", middlewares.RequireCourseAccess(middlewares.CourseIDsFromScoreBody("score_ids"), "instructor", "ta"), handlers.CreateBatchScoreEditRequestCompatHandler)

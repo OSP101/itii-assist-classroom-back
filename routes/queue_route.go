@@ -23,6 +23,7 @@ func SetupQueueRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	public.Post("/sessions/:sessionId/cutoff", handlers.UpdateQueueSessionCutoffPublicHandler)
 
 	legacyProtected := app.Group("/api/queue", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"))
+	legacyProtected.Use(middlewares.RequireAdminFeature("menu.queue"))
 	legacyProtected.Post("/sessions/:sessionId/status", middlewares.RequireCourseAccess(middlewares.CourseIDFromQueueSessionParam("sessionId"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionUpdateQueueSessions, "instructor", "ta"), handlers.UpdateQueueSessionStatusPublicHandler)
 
 	publicCourse := app.Group("/api/courses/:courseId/queue")
@@ -33,6 +34,7 @@ func SetupQueueRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	publicCourse.Get("/sessions/:sessionId/desk-statuses", handlers.GetQueueDeskStatusesPublicHandler)
 
 	base := app.Group("/api/courses/:courseId/queue", middlewares.Protected())
+	base.Use(middlewares.RequireAdminFeature("menu.queue"))
 
 	// Session management (instructor/ta level)
 	mgmt := base.Group("/sessions")

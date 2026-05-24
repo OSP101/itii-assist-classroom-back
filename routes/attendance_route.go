@@ -30,6 +30,7 @@ func SetupAttendanceRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 
 	// Protected endpoints
 	api := app.Group("/api/attendance", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"))
+	api.Use(middlewares.RequireAdminFeature("menu.attendance"))
 	api.Get("/", middlewares.RequireCourseAccess(middlewares.CourseIDFromQuery("course_id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromQuery("course_id"), repositories.PermissionViewAttendance, "instructor", "ta"), handlers.GetAttendanceSessionsHandler)
 	api.Post("/", middlewares.RequireCourseAccess(middlewares.CourseIDFromBody("course_id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromBody("course_id"), repositories.PermissionCreateAttendanceSessions, "instructor", "ta"), attendanceHandler.CreateAttendanceSession)
 	api.Post("/:id/preview-section-change", middlewares.RequireCourseAccess(middlewares.CourseIDFromAttendanceSessionParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromAttendanceSessionParam("id"), repositories.PermissionUpdateAttendanceSessions, "instructor", "ta"), handlers.PreviewSectionChangeHandler)

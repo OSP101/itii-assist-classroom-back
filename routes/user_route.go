@@ -11,6 +11,7 @@ import (
 func SetupUserRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	userHandler := handlers.NewUserHandler(auditLogger)
 	api := app.Group("/api/users", middlewares.Protected(), middlewares.RequireRole("admin"))
+	api.Use(middlewares.RequireAdminFeature("menu.users"))
 
 	api.Get("/", handlers.GetUsersHandler)                 // GET    /api/users
 	api.Get("/stats", handlers.GetUserStatsHandler)        // GET    /api/users/stats

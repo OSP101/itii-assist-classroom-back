@@ -10,6 +10,7 @@ import (
 
 func SetupAssignmentRoutes(app *fiber.App) {
 	api := app.Group("/api/assignments", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"))
+	api.Use(middlewares.RequireAdminFeature("menu.assignments"))
 
 	api.Get("/", middlewares.RequireCourseAccess(middlewares.CourseIDFromQuery("course_id"), "instructor", "ta"), middlewares.RequireAnyCoursePermission(middlewares.CourseIDFromQuery("course_id"), []string{repositories.PermissionViewAssignments, repositories.PermissionGradeAssignments, repositories.PermissionEditScores}, "instructor", "ta"), handlers.GetAssignmentsHandler)
 	api.Post("/", middlewares.RequireCourseAccess(middlewares.CourseIDFromBody("course_id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromBody("course_id"), repositories.PermissionCreateAssignments, "instructor", "ta"), handlers.CreateAssignmentHandler)

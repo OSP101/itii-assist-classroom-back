@@ -18,6 +18,7 @@ func SetupFeedbackRoutes(app *fiber.App) {
 
 	// Admin only: manage all feedbacks
 	admin := app.Group("/api/feedback", middlewares.Protected(), middlewares.RequireRole("admin"))
+	admin.Use(middlewares.RequireAdminFeature("menu.feedback"))
 	admin.Get("/stats", handlers.GetFeedbackStatsHandler)
 	admin.Get("/", handlers.GetAllFeedbacksHandler)
 	admin.Get("/:id", handlers.GetFeedbackByIDHandler)

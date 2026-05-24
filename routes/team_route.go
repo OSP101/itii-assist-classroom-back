@@ -10,6 +10,7 @@ import (
 
 func SetupTeamRoutes(app *fiber.App) {
 	protected := app.Group("/api/courses/:id/teams", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"))
+	protected.Use(middlewares.RequireAdminFeature("menu.teams"))
 
 	protected.Get("/", middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionViewTeams, "instructor", "ta"), handlers.GetTeamsHandler)
 	protected.Post("/bulk", middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionCreateTeams, "instructor", "ta"), handlers.BulkCreateTeamsHandler)

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"itii-assist/config"
@@ -17,6 +18,57 @@ import (
 	ua "github.com/mileusna/useragent"
 	"gorm.io/gorm"
 )
+
+var queueRejectReasonOrder = []string{
+	"busy_with_student",
+	"consulting_instructor",
+	"bathroom_break",
+	"technical_issue",
+	"temporary_unavailable",
+	"other",
+}
+
+func normalizeQueueRejectReason(reason string) string {
+	normalized := strings.TrimSpace(strings.ToLower(reason))
+	normalized = strings.ReplaceAll(normalized, " ", "_")
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+
+	switch normalized {
+	case "busy_explaining":
+		return "busy_with_student"
+	case "teacher_consultation":
+		return "consulting_instructor"
+	case "restroom_break":
+		return "bathroom_break"
+	case "temp_unavailable":
+		return "temporary_unavailable"
+	}
+
+	for _, allowed := range queueRejectReasonOrder {
+		if normalized == allowed {
+			return normalized
+		}
+	}
+
+	return ""
+}
+
+func queueRejectReasonLabels(reasonCode string) (string, string) {
+	switch normalizeQueueRejectReason(reasonCode) {
+	case "busy_with_student":
+		return "ติดช่วยเหลือนักศึกษาคนอื่น", "Busy helping another student"
+	case "consulting_instructor":
+		return "กำลังคุยกับอาจารย์", "Consulting instructor"
+	case "bathroom_break":
+		return "ติดภารกิจส่วนตัวชั่วคราว", "Temporary personal break"
+	case "technical_issue":
+		return "มีปัญหาทางเทคนิค", "Technical issue"
+	case "temporary_unavailable":
+		return "ไม่สะดวกรับงานชั่วคราว", "Temporarily unavailable"
+	default:
+		return "เหตุผลอื่น", "Other"
+	}
+}
 
 // QueueHandler — struct-based handler with audit logger
 type QueueHandler struct {
@@ -546,6 +598,8 @@ func GetQueueSessionReportHandler(c fiber.Ctx) error {
 			"booking_ip":         booking.BookingIP,
 			"booking_user_agent": booking.BookingUserAgent,
 			"booking_device":     booking.BookingDevice,
+			"timeout_count":      booking.TimeoutCount,
+			"reject_count":       booking.RejectCount,
 			"score":              booking.Score,
 			"score_comment":      booking.ScoreComment,
 			"worker_note":        booking.WorkerNote,
@@ -582,6 +636,11 @@ func GetQueueSessionReportHandler(c fiber.Ctx) error {
 				totalActiveDuration = activity.TotalActiveDuration.String()
 			}
 		}
+		totalOffers := worker.OfferAcceptCount + worker.OfferRejectCount + worker.OfferTimeoutCount
+		offerAcceptRate := 0.0
+		if totalOffers > 0 {
+			offerAcceptRate = float64(worker.OfferAcceptCount) * 100 / float64(totalOffers)
+		}
 
 		workerStats = append(workerStats, fiber.Map{
 			"user_id":               worker.UserID,
@@ -596,6 +655,76 @@ func GetQueueSessionReportHandler(c fiber.Ctx) error {
 			"last_opened_at":        lastOpenedAt,
 			"last_closed_at":        lastClosedAt,
 			"total_active_duration": totalActiveDuration,
+			"offer_accept_count":    worker.OfferAcceptCount,
+			"offer_reject_count":    worker.OfferRejectCount,
+			"offer_timeout_count":   worker.OfferTimeoutCount,
+			"offer_total_count":     totalOffers,
+			"offer_accept_rate":     offerAcceptRate,
+			"offer_paused_until":    worker.OfferPausedUntil,
+		})
+	}
+
+	bookingIDFilters := make([]string, 0, len(bookings))
+	for _, booking := range bookings {
+		bookingIDFilters = append(bookingIDFilters, strconv.Itoa(int(booking.ID)))
+	}
+
+	rejectReasonCounts := map[string]int{}
+	if len(bookingIDFilters) > 0 {
+		type queueBookingActionLog struct {
+			Detail json.RawMessage `gorm:"column:detail"`
+		}
+
+		var actionLogs []queueBookingActionLog
+		if err := config.DB.Model(&models.CourseActivityLog{}).
+			Select("detail").
+			Where("course_id = ? AND action = ? AND target_type = ? AND target_id IN ?", courseID, "update_queue_booking", "queue_booking", bookingIDFilters).
+			Order("created_at ASC").
+			Scan(&actionLogs).Error; err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to aggregate reject reasons"})
+		}
+
+		for _, logEntry := range actionLogs {
+			if len(logEntry.Detail) == 0 {
+				continue
+			}
+
+			var payload struct {
+				Action       string `json:"action"`
+				RejectReason string `json:"reject_reason"`
+				WorkerNote   string `json:"worker_note"`
+			}
+			if err := json.Unmarshal(logEntry.Detail, &payload); err != nil {
+				continue
+			}
+			if payload.Action != "reject" {
+				continue
+			}
+
+			reasonCode := normalizeQueueRejectReason(payload.RejectReason)
+			if reasonCode == "" {
+				reasonCode = normalizeQueueRejectReason(payload.WorkerNote)
+			}
+			if reasonCode == "" {
+				reasonCode = "other"
+			}
+
+			rejectReasonCounts[reasonCode]++
+		}
+	}
+
+	rejectReasonStats := make([]fiber.Map, 0, len(queueRejectReasonOrder))
+	for _, reasonCode := range queueRejectReasonOrder {
+		count := rejectReasonCounts[reasonCode]
+		if count == 0 {
+			continue
+		}
+		labelTH, labelEN := queueRejectReasonLabels(reasonCode)
+		rejectReasonStats = append(rejectReasonStats, fiber.Map{
+			"code":     reasonCode,
+			"label_th": labelTH,
+			"label_en": labelEN,
+			"count":    count,
 		})
 	}
 
@@ -606,8 +735,9 @@ func GetQueueSessionReportHandler(c fiber.Ctx) error {
 				"id":    session.ID,
 				"title": session.Title,
 			},
-			"bookings":     bookingReports,
-			"worker_stats": workerStats,
+			"bookings":            bookingReports,
+			"worker_stats":        workerStats,
+			"reject_reason_stats": rejectReasonStats,
 		},
 	})
 }
@@ -785,6 +915,9 @@ func WorkerLeaveHandler(c fiber.Ctx) error {
 func GetWorkerCurrentBookingHandler(c fiber.Ctx) error {
 	sessionID := c.Params("sessionId")
 	userID := c.Locals("user_id").(uint)
+	if _, timeoutErr := repositories.ProcessQueueOfferTimeouts(sessionID); timeoutErr != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch current booking"})
+	}
 	session, err := repositories.GetQueueSessionByID(sessionID)
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
@@ -852,9 +985,10 @@ func WorkerBookingActionHandler(c fiber.Ctx) error {
 	}
 
 	var input struct {
-		Action     string   `json:"action"` // start, complete, no_show
-		Score      *float64 `json:"score"`
-		WorkerNote string   `json:"worker_note"`
+		Action       string   `json:"action"` // start, complete, no_show, reject
+		Score        *float64 `json:"score"`
+		RejectReason string   `json:"reject_reason"`
+		WorkerNote   string   `json:"worker_note"`
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
@@ -871,17 +1005,26 @@ func WorkerBookingActionHandler(c fiber.Ctx) error {
 	}
 
 	workerID := c.Locals("user_id").(uint)
+	if input.Action == "reject" {
+		reasonCode := normalizeQueueRejectReason(input.RejectReason)
+		if reasonCode == "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "invalid reject_reason"})
+		}
+		input.RejectReason = reasonCode
+		input.WorkerNote = reasonCode
+	}
+
 	booking, err2 := repositories.WorkerUpdateBooking(uint(bookingID), workerID, input.Action, input.Score, input.WorkerNote)
 	if err2 != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update booking"})
 	}
 	if session, sessionErr := repositories.GetQueueSessionByID(booking.QueueSessionID); sessionErr == nil {
-		logCourseActivity(c, session.CourseID, workerID, "update_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"action": input.Action, "score": input.Score, "booking_type": booking.BookingType})
+		logCourseActivity(c, session.CourseID, workerID, "update_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"action": input.Action, "score": input.Score, "booking_type": booking.BookingType, "reject_reason": input.RejectReason, "worker_note": input.WorkerNote})
 	}
 	emitQueueActionChanged(booking, input.Action)
 
 	var nextBooking *models.QueueBooking
-	if input.Action == "complete" || input.Action == "no_show" {
+	if input.Action == "complete" || input.Action == "no_show" || input.Action == "reject" {
 		nextBooking, err = tryAssignNextBookingAndEmit(booking.QueueSessionID, workerID)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update booking"})
@@ -897,7 +1040,12 @@ func WorkerBookingActionHandler(c fiber.Ctx) error {
 		nextBookingPayload = payload
 	}
 
-	return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"booking": booking, "next_booking": nextBookingPayload}})
+	currentBookingPayload, currentPayloadErr := buildWorkerBookingPayload(booking)
+	if currentPayloadErr != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update booking"})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"booking": currentBookingPayload, "next_booking": nextBookingPayload}})
 }
 
 // POST /api/courses/:courseId/queue/sessions/:sessionId/bookings/:bookingId/complete
@@ -2120,7 +2268,7 @@ func GetQueueBookingStatusPublicHandler(c fiber.Ctx) error {
 		"zone":              zone,
 	}
 
-	if assignedWorker != nil {
+	if assignedWorker != nil && booking.Status != "waiting" {
 		data["assignedWorker"] = fiber.Map{
 			"id":        assignedWorker.ID,
 			"full_name": assignedWorker.FullName,
@@ -2251,6 +2399,30 @@ func GetQueueDeskStatusesPublicHandler(c fiber.Ctx) error {
 		}
 	}
 
+	workerIDs := make([]uint, 0)
+	workerSet := map[uint]struct{}{}
+	for _, booking := range activeBookings {
+		if booking.AssignedWorkerID == nil {
+			continue
+		}
+		if _, ok := workerSet[*booking.AssignedWorkerID]; ok {
+			continue
+		}
+		workerSet[*booking.AssignedWorkerID] = struct{}{}
+		workerIDs = append(workerIDs, *booking.AssignedWorkerID)
+	}
+
+	workerMap := map[uint]models.User{}
+	if len(workerIDs) > 0 {
+		var workers []models.User
+		if err := config.DB.Select("id", "full_name", "avatar").Where("id IN ?", workerIDs).Find(&workers).Error; err != nil {
+			return queueLegacyError(c, 500, err.Error())
+		}
+		for _, worker := range workers {
+			workerMap[worker.ID] = worker
+		}
+	}
+
 	selectedDeskBookings := map[string]models.QueueBooking{}
 	helpDeskBookings := map[string]models.QueueBooking{}
 	gradingDeskBookings := map[string]models.QueueBooking{}
@@ -2274,7 +2446,7 @@ func GetQueueDeskStatusesPublicHandler(c fiber.Ctx) error {
 	bookingMap := map[string]fiber.Map{}
 	for deskID, booking := range selectedDeskBookings {
 		student := studentMap[booking.StudentID]
-		bookingMap[deskID] = fiber.Map{
+		entry := fiber.Map{
 			"id":           booking.ID,
 			"queue_number": booking.QueueNumber,
 			"booking_type": booking.BookingType,
@@ -2282,6 +2454,16 @@ func GetQueueDeskStatusesPublicHandler(c fiber.Ctx) error {
 			"student_name": student.FullName,
 			"student_code": student.StudentID,
 		}
+		if booking.Status == "in_progress" && booking.AssignedWorkerID != nil {
+			if worker, ok := workerMap[*booking.AssignedWorkerID]; ok {
+				entry["assigned_worker"] = fiber.Map{
+					"id":        worker.ID,
+					"full_name": worker.FullName,
+					"avatar":    worker.Avatar,
+				}
+			}
+		}
+		bookingMap[deskID] = entry
 	}
 
 	statusMap := map[string]models.QueueDeskStatus{}
@@ -2587,12 +2769,19 @@ func emitQueueActionChanged(booking *models.QueueBooking, action string) {
 	case "no_show":
 		emitQueueBookingChanged(booking.QueueSessionID, "booking-skipped", booking)
 		realtime.EmitToQueue(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
+	case "reject":
+		emitQueueBookingChanged(booking.QueueSessionID, "booking-requeued", booking)
+		realtime.EmitToQueue(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
 	default:
 		emitQueueBookingChanged(booking.QueueSessionID, "booking-assigned", booking)
 	}
 }
 
 func tryAssignNextBookingAndEmit(sessionID string, workerID uint) (*models.QueueBooking, error) {
+	if _, timeoutErr := repositories.ProcessQueueOfferTimeouts(sessionID); timeoutErr != nil {
+		return nil, timeoutErr
+	}
+
 	nextBooking, assignedNow, err := repositories.AssignNextWaitingBookingToWorker(sessionID, workerID)
 	if err != nil {
 		return nil, err
@@ -2633,6 +2822,7 @@ func buildWorkerBookingPayload(booking *models.QueueBooking) (fiber.Map, error) 
 		"status":             booking.Status,
 		"assigned_worker_id": booking.AssignedWorkerID,
 		"assigned_at":        booking.AssignedAt,
+		"offer_expires_at":   booking.OfferExpiresAt,
 		"started_at":         booking.StartedAt,
 		"completed_at":       booking.CompletedAt,
 		"score":              booking.Score,

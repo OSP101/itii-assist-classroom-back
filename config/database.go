@@ -327,6 +327,14 @@ func MigratePerformanceIndexes() {
 			sql:  `CREATE INDEX IF NOT EXISTS idx_queue_bookings_session_worker_active ON queue_bookings (queue_session_id, assigned_worker_id, status) WHERE status IN ('waiting','in_progress')`,
 		},
 		{
+			name: "queue_bookings_offer_expiry",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_queue_bookings_offer_expiry ON queue_bookings (queue_session_id, status, offer_expires_at) WHERE status = 'waiting' AND assigned_worker_id IS NOT NULL`,
+		},
+		{
+			name: "queue_workers_offer_pause",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_queue_workers_offer_pause ON queue_workers (queue_session_id, status, offer_paused_until)`,
+		},
+		{
 			name: "scores_assignment_student",
 			sql:  `CREATE INDEX IF NOT EXISTS idx_scores_assignment_student ON scores (assignment_id, student_id)`,
 		},
@@ -337,6 +345,50 @@ func MigratePerformanceIndexes() {
 		{
 			name: "fcm_tokens_session_type",
 			sql:  `CREATE INDEX IF NOT EXISTS idx_fcm_tokens_session_type ON fcm_tokens (session_id, user_type)`,
+		},
+		{
+			name: "database_backup_records_created_at",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_database_backup_records_created_at ON database_backup_records (created_at DESC)`,
+		},
+		{
+			name: "database_backup_records_deleted_at",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_database_backup_records_deleted_at ON database_backup_records (deleted_at)`,
+		},
+		{
+			name: "database_backup_records_slot_created",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_database_backup_records_slot_created ON database_backup_records (storage_slot, created_at DESC)`,
+		},
+		{
+			name: "database_backup_records_checksum",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_database_backup_records_checksum ON database_backup_records (checksum_sha256)`,
+		},
+		{
+			name: "system_announcements_active_schedule",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_system_announcements_active_schedule ON system_announcements (is_active, scheduled_at DESC)`,
+		},
+		{
+			name: "system_announcements_expires_at",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_system_announcements_expires_at ON system_announcements (expires_at)`,
+		},
+		{
+			name: "system_announcements_display_mode",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_system_announcements_display_mode ON system_announcements (display_mode, is_active)`,
+		},
+		{
+			name: "system_announcements_display_paths_gin",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_system_announcements_display_paths_gin ON system_announcements USING gin (display_paths)`,
+		},
+		{
+			name: "system_announcement_acks_announcement_user_unique",
+			sql:  `CREATE UNIQUE INDEX IF NOT EXISTS uq_system_announcement_acks_announcement_user ON system_announcement_acks (announcement_id, user_id)`,
+		},
+		{
+			name: "system_announcement_acks_user",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_system_announcement_acks_user ON system_announcement_acks (user_id, acknowledged_at DESC)`,
+		},
+		{
+			name: "app_configs_key_unique",
+			sql:  `CREATE UNIQUE INDEX IF NOT EXISTS uq_app_configs_key ON app_configs (key)`,
 		},
 	}
 

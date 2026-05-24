@@ -9,6 +9,7 @@ import (
 
 func SetupSystemRoutes(app *fiber.App) {
 	system := app.Group("/api/system", middlewares.Protected(), middlewares.RequireRole("admin"))
+	system.Use(middlewares.RequireAdminFeature("menu.monitoring"))
 
 	system.Get("/metrics", handlers.GetSystemMetricsHandler)
 	system.Get("/cpu", handlers.GetCpuUsageHandler)

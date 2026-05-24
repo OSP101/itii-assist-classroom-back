@@ -96,6 +96,9 @@ func main() {
 		&models.Feedback{},
 		&models.SystemLog{},
 		&models.AppConfig{},
+		&models.DatabaseBackupRecord{},
+		&models.SystemAnnouncement{},
+		&models.SystemAnnouncementAck{},
 	)
 	if err != nil {
 		log.Fatal("❌ Migration failed: ", err)
@@ -106,7 +109,9 @@ func main() {
 	config.MigrateScoreSchemaCompatibility()
 	config.MigrateQueueSessionCounterCompatibility()
 	config.MigratePerformanceIndexes()
+	repositories.PruneObsoleteFeatureFlags()
 	startAttendancePinLifecycleWorker()
+	services.StartDailyDatabaseBackupWorker()
 
 	// 4. รัน Fiber Server
 	app := fiber.New(fiber.Config{
@@ -127,7 +132,7 @@ func main() {
 		app.Use(cors.New(cors.Config{
 			AllowOriginsFunc: func(origin string) bool { return true },
 			AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-			AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+			AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Step-Up-Token"},
 		}))
 	} else {
 		for _, o := range strings.Split(rawOrigins, ",") {
@@ -138,12 +143,15 @@ func main() {
 		app.Use(cors.New(cors.Config{
 			AllowOrigins:     allowedOrigins,
 			AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-			AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+			AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-Step-Up-Token"},
 			AllowCredentials: true,
 		}))
 	}
 
 	app.Use("/uploads", static.New("./uploads"))
+
+	// Maintenance guard — MUST be after CORS so 503 responses carry Access-Control-Allow-Origin
+	app.Use(middlewares.MaintenanceModeGuard())
 
 	app.Get("/api/health", func(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "success", "message": "API is Running!"})
@@ -164,6 +172,7 @@ func main() {
 	routes.SetupBonusScoreRoutes(app, auditLogger)
 	routes.SetupFeedbackRoutes(app)
 	routes.SetupSystemRoutes(app)
+	routes.SetupSystemSettingsRoutes(app)
 	routes.SetupQueueRoutes(app, auditLogger)
 	routes.SetupNotificationRoutes(app)
 	routes.SetupOAuthRoutes(app)
@@ -194,6 +203,10 @@ func startAttendancePinLifecycleWorker() {
 	go func() {
 		defer ticker.Stop()
 		for range ticker.C {
+			if services.IsBackupOperationRunning() {
+				continue
+			}
+
 			changes, err := repositories.MaintainAttendanceSessionPins(time.Now())
 			if err != nil {
 				log.Printf("⚠️  Attendance PIN lifecycle worker failed: %v", err)

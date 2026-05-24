@@ -16,6 +16,7 @@ func SetupStudentRoutes(app *fiber.App) {
 
 	// Protected — Admin, Instructor, TA
 	read := app.Group("/api/students", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"))
+	read.Use(middlewares.RequireAdminFeature("menu.students"))
 	read.Post("/search-by-ids", handlers.SearchStudentsByIDsCompatHandler)
 	read.Get("/stats", handlers.GetStudentStatsHandler)
 	read.Get("/", handlers.GetStudentsHandler)
@@ -23,6 +24,7 @@ func SetupStudentRoutes(app *fiber.App) {
 
 	// Admin only
 	admin := app.Group("/api/students", middlewares.Protected(), middlewares.RequireRole("admin"))
+	admin.Use(middlewares.RequireAdminFeature("menu.students"))
 	admin.Post("/", handlers.CreateStudentHandler)
 	admin.Post("/import", handlers.ImportStudentsHandler)
 	admin.Put("/:id", handlers.UpdateStudentHandler)
