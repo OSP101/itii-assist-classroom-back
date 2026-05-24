@@ -18,42 +18,6 @@ import (
 	"github.com/gofiber/fiber/v3"
 )
 
-func resolveExamSettingID(courseID string, examSettingID uint, examType string, component string) (uint, error) {
-	settings, err := repositories.GetOrCreateExamSettings(courseID)
-	if err != nil {
-		return 0, err
-	}
-
-	if examSettingID > 0 {
-		for _, setting := range settings {
-			if setting.ID == examSettingID {
-				return setting.ID, nil
-			}
-		}
-		return 0, fmt.Errorf("invalid exam_setting_id")
-	}
-
-	normalizedExamType := strings.ToLower(strings.TrimSpace(examType))
-	normalizedComponent := strings.ToLower(strings.TrimSpace(component))
-	if normalizedExamType == "" || normalizedComponent == "" {
-		return 0, fmt.Errorf("exam_type and component are required")
-	}
-	if normalizedExamType != "midterm" && normalizedExamType != "final" {
-		return 0, fmt.Errorf("exam_type must be midterm or final")
-	}
-	if normalizedComponent != "lecture" && normalizedComponent != "lab" {
-		return 0, fmt.Errorf("component must be lecture or lab")
-	}
-
-	for _, setting := range settings {
-		if setting.ExamType == normalizedExamType && setting.Component == normalizedComponent {
-			return setting.ID, nil
-		}
-	}
-
-	return 0, fmt.Errorf("unable to resolve exam setting")
-}
-
 // =============================================================================
 // ExamSession handlers
 // =============================================================================
@@ -74,8 +38,6 @@ func CreateExamSessionHandler(c fiber.Ctx) error {
 
 	var input struct {
 		ExamSettingID   uint     `json:"exam_setting_id"`
-		ExamType        string   `json:"exam_type"`
-		Component       string   `json:"component"`
 		ExamDate        string   `json:"exam_date"`
 		StartTime       string   `json:"start_time"`
 		EndTime         string   `json:"end_time"`
@@ -87,9 +49,8 @@ func CreateExamSessionHandler(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
 	}
-	resolvedExamSettingID, err := resolveExamSettingID(courseID, input.ExamSettingID, input.ExamType, input.Component)
-	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
+	if input.ExamSettingID == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "exam_setting_id is required"})
 	}
 
 	examDate, err := time.Parse("2006-01-02", input.ExamDate)
@@ -114,12 +75,12 @@ func CreateExamSessionHandler(c fiber.Ctx) error {
 	}
 
 	session := &models.ExamSession{
-		CourseID:        courseID,
-		ExamSettingID:   resolvedExamSettingID,
-		ExamDate:        examDate,
-		StartTime:       input.StartTime,
-		EndTime:         input.EndTime,
-		Notes:           input.Notes,
+		CourseID:      courseID,
+		ExamSettingID: input.ExamSettingID,
+		ExamDate:      examDate,
+		StartTime:     input.StartTime,
+		EndTime:       input.EndTime,
+		Notes:         input.Notes,
 		SeatNumberStart: seatNumberStart,
 		SeatNumberStep:  seatNumberStep,
 	}
@@ -255,9 +216,9 @@ func AssignExamSeatHandler(c fiber.Ctx) error {
 	}
 
 	var input struct {
-		StudentID  uint   `json:"student_id"`
-		DeskID     string `json:"desk_id"`
-		SeatNumber int    `json:"seat_number"`
+		StudentID uint   `json:"student_id"`
+		DeskID    string `json:"desk_id"`
+		SeatNumber int   `json:"seat_number"`
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
@@ -467,28 +428,11 @@ func GetMyExamSeatsHandler(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "data": seats})
 }
 
-// GET /api/courses/:courseId/my-exam-seats/layouts  (student auth)
-func GetMyExamSeatLayoutsHandler(c fiber.Ctx) error {
-	courseID := c.Params("courseId")
-
-	studentID, ok := middlewares.GetStudentID(c)
-	if !ok || studentID == 0 {
-		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Student authentication required"})
-	}
-
-	layouts, err := repositories.GetMyExamSeatLayouts(courseID, studentID)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to get exam seat layouts"})
-	}
-
-	return c.JSON(fiber.Map{"success": true, "data": layouts})
-}
-
 // =============================================================================
-// Roster import handlers
+// DOCX Import handlers
 // =============================================================================
 
-// ImportPreviewRow represents one parsed row from the roster file.
+// ImportPreviewRow represents one parsed row from the DOCX roster file.
 type ImportPreviewRow struct {
 	RowNum        int    `json:"row_num"`
 	StudentID     string `json:"student_id"`
@@ -582,8 +526,6 @@ func ImportExamSeatsCommitHandler(c fiber.Ctx) error {
 
 	var input struct {
 		ExamSettingID uint   `json:"exam_setting_id"`
-		ExamType      string `json:"exam_type"`
-		Component     string `json:"component"`
 		ExamDate      string `json:"exam_date"`
 		StartTime     string `json:"start_time"`
 		EndTime       string `json:"end_time"`
@@ -597,9 +539,8 @@ func ImportExamSeatsCommitHandler(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
 	}
-	resolvedExamSettingID, err := resolveExamSettingID(courseID, input.ExamSettingID, input.ExamType, input.Component)
-	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
+	if input.ExamSettingID == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "exam_setting_id is required"})
 	}
 	if len(input.Seats) == 0 {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "No seats to import"})
@@ -612,7 +553,7 @@ func ImportExamSeatsCommitHandler(c fiber.Ctx) error {
 
 	session := &models.ExamSession{
 		CourseID:      courseID,
-		ExamSettingID: resolvedExamSettingID,
+		ExamSettingID: input.ExamSettingID,
 		ExamDate:      examDate,
 		StartTime:     input.StartTime,
 		EndTime:       input.EndTime,

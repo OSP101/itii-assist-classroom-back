@@ -373,19 +373,19 @@ type ExamScore struct {
 // =============================================================================
 
 type ExamSession struct {
-	ID              uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	CourseID        string    `gorm:"type:varchar(21);not null;index" json:"course_id"`
-	ExamSettingID   uint      `gorm:"not null;index" json:"exam_setting_id"`
-	ExamDate        time.Time `gorm:"type:timestamptz;not null" json:"exam_date"`
-	StartTime       string    `gorm:"type:varchar(8);not null" json:"start_time"` // e.g. "17:00"
-	EndTime         string    `gorm:"type:varchar(8);not null" json:"end_time"`   // e.g. "19:00"
-	Notes           string    `gorm:"type:text" json:"notes"`
-	SeatNumberStart int       `gorm:"default:1" json:"seat_number_start"`
-	SeatNumberStep  int       `gorm:"default:1" json:"seat_number_step"`
-	CreatedAt       time.Time `gorm:"type:timestamptz" json:"created_at"`
-	UpdatedAt       time.Time `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+	ID            uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	CourseID      string    `gorm:"type:varchar(21);not null;index" json:"course_id"`
+	ExamSettingID uint      `gorm:"not null;index" json:"exam_setting_id"`
+	ExamDate      time.Time `gorm:"type:timestamptz;not null" json:"exam_date"`
+	StartTime     string    `gorm:"type:varchar(8);not null" json:"start_time"` // e.g. "17:00"
+	EndTime       string    `gorm:"type:varchar(8);not null" json:"end_time"`   // e.g. "19:00"
+	Notes         string    `gorm:"type:text" json:"notes"`
+	SeatNumberStart int     `gorm:"default:1" json:"seat_number_start"`
+	SeatNumberStep  int     `gorm:"default:1" json:"seat_number_step"`
+	CreatedAt     time.Time `gorm:"type:timestamptz" json:"created_at"`
+	UpdatedAt     time.Time `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
 
-	ExamSetting ExamSetting       `gorm:"foreignKey:ExamSettingID" json:"exam_setting,omitempty"`
+	ExamSetting ExamSetting `gorm:"foreignKey:ExamSettingID" json:"exam_setting,omitempty"`
 	Rooms       []ExamSessionRoom `gorm:"foreignKey:ExamSessionID" json:"rooms,omitempty"`
 	Seats       []ExamSeat        `gorm:"foreignKey:ExamSessionID" json:"seats,omitempty"`
 }
@@ -555,34 +555,34 @@ type QueueSession struct {
 }
 
 type QueueBooking struct {
-	ID                  uint       `gorm:"primaryKey;autoIncrement" json:"id"`
-	QueueSessionID      string     `gorm:"type:varchar(21);not null;index" json:"queue_session_id"`
-	StudentID           uint       `gorm:"not null;index" json:"student_id"`
-	DeskID              string     `gorm:"type:varchar(21);not null" json:"desk_id"`
-	DeskNumber          int        `gorm:"not null" json:"desk_number"`
-	BookingType         string     `gorm:"type:varchar(20);not null" json:"booking_type"` // grading, help
-	QueueNumber         int        `gorm:"not null" json:"queue_number"`
-	Note                string     `gorm:"type:text" json:"note"`
-	BookingIP           string     `gorm:"type:varchar(64)" json:"booking_ip"`
-	BookingUserAgent    string     `gorm:"type:text" json:"booking_user_agent"`
-	BookingDevice       string     `gorm:"type:varchar(255)" json:"booking_device"`
-	IsLateBooking       bool       `gorm:"type:boolean;default:false" json:"is_late_booking"`
-	LateReason          string     `gorm:"type:text" json:"late_reason"`
-	Status              string     `gorm:"type:varchar(20);default:'waiting'" json:"status"` // waiting, in_progress, completed, cancelled, no_show
-	AssignedWorkerID    *uint      `gorm:"index" json:"assigned_worker_id,omitempty"`
-	AssignedAt          *time.Time `gorm:"type:timestamptz" json:"assigned_at,omitempty"`
-	OfferExpiresAt      *time.Time `gorm:"type:timestamptz" json:"offer_expires_at,omitempty"`
-	LastOfferWorkerID   *uint      `gorm:"index" json:"last_offer_worker_id,omitempty"`
+	ID               uint       `gorm:"primaryKey;autoIncrement" json:"id"`
+	QueueSessionID   string     `gorm:"type:varchar(21);not null;index" json:"queue_session_id"`
+	StudentID        uint       `gorm:"not null;index" json:"student_id"`
+	DeskID           string     `gorm:"type:varchar(21);not null" json:"desk_id"`
+	DeskNumber       int        `gorm:"not null" json:"desk_number"`
+	BookingType      string     `gorm:"type:varchar(20);not null" json:"booking_type"` // grading, help
+	QueueNumber      int        `gorm:"not null" json:"queue_number"`
+	Note             string     `gorm:"type:text" json:"note"`
+	BookingIP        string     `gorm:"type:varchar(64)" json:"booking_ip"`
+	BookingUserAgent string     `gorm:"type:text" json:"booking_user_agent"`
+	BookingDevice    string     `gorm:"type:varchar(255)" json:"booking_device"`
+	IsLateBooking    bool       `gorm:"type:boolean;default:false" json:"is_late_booking"`
+	LateReason       string     `gorm:"type:text" json:"late_reason"`
+	Status           string     `gorm:"type:varchar(20);default:'waiting'" json:"status"` // waiting, in_progress, completed, cancelled, no_show
+	AssignedWorkerID *uint      `gorm:"index" json:"assigned_worker_id,omitempty"`
+	AssignedAt       *time.Time `gorm:"type:timestamptz" json:"assigned_at,omitempty"`
+	OfferExpiresAt   *time.Time `gorm:"type:timestamptz" json:"offer_expires_at,omitempty"`
+	LastOfferWorkerID *uint      `gorm:"index" json:"last_offer_worker_id,omitempty"`
 	LastOfferTimedOutAt *time.Time `gorm:"type:timestamptz" json:"last_offer_timed_out_at,omitempty"`
-	TimeoutCount        int        `gorm:"default:0" json:"timeout_count"`
-	RejectCount         int        `gorm:"default:0" json:"reject_count"`
-	StartedAt           *time.Time `gorm:"type:timestamptz" json:"started_at,omitempty"`
-	CompletedAt         *time.Time `gorm:"type:timestamptz" json:"completed_at,omitempty"`
-	Score               *float64   `gorm:"type:decimal(5,2)" json:"score,omitempty"`
-	ScoreComment        string     `gorm:"type:text" json:"score_comment"`
-	WorkerNote          string     `gorm:"type:text" json:"worker_note"`
-	CreatedAt           time.Time  `gorm:"type:timestamptz" json:"created_at"`
-	UpdatedAt           time.Time  `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+	TimeoutCount     int        `gorm:"default:0" json:"timeout_count"`
+	RejectCount      int        `gorm:"default:0" json:"reject_count"`
+	StartedAt        *time.Time `gorm:"type:timestamptz" json:"started_at,omitempty"`
+	CompletedAt      *time.Time `gorm:"type:timestamptz" json:"completed_at,omitempty"`
+	Score            *float64   `gorm:"type:decimal(5,2)" json:"score,omitempty"`
+	ScoreComment     string     `gorm:"type:text" json:"score_comment"`
+	WorkerNote       string     `gorm:"type:text" json:"worker_note"`
+	CreatedAt        time.Time  `gorm:"type:timestamptz" json:"created_at"`
+	UpdatedAt        time.Time  `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
 }
 
 type QueueDeskStatus struct {
@@ -605,13 +605,13 @@ type QueueWorker struct {
 	PushNotificationsEnabled bool       `gorm:"type:boolean;default:true" json:"push_notifications_enabled"`
 	Status                   string     `gorm:"type:varchar(20);default:'offline'" json:"status"` // online, busy, offline
 	CurrentBookingID         *uint      `gorm:"index" json:"current_booking_id,omitempty"`
-	TotalGradingCompleted    int        `gorm:"default:0" json:"total_grading_completed"`
-	TotalHelpCompleted       int        `gorm:"default:0" json:"total_help_completed"`
+	OfferPausedUntil         *time.Time `gorm:"type:timestamptz" json:"offer_paused_until,omitempty"`
+	ConsecutiveOfferTimeouts int        `gorm:"default:0" json:"consecutive_offer_timeouts"`
 	OfferAcceptCount         int        `gorm:"default:0" json:"offer_accept_count"`
 	OfferRejectCount         int        `gorm:"default:0" json:"offer_reject_count"`
 	OfferTimeoutCount        int        `gorm:"default:0" json:"offer_timeout_count"`
-	ConsecutiveOfferTimeouts int        `gorm:"default:0" json:"consecutive_offer_timeouts"`
-	OfferPausedUntil         *time.Time `gorm:"type:timestamptz" json:"offer_paused_until,omitempty"`
+	TotalGradingCompleted    int        `gorm:"default:0" json:"total_grading_completed"`
+	TotalHelpCompleted       int        `gorm:"default:0" json:"total_help_completed"`
 	LastActiveAt             *time.Time `gorm:"type:timestamptz" json:"last_active_at,omitempty"`
 	CreatedAt                time.Time  `gorm:"type:timestamptz" json:"created_at"`
 	UpdatedAt                time.Time  `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
@@ -733,19 +733,6 @@ type AppConfig struct {
 	CreatedAt time.Time `gorm:"type:timestamptz" json:"created_at"`
 }
 
-type DatabaseBackupRecord struct {
-	ID              uint       `gorm:"primaryKey;autoIncrement" json:"id"`
-	BackupName      string     `gorm:"type:varchar(255);not null" json:"backup_name"`
-	StoragePath     string     `gorm:"type:varchar(500)" json:"storage_path"`
-	StorageProvider string     `gorm:"type:varchar(50);default:'cloudflare_r2'" json:"storage_provider"`
-	StorageSlot     int        `gorm:"not null;default:0" json:"storage_slot"`
-	ChecksumSHA256  string     `gorm:"type:char(64)" json:"checksum_sha256"`
-	FileSizeBytes   int64      `gorm:"not null;default:0" json:"file_size_bytes"`
-	CreatedBy       *uint      `json:"created_by,omitempty"`
-	CreatedAt       time.Time  `gorm:"type:timestamptz" json:"created_at"`
-	DeletedAt       *time.Time `gorm:"type:timestamptz" json:"deleted_at,omitempty"`
-}
-
 type SystemAnnouncement struct {
 	ID                 uint           `gorm:"primaryKey;autoIncrement" json:"id"`
 	Title              string         `gorm:"type:varchar(255);not null" json:"title"`
@@ -757,25 +744,41 @@ type SystemAnnouncement struct {
 	ContentType        string         `gorm:"type:varchar(20);default:'text'" json:"content_type"`
 	DisplayMode        string         `gorm:"type:varchar(20);default:'banner_top'" json:"display_mode"`
 	ImageURL           string         `gorm:"type:text" json:"image_url"`
-	ActionLabel        string         `gorm:"type:varchar(120)" json:"action_label"`
-	ActionLabelTH      string         `gorm:"type:varchar(120)" json:"action_label_th"`
-	ActionLabelEN      string         `gorm:"type:varchar(120)" json:"action_label_en"`
+	ActionLabel        string         `gorm:"type:varchar(255)" json:"action_label"`
+	ActionLabelTH      string         `gorm:"type:varchar(255)" json:"action_label_th"`
+	ActionLabelEN      string         `gorm:"type:varchar(255)" json:"action_label_en"`
 	ActionURL          string         `gorm:"type:text" json:"action_url"`
 	IsDismissible      bool           `gorm:"type:boolean;default:true" json:"is_dismissible"`
-	DisplayPaths       datatypes.JSON `gorm:"type:jsonb;not null" json:"display_paths"`
+	DisplayPaths       datatypes.JSON `gorm:"type:jsonb" json:"display_paths,omitempty"`
 	ScheduledAt        *time.Time     `gorm:"type:timestamptz" json:"scheduled_at,omitempty"`
 	ExpiresAt          *time.Time     `gorm:"type:timestamptz" json:"expires_at,omitempty"`
-	Audience           datatypes.JSON `gorm:"type:jsonb;not null" json:"audience"`
+	Audience           datatypes.JSON `gorm:"type:jsonb" json:"audience,omitempty"`
 	RequireAcknowledge bool           `gorm:"type:boolean;default:false" json:"require_acknowledge"`
 	IsActive           bool           `gorm:"type:boolean;default:true" json:"is_active"`
-	CreatedBy          *uint          `json:"created_by,omitempty"`
+	CreatedBy          *uint          `gorm:"index" json:"created_by,omitempty"`
 	CreatedAt          time.Time      `gorm:"type:timestamptz" json:"created_at"`
 	UpdatedAt          time.Time      `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
 }
 
 type SystemAnnouncementAck struct {
 	ID             uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	AnnouncementID uint      `gorm:"not null" json:"announcement_id"`
-	UserID         uint      `gorm:"not null" json:"user_id"`
-	AcknowledgedAt time.Time `gorm:"type:timestamptz;not null" json:"acknowledged_at"`
+	AnnouncementID uint      `gorm:"not null;index" json:"announcement_id"`
+	UserID         uint      `gorm:"not null;index" json:"user_id"`
+	AcknowledgedAt time.Time `gorm:"type:timestamptz" json:"acknowledged_at"`
+	CreatedAt      time.Time `gorm:"type:timestamptz" json:"created_at"`
+}
+
+type DatabaseBackupRecord struct {
+	ID              uint           `gorm:"primaryKey;autoIncrement" json:"id"`
+	BackupName      string         `gorm:"type:varchar(255);not null;index" json:"backup_name"`
+	StoragePath     string         `gorm:"type:text;not null;index" json:"storage_path"`
+	StorageProvider string         `gorm:"type:varchar(50);not null" json:"storage_provider"`
+	StorageSlot     int            `gorm:"not null;index" json:"storage_slot"`
+	ChecksumSHA256  string         `gorm:"type:varchar(64);not null" json:"checksum_sha256"`
+	FileSizeBytes   int64          `gorm:"not null" json:"file_size_bytes"`
+	CreatedBy       *uint          `gorm:"index" json:"created_by,omitempty"`
+	RestoredAt      *time.Time     `gorm:"type:timestamptz" json:"restored_at,omitempty"`
+	DeletedAt       gorm.DeletedAt `gorm:"index" json:"deleted_at,omitempty"`
+	CreatedAt       time.Time      `gorm:"type:timestamptz" json:"created_at"`
+	UpdatedAt       time.Time      `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
 }

@@ -10,6 +10,8 @@ services:
       - "${BACKEND_EXPOSE_PORT:-8000}:8000"
     environment:
       TZ: Asia/Bangkok
+      DOCKER_HOST: unix:///var/run/docker.sock
+      MONITOR_PROBE_URLS: ${MONITOR_PROBE_URLS:-http://host.docker.internal:3000/,http://localhost:8000/api/health}
       DB_HOST: ${DB_HOST:-itii-db}
       DB_PORT: ${DB_PORT:-5432}
       DB_USER: ${DB_USER:-itii_user}
@@ -24,6 +26,7 @@ services:
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
     volumes:
       - ./.env:/app/.env:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - itii-net
 

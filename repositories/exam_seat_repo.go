@@ -233,44 +233,10 @@ type MyExamSeat struct {
 	ExamDate      string `json:"exam_date"`
 	StartTime     string `json:"start_time"`
 	EndTime       string `json:"end_time"`
-	ClassroomID   string `json:"classroom_id"`
 	ClassroomName string `json:"classroom_name"`
-	Building      string `json:"building"`
-	Floor         string `json:"floor"`
 	DeskNumber    int    `json:"desk_number"`
 	SeatNumber    int    `json:"seat_number"`
 	SeatLabel     string `json:"seat_label"` // e.g. "CP9226-28"
-}
-
-type MyExamSeatLayoutDesk struct {
-	DeskID      string `json:"desk_id"`
-	DeskNumber  int    `json:"desk_number"`
-	DeskType    string `json:"desk_type"`
-	X           int    `json:"x"`
-	Y           int    `json:"y"`
-	SeatNumber  int    `json:"seat_number"`
-	SeatLabel   string `json:"seat_label"`
-	StudentID   string `json:"student_id"`
-	StudentName string `json:"student_name"`
-	IsMine      bool   `json:"is_mine"`
-}
-
-type MyExamSeatLayout struct {
-	SessionID     uint                   `json:"session_id"`
-	ExamType      string                 `json:"exam_type"`
-	Component     string                 `json:"component"`
-	ExamDate      string                 `json:"exam_date"`
-	StartTime     string                 `json:"start_time"`
-	EndTime       string                 `json:"end_time"`
-	ClassroomID   string                 `json:"classroom_id"`
-	ClassroomName string                 `json:"classroom_name"`
-	Building      string                 `json:"building"`
-	Floor         string                 `json:"floor"`
-	MyDeskID      string                 `json:"my_desk_id"`
-	MyDeskNumber  int                    `json:"my_desk_number"`
-	MySeatNumber  int                    `json:"my_seat_number"`
-	MySeatLabel   string                 `json:"my_seat_label"`
-	Desks         []MyExamSeatLayoutDesk `json:"desks"`
 }
 
 func GetMyExamSeats(courseID string, studentID uint) ([]MyExamSeat, error) {
@@ -281,10 +247,7 @@ func GetMyExamSeats(courseID string, studentID uint) ([]MyExamSeat, error) {
 		ExamDate      string `gorm:"column:exam_date"`
 		StartTime     string `gorm:"column:start_time"`
 		EndTime       string `gorm:"column:end_time"`
-		ClassroomID   string `gorm:"column:classroom_id"`
 		ClassroomName string `gorm:"column:classroom_name"`
-		Building      string `gorm:"column:building"`
-		Floor         string `gorm:"column:floor"`
 		DeskNumber    int    `gorm:"column:desk_number"`
 		SeatNumber    int    `gorm:"column:seat_number"`
 	}
@@ -299,10 +262,7 @@ func GetMyExamSeats(courseID string, studentID uint) ([]MyExamSeat, error) {
 			to_char(es2.exam_date AT TIME ZONE 'Asia/Bangkok', 'DD Mon YYYY') AS exam_date,
 			es2.start_time,
 			es2.end_time,
-			c.id AS classroom_id,
 			c.name AS classroom_name,
-			c.building AS building,
-			c.floor AS floor,
 			d.number AS desk_number,
 			es.seat_number AS seat_number`).
 		Joins("JOIN exam_sessions es2 ON es2.id = es.exam_session_id").
@@ -325,142 +285,13 @@ func GetMyExamSeats(courseID string, studentID uint) ([]MyExamSeat, error) {
 			ExamDate:      r.ExamDate,
 			StartTime:     r.StartTime,
 			EndTime:       r.EndTime,
-			ClassroomID:   r.ClassroomID,
 			ClassroomName: r.ClassroomName,
-			Building:      r.Building,
-			Floor:         r.Floor,
 			DeskNumber:    r.DeskNumber,
 			SeatNumber:    effectiveSeatNumber(r.SeatNumber, r.DeskNumber),
 			SeatLabel:     buildExamSeatLabel(r.ClassroomName, r.SeatNumber, r.DeskNumber),
 		}
 	}
 	return out, nil
-}
-
-func GetMyExamSeatLayouts(courseID string, studentID uint) ([]MyExamSeatLayout, error) {
-	type baseRow struct {
-		SessionID     uint   `gorm:"column:session_id"`
-		ExamType      string `gorm:"column:exam_type"`
-		Component     string `gorm:"column:component"`
-		ExamDate      string `gorm:"column:exam_date"`
-		StartTime     string `gorm:"column:start_time"`
-		EndTime       string `gorm:"column:end_time"`
-		ClassroomID   string `gorm:"column:classroom_id"`
-		ClassroomName string `gorm:"column:classroom_name"`
-		Building      string `gorm:"column:building"`
-		Floor         string `gorm:"column:floor"`
-		MyDeskID      string `gorm:"column:my_desk_id"`
-		MyDeskNumber  int    `gorm:"column:my_desk_number"`
-		MySeatNumber  int    `gorm:"column:my_seat_number"`
-	}
-
-	var bases []baseRow
-	err := config.DB.
-		Table("exam_seats es").
-		Select(`
-			es.exam_session_id AS session_id,
-			et.exam_type,
-			et.component,
-			to_char(es2.exam_date AT TIME ZONE 'Asia/Bangkok', 'DD Mon YYYY') AS exam_date,
-			es2.start_time,
-			es2.end_time,
-			c.id AS classroom_id,
-			c.name AS classroom_name,
-			c.building AS building,
-			c.floor AS floor,
-			d.id AS my_desk_id,
-			d.number AS my_desk_number,
-			es.seat_number AS my_seat_number
-		`).
-		Joins("JOIN exam_sessions es2 ON es2.id = es.exam_session_id").
-		Joins("JOIN exam_settings et ON et.id = es2.exam_setting_id").
-		Joins("JOIN desks d ON d.id = es.desk_id").
-		Joins("JOIN classrooms c ON c.id = d.classroom_id").
-		Where("es2.course_id = ? AND es.student_id = ?", courseID, studentID).
-		Order("es2.exam_date ASC, es.exam_session_id ASC").
-		Scan(&bases).Error
-	if err != nil {
-		return nil, err
-	}
-
-	layouts := make([]MyExamSeatLayout, 0, len(bases))
-
-	for _, base := range bases {
-		type deskRow struct {
-			DeskID      string `gorm:"column:desk_id"`
-			DeskNumber  int    `gorm:"column:desk_number"`
-			DeskType    string `gorm:"column:desk_type"`
-			X           int    `gorm:"column:x"`
-			Y           int    `gorm:"column:y"`
-			SeatNumber  int    `gorm:"column:seat_number"`
-			StudentCode string `gorm:"column:student_code"`
-			StudentName string `gorm:"column:student_name"`
-		}
-
-		var deskRows []deskRow
-		err := config.DB.
-			Table("desks d").
-			Select(`
-				d.id AS desk_id,
-				d.number AS desk_number,
-				d.type AS desk_type,
-				d.x,
-				d.y,
-				COALESCE(es.seat_number, 0) AS seat_number,
-				COALESCE(s.student_id, '') AS student_code,
-				COALESCE(s.full_name, '') AS student_name
-			`).
-			Joins("LEFT JOIN exam_seats es ON es.desk_id = d.id AND es.exam_session_id = ?", base.SessionID).
-			Joins("LEFT JOIN students s ON s.id = es.student_id").
-			Where("d.classroom_id = ? AND d.is_enabled = true", base.ClassroomID).
-			Order("d.y ASC, d.x ASC, d.number ASC").
-			Scan(&deskRows).Error
-		if err != nil {
-			return nil, err
-		}
-
-		desks := make([]MyExamSeatLayoutDesk, 0, len(deskRows))
-		for _, desk := range deskRows {
-			seatNumber := effectiveSeatNumber(desk.SeatNumber, desk.DeskNumber)
-			seatLabel := ""
-			if desk.StudentCode != "" {
-				seatLabel = buildExamSeatLabel(base.ClassroomName, desk.SeatNumber, desk.DeskNumber)
-			}
-
-			desks = append(desks, MyExamSeatLayoutDesk{
-				DeskID:      desk.DeskID,
-				DeskNumber:  desk.DeskNumber,
-				DeskType:    desk.DeskType,
-				X:           desk.X,
-				Y:           desk.Y,
-				SeatNumber:  seatNumber,
-				SeatLabel:   seatLabel,
-				StudentID:   desk.StudentCode,
-				StudentName: desk.StudentName,
-				IsMine:      desk.DeskID == base.MyDeskID,
-			})
-		}
-
-		layouts = append(layouts, MyExamSeatLayout{
-			SessionID:     base.SessionID,
-			ExamType:      base.ExamType,
-			Component:     base.Component,
-			ExamDate:      base.ExamDate,
-			StartTime:     base.StartTime,
-			EndTime:       base.EndTime,
-			ClassroomID:   base.ClassroomID,
-			ClassroomName: base.ClassroomName,
-			Building:      base.Building,
-			Floor:         base.Floor,
-			MyDeskID:      base.MyDeskID,
-			MyDeskNumber:  base.MyDeskNumber,
-			MySeatNumber:  effectiveSeatNumber(base.MySeatNumber, base.MyDeskNumber),
-			MySeatLabel:   buildExamSeatLabel(base.ClassroomName, base.MySeatNumber, base.MyDeskNumber),
-			Desks:         desks,
-		})
-	}
-
-	return layouts, nil
 }
 
 // ─── Seating export: seats grouped by classroom ───────────────────────────────
