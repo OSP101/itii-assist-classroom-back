@@ -75,12 +75,12 @@ func CreateExamSessionHandler(c fiber.Ctx) error {
 	}
 
 	session := &models.ExamSession{
-		CourseID:      courseID,
-		ExamSettingID: input.ExamSettingID,
-		ExamDate:      examDate,
-		StartTime:     input.StartTime,
-		EndTime:       input.EndTime,
-		Notes:         input.Notes,
+		CourseID:        courseID,
+		ExamSettingID:   input.ExamSettingID,
+		ExamDate:        examDate,
+		StartTime:       input.StartTime,
+		EndTime:         input.EndTime,
+		Notes:           input.Notes,
 		SeatNumberStart: seatNumberStart,
 		SeatNumberStep:  seatNumberStep,
 	}
@@ -216,9 +216,9 @@ func AssignExamSeatHandler(c fiber.Ctx) error {
 	}
 
 	var input struct {
-		StudentID uint   `json:"student_id"`
-		DeskID    string `json:"desk_id"`
-		SeatNumber int   `json:"seat_number"`
+		StudentID  uint   `json:"student_id"`
+		DeskID     string `json:"desk_id"`
+		SeatNumber int    `json:"seat_number"`
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
