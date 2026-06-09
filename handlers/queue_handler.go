@@ -70,7 +70,7 @@ func queueRejectReasonLabels(reasonCode string) (string, string) {
 	}
 }
 
-// QueueHandler — struct-based handler with audit logger
+// QueueHandler â€” struct-based handler with audit logger
 type QueueHandler struct {
 	auditLogger *services.AuditLogger
 }
@@ -179,7 +179,54 @@ func GetQueueSessionHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Queue session not found"})
 	}
-	return c.JSON(fiber.Map{"success": true, "data": session})
+
+	payload := fiber.Map{
+		"id":                           session.ID,
+		"course_id":                    session.CourseID,
+		"classroom_id":                 session.ClassroomID,
+		"title":                        session.Title,
+		"description":                  session.Description,
+		"pin_code":                     session.PinCode,
+		"linked_assignment_id":         session.LinkedAssignmentID,
+		"require_attendance":           session.RequireAttendance,
+		"linked_attendance_session_id": session.LinkedAttendanceSessionID,
+		"is_cutoff_enabled":            session.IsCutoffEnabled,
+		"cutoff_at":                    session.CutoffAt,
+		"cutoff_note":                  session.CutoffNote,
+		"status":                       session.Status,
+		"start_time":                   session.StartTime,
+		"end_time":                     session.EndTime,
+		"created_by":                   session.CreatedBy,
+		"created_at":                   session.CreatedAt,
+		"updated_at":                   session.UpdatedAt,
+	}
+
+	if session.LinkedAssignmentID != nil {
+		if assignment, subItems, loadErr := loadQueueAssignmentWithSubItems(*session.LinkedAssignmentID); loadErr == nil && assignment != nil {
+			payload["linkedAssignment"] = fiber.Map{
+				"id":              assignment.ID,
+				"name":            assignment.Name,
+				"max_score":       assignment.MaxScore,
+				"assignment_type": assignment.AssignmentType,
+				"subItems":        subItems,
+			}
+		}
+	}
+
+	if session.LinkedAttendanceSessionID != nil {
+		var attendanceSession struct {
+			ID    uint   `gorm:"column:id"`
+			Title string `gorm:"column:title"`
+		}
+		if err := config.DB.Table("attendance_sessions").Select("id", "title").Where("id = ?", *session.LinkedAttendanceSessionID).Take(&attendanceSession).Error; err == nil {
+			payload["linkedAttendanceSession"] = fiber.Map{
+				"id":    attendanceSession.ID,
+				"title": attendanceSession.Title,
+			}
+		}
+	}
+
+	return c.JSON(fiber.Map{"success": true, "data": payload})
 }
 
 // PUT /api/courses/:courseId/queue/sessions/:sessionId
@@ -195,11 +242,14 @@ func UpdateQueueSessionHandler(c fiber.Ctx) error {
 	actorID := c.Locals("user_id").(uint)
 
 	var input struct {
-		Title           *string    `json:"title"`
-		Description     *string    `json:"description"`
-		IsCutoffEnabled *bool      `json:"is_cutoff_enabled"`
-		CutoffAt        *time.Time `json:"cutoff_at"`
-		CutoffNote      *string    `json:"cutoff_note"`
+		Title                     *string    `json:"title"`
+		Description               *string    `json:"description"`
+		LinkedAssignmentID        *uint      `json:"linked_assignment_id"`
+		RequireAttendance         *bool      `json:"require_attendance"`
+		LinkedAttendanceSessionID *uint      `json:"linked_attendance_session_id"`
+		IsCutoffEnabled           *bool      `json:"is_cutoff_enabled"`
+		CutoffAt                  *time.Time `json:"cutoff_at"`
+		CutoffNote                *string    `json:"cutoff_note"`
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
@@ -209,6 +259,14 @@ func UpdateQueueSessionHandler(c fiber.Ctx) error {
 	}
 	if input.Description != nil {
 		session.Description = *input.Description
+	}
+	session.LinkedAssignmentID = input.LinkedAssignmentID
+	if input.RequireAttendance != nil {
+		session.RequireAttendance = *input.RequireAttendance
+	}
+	session.LinkedAttendanceSessionID = input.LinkedAttendanceSessionID
+	if !session.RequireAttendance {
+		session.LinkedAttendanceSessionID = nil
 	}
 	if input.IsCutoffEnabled != nil {
 		session.IsCutoffEnabled = *input.IsCutoffEnabled
@@ -229,7 +287,7 @@ func UpdateQueueSessionHandler(c fiber.Ctx) error {
 	if err := repositories.UpdateQueueSession(session); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update session"})
 	}
-	logCourseActivity(c, session.CourseID, actorID, "update_queue_session", "queue", "queue_session", session.ID, session.Title, fiber.Map{"description": session.Description})
+	logCourseActivity(c, session.CourseID, actorID, "update_queue_session", "queue", "queue_session", session.ID, session.Title, fiber.Map{"description": session.Description, "linked_assignment_id": session.LinkedAssignmentID, "require_attendance": session.RequireAttendance, "linked_attendance_session_id": session.LinkedAttendanceSessionID})
 	go createNotificationsForCourseMembers(session.CourseID, actorID, "queue_updated", "แก้ไขคิว: "+session.Title, "มีการแก้ไขคิวในวิชา", "/classroom/"+session.CourseID+"/queue", buildNotifData(session.CourseID, session.ID, "queue_session", ""))
 	return c.JSON(fiber.Map{"success": true, "data": session})
 }
@@ -1056,9 +1114,13 @@ func CompleteQueueBookingCompatHandler(c fiber.Ctx) error {
 	}
 
 	var input struct {
-		Score        *float64 `json:"score"`
-		ScoreComment string   `json:"score_comment"`
-		WorkerNote   string   `json:"worker_note"`
+		Score         *float64 `json:"score"`
+		ScoreComment  string   `json:"score_comment"`
+		WorkerNote    string   `json:"worker_note"`
+		SubItemScores []struct {
+			SubItemID uint    `json:"sub_item_id"`
+			Score     float64 `json:"score"`
+		} `json:"sub_item_scores"`
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
@@ -1075,17 +1137,17 @@ func CompleteQueueBookingCompatHandler(c fiber.Ctx) error {
 	}
 
 	workerID := c.Locals("user_id").(uint)
-	booking, err := repositories.WorkerUpdateBooking(uint(bookingID), workerID, "complete", input.Score, input.WorkerNote)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to complete booking"})
+	subItemScores := make([]repositories.QueueBookingSubItemScoreInput, 0, len(input.SubItemScores))
+	for _, item := range input.SubItemScores {
+		subItemScores = append(subItemScores, repositories.QueueBookingSubItemScoreInput{
+			SubItemID: item.SubItemID,
+			Score:     item.Score,
+		})
 	}
 
-	if input.ScoreComment != "" || input.Score != nil {
-		updates := map[string]interface{}{"score_comment": input.ScoreComment}
-		if input.Score != nil {
-			updates["score"] = input.Score
-		}
-		_ = config.DB.Model(&models.QueueBooking{}).Where("id = ?", booking.ID).Updates(updates).Error
+	booking, err := repositories.CompleteBookingWithScores(uint(bookingID), workerID, input.Score, input.ScoreComment, input.WorkerNote, subItemScores)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
 
 	if session, sessionErr := repositories.GetQueueSessionByID(booking.QueueSessionID); sessionErr == nil {
@@ -1708,10 +1770,23 @@ func validateQueueBookingCompatibility(session *models.QueueSession, studentCode
 
 				if deskStatus != nil && bookingType == "grading" {
 					if deskStatus.GradingStatus == "completed" {
-						validationErrors = append(validationErrors, fiber.Map{
-							"field":   "desk_number",
-							"message": fmt.Sprintf("โต๊ะหมายเลข %d ได้รับการตรวจงานแล้ว", deskNumber),
-						})
+						if assignment != nil && len(subItems) > 0 {
+							deskFullyGraded, err := isQueueDeskFullyGraded(session.ID, desk.ID, assignment.ID, subItems)
+							if err != nil {
+								return nil, nil, nil, nil, nil, err
+							}
+							if deskFullyGraded {
+								validationErrors = append(validationErrors, fiber.Map{
+									"field":   "desk_number",
+									"message": fmt.Sprintf("โต๊ะหมายเลข %d ได้รับการตรวจครบแล้ว", deskNumber),
+								})
+							}
+						} else {
+							validationErrors = append(validationErrors, fiber.Map{
+								"field":   "desk_number",
+								"message": fmt.Sprintf("โต๊ะหมายเลข %d ได้รับการตรวจงานแล้ว", deskNumber),
+							})
+						}
 					} else if deskStatus.GradingStatus == "waiting" || deskStatus.GradingStatus == "in_progress" {
 						validationErrors = append(validationErrors, fiber.Map{
 							"field":   "desk_number",
@@ -2471,6 +2546,15 @@ func GetQueueDeskStatusesPublicHandler(c fiber.Ctx) error {
 		statusMap[deskStatus.DeskID] = deskStatus
 	}
 
+	var assignment *models.Assignment
+	var subItems []models.AssignmentSubItem
+	if session.LinkedAssignmentID != nil {
+		if loadedAssignment, loadedSubItems, loadErr := loadQueueAssignmentWithSubItems(*session.LinkedAssignmentID); loadErr == nil && loadedAssignment != nil {
+			assignment = loadedAssignment
+			subItems = loadedSubItems
+		}
+	}
+
 	desksWithStatus := make([]fiber.Map, 0, len(desks))
 	for _, desk := range desks {
 		status := fiber.Map{
@@ -2487,6 +2571,16 @@ func GetQueueDeskStatusesPublicHandler(c fiber.Ctx) error {
 				"help_status":        deskStatus.HelpStatus,
 				"help_booking_id":    deskStatus.HelpBookingID,
 				"updated_at":         deskStatus.UpdatedAt,
+			}
+			if deskStatus.GradingStatus == "completed" && assignment != nil && len(subItems) > 0 {
+				deskFullyGraded, err := isQueueDeskFullyGraded(session.ID, desk.ID, assignment.ID, subItems)
+				if err != nil {
+					return queueLegacyError(c, 500, err.Error())
+				}
+				if !deskFullyGraded {
+					status["grading_status"] = "not_started"
+					status["grading_booking_id"] = nil
+				}
 			}
 		}
 		if helpBooking, ok := helpDeskBookings[desk.ID]; ok {

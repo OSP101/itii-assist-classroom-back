@@ -150,6 +150,11 @@ type QueueSessionListItem struct {
 	Stats                   QueueSessionStats            `json:"stats"`
 }
 
+type QueueBookingSubItemScoreInput struct {
+	SubItemID uint
+	Score     float64
+}
+
 func GetQueueSessions(courseID string, status string) ([]QueueSessionListItem, error) {
 	var sessions []models.QueueSession
 	query := config.DB.Where("course_id = ?", courseID)
@@ -612,6 +617,23 @@ func resetDeskStatus(bookingType string) string {
 	return "none"
 }
 
+func countEligibleOnlineWorkers(tx *gorm.DB, sessionID, bookingType string, now time.Time) (int64, error) {
+	query := tx.Model(&models.QueueWorker{}).
+		Where("queue_session_id = ? AND status = ? AND current_booking_id IS NULL AND (offer_paused_until IS NULL OR offer_paused_until <= ?)", sessionID, "online", now)
+
+	if bookingType == "grading" {
+		query = query.Where("accept_grading = ?", true)
+	} else {
+		query = query.Where("accept_help = ?", true)
+	}
+
+	var count int64
+	if err := query.Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // ---------- Worker ----------
 
 func WorkerJoin(sessionID string, userID uint, acceptGrading, acceptHelp bool) (*models.QueueWorker, error) {
@@ -682,6 +704,40 @@ func assignBookingOfferToWorker(tx *gorm.DB, booking *models.QueueBooking, worke
 	}
 
 	return updateDeskStatus(tx, booking.QueueSessionID, booking.DeskID, booking.BookingType, "waiting", booking.ID)
+}
+
+func assignBookingDirectToWorker(tx *gorm.DB, booking *models.QueueBooking, worker *models.QueueWorker, now time.Time) error {
+	if booking == nil || worker == nil {
+		return fmt.Errorf("invalid booking or worker")
+	}
+
+	bookingUpdates := map[string]interface{}{
+		"assigned_worker_id":      worker.UserID,
+		"assigned_at":             now,
+		"offer_expires_at":        nil,
+		"started_at":              now,
+		"status":                  "in_progress",
+		"last_offer_worker_id":    worker.UserID,
+		"last_offer_timed_out_at": nil,
+		"updated_at":              now,
+	}
+	if err := tx.Model(&models.QueueBooking{}).Where("id = ?", booking.ID).Updates(bookingUpdates).Error; err != nil {
+		return err
+	}
+
+	if err := tx.Model(&models.QueueWorker{}).
+		Where("queue_session_id = ? AND user_id = ?", booking.QueueSessionID, worker.UserID).
+		Updates(map[string]interface{}{
+			"status":                     "busy",
+			"current_booking_id":         booking.ID,
+			"last_active_at":             now,
+			"offer_accept_count":         gorm.Expr("offer_accept_count + 1"),
+			"consecutive_offer_timeouts": 0,
+		}).Error; err != nil {
+		return err
+	}
+
+	return updateDeskStatus(tx, booking.QueueSessionID, booking.DeskID, booking.BookingType, "in_progress", booking.ID)
 }
 
 func assignTimedOutBookingToOtherWorker(tx *gorm.DB, booking *models.QueueBooking, excludeWorkerID uint, now time.Time) error {
@@ -875,7 +931,17 @@ func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.
 			return waitingErr
 		}
 
-		if err := assignBookingOfferToWorker(tx, &waiting, &worker, now); err != nil {
+		eligibleWorkers, err := countEligibleOnlineWorkers(tx, sessionID, waiting.BookingType, now)
+		if err != nil {
+			return err
+		}
+
+		if eligibleWorkers == 1 {
+			err = assignBookingDirectToWorker(tx, &waiting, &worker, now)
+		} else {
+			err = assignBookingOfferToWorker(tx, &waiting, &worker, now)
+		}
+		if err != nil {
 			return err
 		}
 
@@ -895,6 +961,182 @@ func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.
 	}
 
 	return &bookingResult, assignedNow, nil
+}
+
+func CompleteBookingWithScores(bookingID uint, workerID uint, score *float64, scoreComment, workerNote string, subItemScores []QueueBookingSubItemScoreInput) (*models.QueueBooking, error) {
+	var updated models.QueueBooking
+
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
+		var b models.QueueBooking
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&b, bookingID).Error; err != nil {
+			return err
+		}
+
+		var worker models.QueueWorker
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("queue_session_id = ? AND user_id = ?", b.QueueSessionID, workerID).First(&worker).Error; err != nil {
+			return fmt.Errorf("worker not registered for this queue session")
+		}
+		if b.Status != "in_progress" {
+			return fmt.Errorf("booking is not in progress")
+		}
+		if b.AssignedWorkerID == nil || *b.AssignedWorkerID != workerID {
+			return fmt.Errorf("booking is not assigned to this worker")
+		}
+
+		now := time.Now()
+		deskStatusAfterComplete := resetDeskStatus(b.BookingType)
+
+		if b.BookingType == "grading" {
+			var session models.QueueSession
+			if err := tx.Select("id", "linked_assignment_id").Where("id = ?", b.QueueSessionID).First(&session).Error; err != nil {
+				return err
+			}
+
+			if session.LinkedAssignmentID != nil {
+				var subItems []models.AssignmentSubItem
+				if err := tx.Where("assignment_id = ?", *session.LinkedAssignmentID).Order("order_index ASC, id ASC").Find(&subItems).Error; err != nil {
+					return err
+				}
+
+				if len(subItems) > 0 {
+					if len(subItemScores) == 0 {
+						return fmt.Errorf("at least one sub-item score is required")
+					}
+
+					maxScoreBySubItemID := make(map[uint]float64, len(subItems))
+					for _, subItem := range subItems {
+						maxScoreBySubItemID[subItem.ID] = subItem.MaxScore
+					}
+
+					seenSubItemIDs := make(map[uint]struct{}, len(subItemScores))
+					subItemIDs := make([]uint, 0, len(subItemScores))
+					for _, item := range subItemScores {
+						maxScore, ok := maxScoreBySubItemID[item.SubItemID]
+						if !ok {
+							return fmt.Errorf("invalid sub_item_id %d", item.SubItemID)
+						}
+						if item.Score < 0 || item.Score > maxScore {
+							return fmt.Errorf("score for sub_item_id %d must be between 0 and %.2f", item.SubItemID, maxScore)
+						}
+						if _, duplicated := seenSubItemIDs[item.SubItemID]; duplicated {
+							return fmt.Errorf("duplicate sub_item_id %d", item.SubItemID)
+						}
+						seenSubItemIDs[item.SubItemID] = struct{}{}
+						subItemIDs = append(subItemIDs, item.SubItemID)
+					}
+
+					var lockedScores []models.Score
+					if err := tx.Where("assignment_id = ? AND student_id = ? AND sub_item_id IN ? AND status = ?", *session.LinkedAssignmentID, b.StudentID, subItemIDs, "graded").Find(&lockedScores).Error; err != nil {
+						return err
+					}
+					if len(lockedScores) > 0 {
+						return fmt.Errorf("some sub-items have already been graded")
+					}
+
+					for _, item := range subItemScores {
+						subItemID := item.SubItemID
+						scoreRow := models.Score{
+							AssignmentID: *session.LinkedAssignmentID,
+							StudentID:    &b.StudentID,
+							SubItemID:    &subItemID,
+							Score:        item.Score,
+							Comment:      scoreComment,
+							GradedBy:     &workerID,
+							GradedAt:     &now,
+							Status:       "graded",
+						}
+						if err := tx.Create(&scoreRow).Error; err != nil {
+							return err
+						}
+					}
+
+					var gradedSubItemIDs []uint
+					if err := tx.Model(&models.Score{}).
+						Where("assignment_id = ? AND student_id = ? AND sub_item_id IS NOT NULL AND status = ?", *session.LinkedAssignmentID, b.StudentID, "graded").
+						Pluck("sub_item_id", &gradedSubItemIDs).Error; err != nil {
+						return err
+					}
+					if len(gradedSubItemIDs) == len(subItems) {
+						deskStatusAfterComplete = "completed"
+					}
+				} else {
+					if score == nil {
+						return fmt.Errorf("score is required")
+					}
+
+					var existingScore models.Score
+					err := tx.Where("assignment_id = ? AND student_id = ? AND sub_item_id IS NULL", *session.LinkedAssignmentID, b.StudentID).First(&existingScore).Error
+					if err == nil {
+						return fmt.Errorf("score has already been graded")
+					}
+					if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+						return err
+					}
+
+					scoreRow := models.Score{
+						AssignmentID: *session.LinkedAssignmentID,
+						StudentID:    &b.StudentID,
+						Score:        *score,
+						Comment:      scoreComment,
+						GradedBy:     &workerID,
+						GradedAt:     &now,
+						Status:       "graded",
+					}
+					if err := tx.Create(&scoreRow).Error; err != nil {
+						return err
+					}
+					deskStatusAfterComplete = "completed"
+				}
+			}
+		}
+
+		updates := map[string]interface{}{
+			"status":        "completed",
+			"completed_at":  now,
+			"score":         score,
+			"score_comment": scoreComment,
+			"worker_note":   workerNote,
+			"updated_at":    now,
+		}
+		if err := tx.Model(&models.QueueBooking{}).Where("id = ?", b.ID).Updates(updates).Error; err != nil {
+			return err
+		}
+
+		workerUpdates := map[string]interface{}{"current_booking_id": nil, "last_active_at": now}
+		if worker.Status == "paused" {
+			workerUpdates["status"] = "offline"
+		} else {
+			workerUpdates["status"] = "online"
+		}
+		if b.BookingType == "grading" {
+			workerUpdates["total_grading_completed"] = gorm.Expr("total_grading_completed + 1")
+		} else {
+			workerUpdates["total_help_completed"] = gorm.Expr("total_help_completed + 1")
+		}
+		if err := tx.Model(&models.QueueWorker{}).
+			Where("queue_session_id = ? AND user_id = ?", b.QueueSessionID, workerID).
+			Updates(workerUpdates).Error; err != nil {
+			return err
+		}
+
+		if b.BookingType == "grading" {
+			if err := updateDeskStatus(tx, b.QueueSessionID, b.DeskID, b.BookingType, deskStatusAfterComplete, 0); err != nil {
+				return err
+			}
+		} else if err := syncHelpDeskStatus(tx, b.QueueSessionID, b.DeskID); err != nil {
+			return err
+		}
+
+		if err := tx.First(&updated, b.ID).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &updated, nil
 }
 
 // Worker starts / completes a booking

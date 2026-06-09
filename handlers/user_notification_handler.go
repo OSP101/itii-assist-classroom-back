@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"itii-assist/middlewares"
 	"itii-assist/models"
 	"itii-assist/realtime"
 	"itii-assist/repositories"
@@ -13,6 +14,10 @@ import (
 	"github.com/gofiber/fiber/v3"
 	"gorm.io/datatypes"
 )
+
+func getNotificationUserID(c fiber.Ctx) (uint, bool) {
+	return middlewares.GetUserID(c)
+}
 
 // =============================================================================
 // Notification helpers (called from other handlers)
@@ -135,7 +140,10 @@ func AdminBroadcastNotificationHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "title is required"})
 	}
 
-	actorID := c.Locals("user_id").(uint)
+	actorID, ok := getNotificationUserID(c)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
+	}
 	actorName := fmt.Sprint(actorID)
 	if u, ok := c.Locals("user_full_name").(string); ok && u != "" {
 		actorName = u
@@ -197,8 +205,6 @@ func AdminBroadcastNotificationHandler(c fiber.Ctx) error {
 
 // GET /api/notifications
 func GetUserNotificationsHandler(c fiber.Ctx) error {
-	userID := c.Locals("user_id").(uint)
-
 	limit := 20
 	offset := 0
 	if l, err := strconv.Atoi(c.Query("limit", "20")); err == nil && l > 0 && l <= 100 {
@@ -209,6 +215,20 @@ func GetUserNotificationsHandler(c fiber.Ctx) error {
 	}
 
 	courseID := strings.TrimSpace(c.Query("course_id", ""))
+
+	userID, ok := getNotificationUserID(c)
+	if !ok {
+		return c.JSON(fiber.Map{
+			"success": true,
+			"data":    []models.UserNotification{},
+			"meta": fiber.Map{
+				"total":        0,
+				"unread_count": 0,
+				"limit":        limit,
+				"offset":       offset,
+			},
+		})
+	}
 
 	notifications, total, err := repositories.GetUserNotifications(userID, limit, offset, courseID)
 	if err != nil {
@@ -231,7 +251,10 @@ func GetUserNotificationsHandler(c fiber.Ctx) error {
 
 // GET /api/notifications/count
 func GetNotificationCountHandler(c fiber.Ctx) error {
-	userID := c.Locals("user_id").(uint)
+	userID, ok := getNotificationUserID(c)
+	if !ok {
+		return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"unread_count": 0}})
+	}
 	count, err := repositories.GetUnreadNotificationCount(userID)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to get count"})
@@ -241,7 +264,10 @@ func GetNotificationCountHandler(c fiber.Ctx) error {
 
 // PATCH /api/notifications/:id/read
 func MarkNotificationReadHandler(c fiber.Ctx) error {
-	userID := c.Locals("user_id").(uint)
+	userID, ok := getNotificationUserID(c)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
+	}
 	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid ID"})
@@ -255,7 +281,10 @@ func MarkNotificationReadHandler(c fiber.Ctx) error {
 
 // PATCH /api/notifications/read-all
 func MarkAllNotificationsReadHandler(c fiber.Ctx) error {
-	userID := c.Locals("user_id").(uint)
+	userID, ok := getNotificationUserID(c)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
+	}
 	if err := repositories.MarkAllNotificationsRead(userID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to mark all as read"})
 	}
@@ -264,7 +293,10 @@ func MarkAllNotificationsReadHandler(c fiber.Ctx) error {
 
 // DELETE /api/notifications/clear
 func ClearReadNotificationsHandler(c fiber.Ctx) error {
-	userID := c.Locals("user_id").(uint)
+	userID, ok := getNotificationUserID(c)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
+	}
 	if err := repositories.DeleteReadNotifications(userID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to clear notifications"})
 	}
@@ -273,7 +305,10 @@ func ClearReadNotificationsHandler(c fiber.Ctx) error {
 
 // POST /api/notifications/announcements/:id/ack
 func AcknowledgeAnnouncementFromInboxHandler(c fiber.Ctx) error {
-	userID := c.Locals("user_id").(uint)
+	userID, ok := getNotificationUserID(c)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
+	}
 	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid announcement ID"})

@@ -105,6 +105,10 @@ func loadScoreAssignments(courseID string, assignmentType string) ([]scoreAssign
 		query += ` AND assignment_type = 'individual'`
 	case "assignment":
 		query += ` AND assignment_type = 'assignment'`
+	case "permanent_group":
+		query += ` AND assignment_type = 'permanent_group'`
+	case "weekly_group":
+		query += ` AND assignment_type = 'weekly_group'`
 	case "group":
 		query += ` AND assignment_type IN ('permanent_group', 'weekly_group')`
 	}

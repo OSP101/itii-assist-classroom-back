@@ -263,6 +263,11 @@ type studentLookupGroupMembershipRow struct {
 	WeekNumber *int   `gorm:"column:week_number"`
 }
 
+type studentCourseGroupMembership struct {
+	Permanent *LookupStudentGroupInfo
+	Weekly    map[int]*LookupStudentGroupInfo
+}
+
 type studentLookupMainScoreRow struct {
 	AssignmentID uint       `gorm:"column:assignment_id"`
 	GroupID      *uint      `gorm:"column:group_id"`
@@ -330,6 +335,14 @@ type lookupStudentSubItemSnapshot struct {
 }
 
 func LookupStudentScores(studentID string) (*LookupStudentResult, error) {
+	return lookupStudentScores(studentID, "")
+}
+
+func LookupStudentCourseScores(studentID string, courseID string) (*LookupStudentResult, error) {
+	return lookupStudentScores(studentID, courseID)
+}
+
+func lookupStudentScores(studentID string, courseID string) (*LookupStudentResult, error) {
 	student, err := FindStudentByStudentID(studentID)
 	if err != nil {
 		return nil, err
@@ -346,13 +359,16 @@ func LookupStudentScores(studentID string) (*LookupStudentResult, error) {
 	}
 
 	var enrollments []studentLookupEnrollmentRow
-	if err := config.DB.Table("course_section_students AS css").
+	enrollmentQuery := config.DB.Table("course_section_students AS css").
 		Joins("JOIN course_sections AS cs ON cs.id = css.course_section_id").
 		Joins("JOIN courses AS c ON c.id = cs.course_id").
 		Where("css.student_id = ?", student.ID).
 		Select("c.id AS course_id, c.code, c.name, c.year, c.semester, c.is_active, cs.id AS section_id, cs.section_no AS section_no").
-		Order("c.id ASC, cs.id ASC").
-		Scan(&enrollments).Error; err != nil {
+		Order("c.id ASC, cs.id ASC")
+	if strings.TrimSpace(courseID) != "" {
+		enrollmentQuery = enrollmentQuery.Where("c.id = ?", strings.TrimSpace(courseID))
+	}
+	if err := enrollmentQuery.Scan(&enrollments).Error; err != nil {
 		return nil, err
 	}
 
@@ -407,9 +423,24 @@ func LookupStudentScores(studentID string) (*LookupStudentResult, error) {
 
 	groupIDs := make([]uint, 0, len(groupMemberships))
 	groupInfoMap := make(map[uint]*LookupStudentGroupInfo)
+	groupMembershipsByCourse := make(map[string]*studentCourseGroupMembership)
 	for _, membership := range groupMemberships {
 		groupIDs = append(groupIDs, membership.GroupID)
-		groupInfoMap[membership.GroupID] = &LookupStudentGroupInfo{ID: membership.GroupID, Name: membership.GroupName}
+		groupInfo := &LookupStudentGroupInfo{ID: membership.GroupID, Name: membership.GroupName}
+		groupInfoMap[membership.GroupID] = groupInfo
+
+		courseGroups := groupMembershipsByCourse[membership.CourseID]
+		if courseGroups == nil {
+			courseGroups = &studentCourseGroupMembership{Weekly: map[int]*LookupStudentGroupInfo{}}
+			groupMembershipsByCourse[membership.CourseID] = courseGroups
+		}
+		if membership.GroupType == "permanent" {
+			courseGroups.Permanent = groupInfo
+			continue
+		}
+		if membership.WeekNumber != nil {
+			courseGroups.Weekly[*membership.WeekNumber] = groupInfo
+		}
 	}
 
 	var assignments []models.Assignment
@@ -495,9 +526,10 @@ func LookupStudentScores(studentID string) (*LookupStudentResult, error) {
 				Where("s.assignment_id IN ? AND s.group_id IN ? AND s.sub_item_id IS NULL", assignmentIDs, groupIDs).
 				Select(`s.assignment_id, s.group_id, s.score, s.status, s.graded_at, s.comment, u.full_name AS grader_name,
 					CASE WHEN EXISTS (
-						SELECT 1 FROM queue_bookings qb
+						SELECT 1 FROM student_group_members sgm
+						JOIN queue_bookings qb ON qb.student_id = sgm.student_id
 						JOIN queue_sessions qs ON qs.id = qb.queue_session_id
-						WHERE qb.group_id = s.group_id AND qb.booking_type = 'grading' AND qb.status = 'completed'
+						WHERE sgm.group_id = s.group_id AND qb.booking_type = 'grading' AND qb.status = 'completed'
 						AND qs.linked_assignment_id = s.assignment_id
 					) THEN 'queue' ELSE 'direct' END AS graded_via`).
 				Scan(&groupMainScores).Error; err != nil {
@@ -553,6 +585,11 @@ func LookupStudentScores(studentID string) (*LookupStudentResult, error) {
 			continue
 		}
 
+		groupInfoForAssignment := resolveGroupInfoForAssignment(groupMembershipsByCourse[assignment.CourseID], assignment.AssignmentType, assignment.WeekNumber)
+		if isStudentGroupAssignmentType(assignment.AssignmentType) && groupInfoForAssignment == nil {
+			continue
+		}
+
 		mainScore, hasMainScore := mainScoreMap[assignment.ID]
 		assignmentScore := LookupStudentAssignment{
 			ID:                assignment.ID,
@@ -562,7 +599,7 @@ func LookupStudentScores(studentID string) (*LookupStudentResult, error) {
 			Status:            "pending",
 			Comment:           nil,
 			IsGroupAssignment: assignment.AssignmentType == "permanent_group" || assignment.AssignmentType == "weekly_group",
-			GroupInfo:         nil,
+			GroupInfo:         cloneGroupInfo(groupInfoForAssignment),
 			SubItems:          []LookupStudentAssignmentSubItem{},
 		}
 		if hasMainScore {
@@ -575,7 +612,9 @@ func LookupStudentScores(studentID string) (*LookupStudentResult, error) {
 				assignmentScore.GradedVia = &mainScore.GradedVia
 			}
 			assignmentScore.IsGroupAssignment = assignmentScore.IsGroupAssignment || mainScore.IsGroup
-			assignmentScore.GroupInfo = cloneGroupInfo(mainScore.GroupInfo)
+			if mainScore.GroupInfo != nil {
+				assignmentScore.GroupInfo = cloneGroupInfo(mainScore.GroupInfo)
+			}
 		}
 
 		subItems := subItemsByAssignment[assignment.ID]
@@ -729,6 +768,27 @@ func LookupStudentScores(studentID string) (*LookupStudentResult, error) {
 	}
 
 	return result, nil
+}
+
+func isStudentGroupAssignmentType(assignmentType string) bool {
+	return assignmentType == "permanent_group" || assignmentType == "weekly_group"
+}
+
+func resolveGroupInfoForAssignment(groups *studentCourseGroupMembership, assignmentType string, weekNumber *int) *LookupStudentGroupInfo {
+	if groups == nil {
+		return nil
+	}
+	switch assignmentType {
+	case "permanent_group":
+		return cloneGroupInfo(groups.Permanent)
+	case "weekly_group":
+		if weekNumber == nil {
+			return nil
+		}
+		return cloneGroupInfo(groups.Weekly[*weekNumber])
+	default:
+		return nil
+	}
 }
 
 func floatPointer(value float64) *float64 {
