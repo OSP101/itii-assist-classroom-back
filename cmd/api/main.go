@@ -164,6 +164,7 @@ func main() {
 	routes.SetupBonusScoreRoutes(app, auditLogger)
 	routes.SetupFeedbackRoutes(app)
 	routes.SetupSystemRoutes(app)
+	routes.SetupSystemSettingsRoutes(app)
 	routes.SetupQueueRoutes(app, auditLogger)
 	routes.SetupNotificationRoutes(app)
 	routes.SetupOAuthRoutes(app)

@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"itii-assist/config"
 	"itii-assist/middlewares"
 	"itii-assist/models"
 	"itii-assist/repositories"
@@ -11,6 +12,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"gorm.io/gorm"
@@ -822,6 +824,119 @@ func (h *CourseHandler) AddTA(c fiber.Ctx) error {
 		IPAddress:   ip,
 	})
 	return c.Status(201).JSON(fiber.Map{"success": true, "message": "เพิ่มผู้ช่วยสอนสำเร็จ"})
+}
+
+// POST /api/courses/:id/tas/create-account
+func (h *CourseHandler) CreateTAAccount(c fiber.Ctx) error {
+	courseID := c.Params("id")
+	actorID := c.Locals("user_id").(uint)
+	actorRole := c.Locals("user_role").(string)
+
+	if actorRole != "admin" {
+		hasPermission, err := repositories.HasCoursePermission(courseID, actorID, actorRole, repositories.PermissionManagePeople)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to resolve permissions"})
+		}
+		if !hasPermission {
+			return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์สร้างบัญชีผู้ช่วยสอนในรายวิชานี้"})
+		}
+	}
+
+	var input struct {
+		Username string `json:"username"`
+		FullName string `json:"full_name"`
+		Email    string `json:"email"`
+		Avatar   string `json:"avatar"`
+	}
+	if err := c.Bind().JSON(&input); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
+	}
+
+	input.Username = strings.TrimSpace(input.Username)
+	input.FullName = strings.TrimSpace(input.FullName)
+	input.Email = strings.TrimSpace(input.Email)
+	input.Avatar = strings.TrimSpace(input.Avatar)
+
+	if input.Username == "" || input.FullName == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "กรุณากรอกชื่อผู้ใช้และชื่อ-นามสกุล"})
+	}
+	if repositories.IsActiveUsernameExists(input.Username, 0) {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ชื่อผู้ใช้นี้มีอยู่ในระบบแล้ว"})
+	}
+	if input.Email != "" && repositories.IsActiveEmailExists(input.Email, 0) {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "อีเมลนี้มีอยู่ในระบบแล้ว"})
+	}
+	if repositories.IsUserEmailStudentInCourse(courseID, input.Email) {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "อีเมลนี้ถูกใช้โดยนักศึกษาในรายวิชานี้แล้ว"})
+	}
+
+	generatedPassword := generatePassword(12)
+	hashedPassword, err := utils.HashPassword(generatedPassword)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "เข้ารหัสผ่านไม่สำเร็จ"})
+	}
+
+	newUser := models.User{
+		Username:           input.Username,
+		PasswordHash:       hashedPassword,
+		Role:               "ta",
+		FullName:           input.FullName,
+		Email:              input.Email,
+		IsActive:           true,
+		Provider:           "local",
+		Avatar:             input.Avatar,
+		MustChangePassword: true,
+	}
+
+	if err := config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&newUser).Error; err != nil {
+			return err
+		}
+		return tx.Create(&models.CourseTA{
+			CourseID:    courseID,
+			UserID:      newUser.ID,
+			Permissions: repositories.EncodeCourseMemberPermissions("ta", nil),
+			AssignedAt:  time.Now(),
+		}).Error
+	}); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "สร้างบัญชีผู้ช่วยสอนไม่สำเร็จ"})
+	}
+
+	logCourseActivity(c, courseID, actorID, "add_ta", "member", "user", newUser.ID, "", fiber.Map{"created_account": true})
+	logPrivilegedAdminAction(c, actorID, "create_course_ta_account", "warn", "course_members", courseID, fiber.Map{
+		"target_type": "course_member",
+		"course_id":   courseID,
+		"member_role": "ta",
+		"target_snapshot": fiber.Map{
+			"user_id":   newUser.ID,
+			"username":  newUser.Username,
+			"full_name": newUser.FullName,
+			"email":     newUser.Email,
+			"role":      "ta",
+		},
+	})
+	reqID, _, ip := services.ExtractMeta(c)
+	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
+		CourseID:    courseID,
+		ActorUserID: actorID,
+		Action:      services.ActionCourseTAAdded,
+		TargetType:  "ta",
+		TargetID:    strconv.Itoa(int(newUser.ID)),
+		RequestID:   reqID,
+		IPAddress:   ip,
+	})
+
+	return c.Status(201).JSON(fiber.Map{
+		"success": true,
+		"message": "สร้างบัญชีและเพิ่มเป็นผู้ช่วยสอนสำเร็จ",
+		"data": fiber.Map{
+			"user": safeUser(&newUser),
+			"credentials": fiber.Map{
+				"username": newUser.Username,
+				"password": generatedPassword,
+			},
+		},
+	})
 }
 
 // POST /api/courses/:id/tas/bulk
