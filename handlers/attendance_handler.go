@@ -388,13 +388,13 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 		}
 	}
 	if studentID == 0 {
-		return c.Status(404).JSON(fiber.Map{"success": false, "message": "à¹„à¸¡à¹ˆà¸žà¸šà¸‚à¹‰à¸­à¸¡à¸¹à¸¥à¸™à¸±à¸à¸¨à¸¶à¸à¸©à¸²à¹ƒà¸™à¸£à¸°à¸šà¸š à¸à¸£à¸¸à¸“à¸²à¸•à¸´à¸”à¸•à¹ˆà¸­à¸œà¸¹à¹‰à¸ªà¸­à¸™"})
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูลนักศึกษาในระบบ กรุณาติดต่อผู้สอน"})
 	}
 
 	result, err := repositories.StudentCheckIn(uint(id), studentID, input.PinCode, lat, lng, input.GoogleEmail, input.GoogleID)
 	if err != nil {
 		statusCode := 400
-		if strings.Contains(err.Error(), "à¹„à¸¡à¹ˆà¸žà¸š") || strings.Contains(err.Error(), "à¹„à¸¡à¹ˆà¹„à¸”à¹‰à¸¥à¸‡à¸—à¸°à¹€à¸šà¸µà¸¢à¸™") {
+		if strings.Contains(err.Error(), "ไม่พบ") || strings.Contains(err.Error(), "ไม่ได้ลงทะเบียน") {
 			statusCode = 404
 		}
 		return c.Status(statusCode).JSON(fiber.Map{"success": false, "message": err.Error()})
@@ -405,9 +405,9 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load student after check-in"})
 	}
 
-	message := "à¹€à¸Šà¹‡à¸„à¸Šà¸·à¹ˆà¸­à¸ªà¸³à¹€à¸£à¹‡à¸ˆ: à¸¡à¸²à¹€à¸£à¸µà¸¢à¸™"
+	message := "เช็คชื่อสำเร็จ: มาเรียน"
 	if result.Status == "late" {
-		message = "à¹€à¸Šà¹‡à¸„à¸Šà¸·à¹ˆà¸­à¸ªà¸³à¹€à¸£à¹‡à¸ˆ: à¸¡à¸²à¸ªà¸²à¸¢"
+		message = "เช็คชื่อสำเร็จ: มาสาย"
 	}
 
 	recordPayload := fiber.Map{
@@ -1002,7 +1002,7 @@ func VerifyStudentHandler(c fiber.Ctx) error {
 
 	var student models.Student
 	if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?)", input.GoogleEmail).First(&student).Error; err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "message": "à¹„à¸¡à¹ˆà¸žà¸šà¸‚à¹‰à¸­à¸¡à¸¹à¸¥à¸™à¸±à¸à¸¨à¸¶à¸à¸©à¸²à¹ƒà¸™à¸£à¸°à¸šà¸š"})
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูลนักศึกษาในระบบ"})
 	}
 
 	response := fiber.Map{
@@ -1018,7 +1018,7 @@ func VerifyStudentHandler(c fiber.Ctx) error {
 	if input.SessionID != nil {
 		var record models.AttendanceRecord
 		if err := config.DB.Where("attendance_session_id = ? AND student_id = ?", *input.SessionID, student.ID).First(&record).Error; err != nil {
-			return c.Status(404).JSON(fiber.Map{"success": false, "message": "à¸„à¸¸à¸“à¹„à¸¡à¹ˆà¹„à¸”à¹‰à¸¥à¸‡à¸—à¸°à¹€à¸šà¸µà¸¢à¸™à¹ƒà¸™à¸£à¸²à¸¢à¸§à¸´à¸Šà¸²à¸™à¸µà¹‰"})
+			return c.Status(404).JSON(fiber.Map{"success": false, "message": "คุณไม่ได้ลงทะเบียนในรายวิชานี้"})
 		}
 		if record.Status != "absent" {
 			response["already_checked_in"] = true
@@ -1045,7 +1045,7 @@ func PreviewSectionChangeHandler(c fiber.Ctx) error {
 
 	detail, err := repositories.GetAttendanceSession(uint(id))
 	if err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "message": "à¹„à¸¡à¹ˆà¸žà¸šà¸£à¸­à¸šà¸à¸²à¸£à¹€à¸Šà¹‡à¸„à¸Šà¸·à¹ˆà¸­"})
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบรอบการเช็คชื่อ"})
 	}
 
 	newSectionIDs := uniqueUintValues(input.CourseSectionIDs)
@@ -1170,7 +1170,7 @@ func PreviewTimeChangeHandler(c fiber.Ctx) error {
 
 	var session models.AttendanceSession
 	if err := config.DB.First(&session, uint(id)).Error; err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "message": "à¹„à¸¡à¹ˆà¸žà¸šà¸£à¸­à¸šà¸à¸²à¸£à¹€à¸Šà¹‡à¸„à¸Šà¸·à¹ˆà¸­"})
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบรอบการเช็คชื่อ"})
 	}
 
 	var records []models.AttendanceRecord
@@ -1284,7 +1284,7 @@ func ApplyTimeChangeHandler(c fiber.Ctx) error {
 
 	detail, err := repositories.GetAttendanceSession(uint(id))
 	if err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "message": "à¹„à¸¡à¹ˆà¸žà¸šà¸£à¸­à¸šà¸à¸²à¸£à¹€à¸Šà¹‡à¸„à¸Šà¸·à¹ˆà¸­"})
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบรอบการเช็คชื่อ"})
 	}
 	session := detail.AttendanceSession
 	newStart := session.StartTime
@@ -1358,9 +1358,9 @@ func ApplyTimeChangeHandler(c fiber.Ctx) error {
 			continue
 		}
 
-		note := "[à¸£à¸°à¸šà¸š] à¸ªà¸–à¸²à¸™à¸°à¸–à¸¹à¸à¸­à¸±à¸›à¹€à¸”à¸•à¸«à¸¥à¸±à¸‡à¸›à¸£à¸±à¸šà¹€à¸§à¸¥à¸²à¹€à¸Šà¹‡à¸„à¸Šà¸·à¹ˆà¸­"
+		note := "[ระบบ] สถานะถูกอัปเดตหลังปรับเวลาเช็คชื่อ"
 		if newStatus == "invalid" {
-			note = "[à¸£à¸°à¸šà¸š] à¸ªà¸–à¸²à¸™à¸°à¹€à¸›à¸¥à¸µà¹ˆà¸¢à¸™à¹€à¸›à¹‡à¸™à¸‚à¸²à¸” à¹€à¸™à¸·à¹ˆà¸­à¸‡à¸ˆà¸²à¸à¹€à¸§à¸¥à¸²à¹€à¸Šà¹‡à¸„à¸­à¸´à¸™à¸­à¸¢à¸¹à¹ˆà¸™à¸­à¸à¸Šà¹ˆà¸§à¸‡à¹€à¸§à¸¥à¸²à¹ƒà¸«à¸¡à¹ˆ"
+			note = "[ระบบ] สถานะเปลี่ยนเป็นขาด เนื่องจากเวลาเช็คชื่ออยู่นอกช่วงเวลาใหม่"
 		}
 		if err := tx.Model(&models.AttendanceRecord{}).Where("id = ?", record.ID).Updates(map[string]interface{}{"status": dbStatus, "updated_by": updatedBy, "note": note, "updated_at": time.Now()}).Error; err != nil {
 			tx.Rollback()
