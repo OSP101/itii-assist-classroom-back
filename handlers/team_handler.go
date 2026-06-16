@@ -59,6 +59,22 @@ func CreateTeamHandler(c fiber.Ctx) error {
 		groupType = "permanent"
 	}
 
+	validationErrors := repositories.ValidateTeamInputs(courseID, groupType, input.WeekNumber, []repositories.TeamCreateInput{
+		{
+			Name:      input.Name,
+			MemberIDs: input.MemberIDs,
+		},
+	})
+	if len(validationErrors) > 0 {
+		return c.Status(400).JSON(fiber.Map{
+			"success": false,
+			"message": validationErrors[0],
+			"data": fiber.Map{
+				"errors": validationErrors,
+			},
+		})
+	}
+
 	team, err := repositories.CreateTeam(courseID, input.Name, groupType, input.WeekNumber, input.MemberIDs)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "สร้างกลุ่มไม่สำเร็จ"})
@@ -93,17 +109,21 @@ func BulkCreateTeamsHandler(c fiber.Ctx) error {
 		groupType = "permanent"
 	}
 
-	type teamEntry struct {
-		Name      string `json:"name"`
-		MemberIDs []uint `json:"member_ids"`
-	}
-	entries := make([]struct {
-		Name      string `json:"name"`
-		MemberIDs []uint `json:"member_ids"`
-	}, len(input.Teams))
+	entries := make([]repositories.TeamCreateInput, len(input.Teams))
 	for i, t := range input.Teams {
 		entries[i].Name = t.Name
 		entries[i].MemberIDs = t.MemberIDs
+	}
+
+	validationErrors := repositories.ValidateTeamInputs(courseID, groupType, input.WeekNumber, entries)
+	if len(validationErrors) > 0 {
+		return c.Status(400).JSON(fiber.Map{
+			"success": false,
+			"message": validationErrors[0],
+			"data": fiber.Map{
+				"errors": validationErrors,
+			},
+		})
 	}
 
 	created, err := repositories.BulkCreateTeams(courseID, groupType, input.WeekNumber, entries)

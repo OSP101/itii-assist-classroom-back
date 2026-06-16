@@ -92,6 +92,8 @@ func main() {
 		&models.FcmToken{},
 		&models.NotificationLog{},
 		&models.UserNotification{},
+		&models.SystemAnnouncement{},
+		&models.SystemAnnouncementAck{},
 		// Feedback และ Log
 		&models.Feedback{},
 		&models.SystemLog{},

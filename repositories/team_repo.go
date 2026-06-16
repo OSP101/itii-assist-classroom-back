@@ -1,9 +1,13 @@
 package repositories
 
 import (
+	"fmt"
 	"itii-assist/config"
 	"itii-assist/models"
+	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // ============================================================
@@ -27,6 +31,124 @@ type TeamWithMembers struct {
 	Members     []TeamMember `json:"members"`
 	MemberCount int          `json:"member_count"`
 	CreatedAt   time.Time    `json:"created_at"`
+}
+
+type TeamCreateInput struct {
+	Name      string `json:"name"`
+	MemberIDs []uint `json:"member_ids"`
+}
+
+func normalizeTeamGroupType(groupType string) string {
+	switch strings.ToLower(strings.TrimSpace(groupType)) {
+	case "temporary", "weekly":
+		return "temporary"
+	default:
+		return "permanent"
+	}
+}
+
+func ValidateTeamInputs(courseID string, groupType string, weekNumber *int, teams []TeamCreateInput) []string {
+	db := config.DB
+	normalizedGroupType := normalizeTeamGroupType(groupType)
+	errors := make([]string, 0)
+
+	if len(teams) == 0 {
+		return []string{"กรุณาระบุข้อมูลกลุ่ม"}
+	}
+
+	if normalizedGroupType == "temporary" && weekNumber == nil {
+		return []string{"กรุณาระบุสัปดาห์สำหรับกลุ่มรายสัปดาห์"}
+	}
+
+	var enrolledRows []struct {
+		StudentID uint `gorm:"column:student_id"`
+	}
+	if err := db.Raw(`
+		SELECT DISTINCT css.student_id
+		FROM course_section_students css
+		JOIN course_sections cs ON cs.id = css.course_section_id
+		WHERE cs.course_id = ?
+	`, courseID).Scan(&enrolledRows).Error; err != nil {
+		return []string{"ไม่สามารถตรวจสอบรายชื่อนักศึกษาในรายวิชาได้"}
+	}
+
+	enrolledStudentIDs := make(map[uint]struct{}, len(enrolledRows))
+	for _, row := range enrolledRows {
+		enrolledStudentIDs[row.StudentID] = struct{}{}
+	}
+
+	var existingMembershipRows []struct {
+		StudentID  uint   `gorm:"column:student_id"`
+		GroupName  string `gorm:"column:group_name"`
+		WeekNumber *int   `gorm:"column:week_number"`
+	}
+	query := db.Table("student_group_members sgm").
+		Select("sgm.student_id, sg.name as group_name, sg.week_number").
+		Joins("JOIN student_groups sg ON sg.id = sgm.group_id").
+		Where("sg.course_id = ? AND sg.group_type = ?", courseID, normalizedGroupType)
+	if normalizedGroupType == "temporary" && weekNumber != nil {
+		query = query.Where("sg.week_number = ?", *weekNumber)
+	}
+	if err := query.Scan(&existingMembershipRows).Error; err != nil {
+		return []string{"ไม่สามารถตรวจสอบสมาชิกกลุ่มเดิมได้"}
+	}
+
+	existingMemberships := make(map[uint]string, len(existingMembershipRows))
+	for _, row := range existingMembershipRows {
+		existingMemberships[row.StudentID] = row.GroupName
+	}
+
+	seenTeamNames := make(map[string]string, len(teams))
+	seenMembers := make(map[uint]string)
+
+	for idx, team := range teams {
+		teamName := strings.TrimSpace(team.Name)
+		if teamName == "" {
+			errors = append(errors, fmt.Sprintf("กลุ่มลำดับที่ %d ยังไม่ได้ระบุชื่อกลุ่ม", idx+1))
+			continue
+		}
+
+		normalizedName := strings.ToLower(teamName)
+		if existingName, ok := seenTeamNames[normalizedName]; ok && existingName != teamName {
+			errors = append(errors, fmt.Sprintf("ชื่อกลุ่ม \"%s\" ซ้ำกับ \"%s\" ในข้อมูลที่นำเข้า", teamName, existingName))
+		} else if ok {
+			errors = append(errors, fmt.Sprintf("ชื่อกลุ่ม \"%s\" ซ้ำในข้อมูลที่นำเข้า", teamName))
+		} else {
+			seenTeamNames[normalizedName] = teamName
+		}
+
+		if len(team.MemberIDs) == 0 {
+			errors = append(errors, fmt.Sprintf("กลุ่ม \"%s\" ยังไม่มีสมาชิก", teamName))
+			continue
+		}
+
+		teamSeenMembers := make(map[uint]struct{}, len(team.MemberIDs))
+		for _, memberID := range team.MemberIDs {
+			if _, ok := enrolledStudentIDs[memberID]; !ok {
+				errors = append(errors, fmt.Sprintf("กลุ่ม \"%s\" มีนักศึกษาที่ไม่ได้อยู่ในรายวิชานี้ (ID: %d)", teamName, memberID))
+				continue
+			}
+
+			if _, ok := teamSeenMembers[memberID]; ok {
+				errors = append(errors, fmt.Sprintf("กลุ่ม \"%s\" มีสมาชิกซ้ำในกลุ่มเดียวกัน (ID: %d)", teamName, memberID))
+				continue
+			}
+			teamSeenMembers[memberID] = struct{}{}
+
+			if existingGroupName, ok := existingMemberships[memberID]; ok {
+				errors = append(errors, fmt.Sprintf("กลุ่ม \"%s\" มีสมาชิกที่อยู่ในกลุ่ม \"%s\" อยู่แล้ว", teamName, existingGroupName))
+				continue
+			}
+
+			if importedGroupName, ok := seenMembers[memberID]; ok {
+				errors = append(errors, fmt.Sprintf("นักศึกษา ID %d ถูกระบุซ้ำในกลุ่ม \"%s\" และ \"%s\"", memberID, importedGroupName, teamName))
+				continue
+			}
+			seenMembers[memberID] = teamName
+		}
+	}
+
+	return errors
 }
 
 func GetTeamsByCourse(courseID string, groupType string, weekNumber *int) ([]TeamWithMembers, error) {
@@ -157,14 +279,15 @@ func GetTeamByID(teamID uint, courseID string) (*TeamWithMembers, error) {
 func CreateTeam(courseID string, name string, groupType string, weekNumber *int, memberIDs []uint) (*TeamWithMembers, error) {
 	db := config.DB
 	now := time.Now()
+	normalizedGroupType := normalizeTeamGroupType(groupType)
 
 	group := models.StudentGroup{
 		CourseID:  courseID,
 		Name:      name,
-		GroupType: groupType,
+		GroupType: normalizedGroupType,
 		CreatedAt: now,
 	}
-	if groupType == "temporary" {
+	if normalizedGroupType == "temporary" {
 		group.WeekNumber = weekNumber
 	}
 
@@ -187,43 +310,57 @@ func CreateTeam(courseID string, name string, groupType string, weekNumber *int,
 	return GetTeamByID(group.ID, courseID)
 }
 
-func BulkCreateTeams(courseID string, groupType string, weekNumber *int, teams []struct {
-	Name      string `json:"name"`
-	MemberIDs []uint `json:"member_ids"`
-}) ([]TeamWithMembers, error) {
+func BulkCreateTeams(courseID string, groupType string, weekNumber *int, teams []TeamCreateInput) ([]TeamWithMembers, error) {
 	db := config.DB
 	now := time.Now()
-	var created []TeamWithMembers
-	for _, t := range teams {
-		if t.Name == "" || len(t.MemberIDs) == 0 {
-			continue
-		}
-		group := models.StudentGroup{
-			CourseID:  courseID,
-			Name:      t.Name,
-			GroupType: groupType,
-			CreatedAt: now,
-		}
-		if groupType == "temporary" {
-			group.WeekNumber = weekNumber
-		}
-		if err := db.Create(&group).Error; err != nil {
-			continue
-		}
-		members := make([]models.StudentGroupMember, len(t.MemberIDs))
-		for i, sid := range t.MemberIDs {
-			members[i] = models.StudentGroupMember{GroupID: group.ID, StudentID: sid, JoinedAt: now}
-		}
-		db.Create(&members)
+	normalizedGroupType := normalizeTeamGroupType(groupType)
+	createdIDs := make([]uint, 0, len(teams))
 
-		tw, _ := GetTeamByID(group.ID, courseID)
-		if tw != nil {
-			created = append(created, *tw)
+	err := db.Transaction(func(tx *gorm.DB) error {
+		for _, team := range teams {
+			group := models.StudentGroup{
+				CourseID:  courseID,
+				Name:      strings.TrimSpace(team.Name),
+				GroupType: normalizedGroupType,
+				CreatedAt: now,
+			}
+			if normalizedGroupType == "temporary" {
+				group.WeekNumber = weekNumber
+			}
+
+			if err := tx.Create(&group).Error; err != nil {
+				return err
+			}
+
+			members := make([]models.StudentGroupMember, len(team.MemberIDs))
+			for i, sid := range team.MemberIDs {
+				members[i] = models.StudentGroupMember{
+					GroupID:   group.ID,
+					StudentID: sid,
+					JoinedAt:  now,
+				}
+			}
+			if err := tx.Create(&members).Error; err != nil {
+				return err
+			}
+
+			createdIDs = append(createdIDs, group.ID)
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	if created == nil {
-		created = []TeamWithMembers{}
+
+	created := make([]TeamWithMembers, 0, len(createdIDs))
+	for _, groupID := range createdIDs {
+		team, getErr := GetTeamByID(groupID, courseID)
+		if getErr != nil {
+			return nil, getErr
+		}
+		created = append(created, *team)
 	}
+
 	return created, nil
 }
 
