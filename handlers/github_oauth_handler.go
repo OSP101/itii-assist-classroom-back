@@ -283,6 +283,12 @@ func GitHubCallbackHandler(c fiber.Ctx) error {
 	if err != nil {
 		return redirectErr("/login", "Failed to create session")
 	}
+	recordAuthLoginSystemLog(c, &user.ID, "github", map[string]any{
+		"user_id":   user.ID,
+		"username":  user.Username,
+		"provider":  "github",
+		"loginFlow": "oauth",
+	})
 
 	return c.Redirect().To(fmt.Sprintf(
 		"%s/auth/callback?accessToken=%s&refreshToken=%s",

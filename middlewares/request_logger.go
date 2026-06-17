@@ -2,6 +2,7 @@ package middlewares
 
 import (
 	"fmt"
+	"itii-assist/observability"
 	"log/slog"
 	"os"
 	"runtime/debug"
@@ -76,7 +77,8 @@ func RequestLogger() fiber.Handler {
 		}()
 
 		// Duration
-		durationMs := time.Since(start).Milliseconds()
+		duration := time.Since(start)
+		durationMs := duration.Milliseconds()
 
 		// User ID (staff sessions use user_id, student sessions use student_id)
 		userIDRaw := c.Locals("user_id")
@@ -92,6 +94,22 @@ func RequestLogger() fiber.Handler {
 		}
 
 		status := c.Response().StatusCode()
+		routePath := path
+		if route := c.Route(); route != nil {
+			if candidate := strings.TrimSpace(route.Path); candidate != "" {
+				routePath = candidate
+			}
+		}
+
+		if routePath != "/metrics" {
+			observability.RecordHTTPRequest(routePath, method, status, duration)
+		}
+		if userID, ok := GetUserID(c); ok {
+			observability.TrackAuthenticatedPrincipal("user", userID)
+		}
+		if studentID, ok := GetStudentID(c); ok {
+			observability.TrackAuthenticatedPrincipal("student", studentID)
+		}
 
 		attrs := []any{
 			slog.String("request_id", reqID),

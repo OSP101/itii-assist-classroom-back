@@ -10,6 +10,7 @@ import (
 	"itii-assist/config"
 	"itii-assist/middlewares"
 	"itii-assist/models"
+	"itii-assist/observability"
 	"itii-assist/realtime"
 	"itii-assist/repositories"
 	"itii-assist/routes"
@@ -31,6 +32,7 @@ func main() {
 
 	// 2. เชื่อมต่อ Database
 	config.ConnectDB()
+	observability.InitPrometheusMetrics(config.DB)
 
 	// 2.5 แก้ไข column types ที่เคยสร้างเป็น bigint แต่ต้องเป็น varchar(21) สำหรับ NanoID
 	// (GORM AutoMigrate ไม่เปลี่ยน type ของ column ที่มีอยู่แล้ว)
@@ -150,6 +152,7 @@ func main() {
 	app.Get("/api/health", func(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "success", "message": "API is Running!"})
 	})
+	app.Get("/metrics", middlewares.RestrictMetricsToInternalNetworks(), observability.MetricsHandler)
 	app.Get("/ws", realtime.Handler())
 
 	routes.SetupAuthRoutes(app, auditLogger)

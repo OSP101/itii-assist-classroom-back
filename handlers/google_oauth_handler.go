@@ -454,6 +454,11 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 		if err != nil {
 			return redirectErr(loginPath, "Failed to create student session")
 		}
+		recordAuthLoginSystemLog(c, nil, "google_student", map[string]any{
+			"student_id": student.ID,
+			"email":      student.Email,
+			"provider":   "google",
+		})
 		return c.Redirect().To(fmt.Sprintf(
 			"%s/auth/callback?accessToken=%s&refreshToken=%s",
 			frontendURL, at, rt,
@@ -494,6 +499,12 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 	if err != nil {
 		return redirectErr(loginPath, "Failed to create session")
 	}
+	recordAuthLoginSystemLog(c, &user.ID, "google", map[string]any{
+		"user_id":   user.ID,
+		"username":  user.Username,
+		"provider":  "google",
+		"loginFlow": "oauth",
+	})
 	return c.Redirect().To(fmt.Sprintf(
 		"%s/auth/callback?accessToken=%s&refreshToken=%s",
 		frontendURL, at, rt,
