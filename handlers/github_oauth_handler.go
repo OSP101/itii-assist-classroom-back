@@ -32,12 +32,8 @@ type githubEmail struct {
 	Verified bool   `json:"verified"`
 }
 
-func getGitHubOAuthConfig() *oauth2.Config {
-	callbackURL := os.Getenv("GITHUB_CALLBACK_URL")
-	if callbackURL == "" {
-		callbackURL = "http://localhost:8000/api/auth/github/callback"
-	}
-
+func getGitHubOAuthConfig(c fiber.Ctx) *oauth2.Config {
+	callbackURL := getOAuthCallbackURL(c, "GITHUB_CALLBACK_URL", "/api/auth/github/callback")
 	return &oauth2.Config{
 		ClientID:     os.Getenv("GITHUB_CLIENT_ID"),
 		ClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
@@ -101,8 +97,8 @@ func selectGitHubEmail(emails []githubEmail) string {
 	return ""
 }
 
-func fetchGitHubProfile(ctx context.Context, oauthToken *oauth2.Token) (*githubProfile, error) {
-	client := getGitHubOAuthConfig().Client(ctx, oauthToken)
+func fetchGitHubProfile(ctx context.Context, oauthConfig *oauth2.Config, oauthToken *oauth2.Token) (*githubProfile, error) {
+	client := oauthConfig.Client(ctx, oauthToken)
 
 	var profile githubProfile
 	if err := githubAPIRequest(ctx, client, "https://api.github.com/user", &profile); err != nil {
@@ -142,13 +138,13 @@ func GitHubLoginHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to generate state"})
 	}
 
-	authURL := getGitHubOAuthConfig().AuthCodeURL(stateStr, oauth2.AccessTypeOnline)
+	authURL := getGitHubOAuthConfig(c).AuthCodeURL(stateStr, oauth2.AccessTypeOnline)
 	return c.Redirect().To(authURL)
 }
 
 // GET /api/auth/github/callback
 func GitHubCallbackHandler(c fiber.Ctx) error {
-	frontendURL := getFrontendURL()
+	frontendURL := getFrontendURL(c)
 
 	redirectErr := func(path, msg string) error {
 		return c.Redirect().To(frontendURL + path + "?error=" + url.QueryEscape(msg))
@@ -179,7 +175,8 @@ func GitHubCallbackHandler(c fiber.Ctx) error {
 		return redirectErr(path, "No authorization code received")
 	}
 
-	oauthToken, err := getGitHubOAuthConfig().Exchange(context.Background(), code)
+	oauthConfig := getGitHubOAuthConfig(c)
+	oauthToken, err := oauthConfig.Exchange(context.Background(), code)
 	if err != nil {
 		path := "/login"
 		if isLinkAction {
@@ -188,7 +185,7 @@ func GitHubCallbackHandler(c fiber.Ctx) error {
 		return redirectErr(path, "Failed to exchange OAuth code: "+err.Error())
 	}
 
-	profile, err := fetchGitHubProfile(context.Background(), oauthToken)
+	profile, err := fetchGitHubProfile(context.Background(), oauthConfig, oauthToken)
 	if err != nil {
 		path := "/login"
 		if isLinkAction {

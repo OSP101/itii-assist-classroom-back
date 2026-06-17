@@ -29,11 +29,58 @@ import (
 // Config helpers
 // =============================================================================
 
-func getGoogleOAuthConfig() *oauth2.Config {
-	callbackURL := os.Getenv("GOOGLE_CALLBACK_URL")
-	if callbackURL == "" {
-		callbackURL = "http://localhost:8000/api/auth/google/callback"
+func firstHeaderValue(raw string) string {
+	if raw == "" {
+		return ""
 	}
+	return strings.TrimSpace(strings.Split(raw, ",")[0])
+}
+
+func normalizePublicBaseURL(raw string) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
+		return trimmed
+	}
+	return "https://" + trimmed
+}
+
+func getRequestPublicBaseURL(c fiber.Ctx) string {
+	host := firstHeaderValue(c.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = strings.TrimSpace(c.Hostname())
+	}
+	if host == "" {
+		return ""
+	}
+
+	scheme := firstHeaderValue(c.Get("X-Forwarded-Proto"))
+	if scheme == "" {
+		scheme = strings.TrimSpace(c.Protocol())
+	}
+	if scheme == "" {
+		scheme = "https"
+	}
+
+	return normalizePublicBaseURL(scheme + "://" + host)
+}
+
+func getOAuthCallbackURL(c fiber.Ctx, envKey, defaultPath string) string {
+	if publicBaseURL := getRequestPublicBaseURL(c); publicBaseURL != "" {
+		return publicBaseURL + defaultPath
+	}
+
+	callbackURL := strings.TrimSpace(os.Getenv(envKey))
+	if callbackURL == "" {
+		callbackURL = "http://localhost:8000" + defaultPath
+	}
+	return callbackURL
+}
+
+func getGoogleOAuthConfig(c fiber.Ctx) *oauth2.Config {
+	callbackURL := getOAuthCallbackURL(c, "GOOGLE_CALLBACK_URL", "/api/auth/google/callback")
 	return &oauth2.Config{
 		ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
 		ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
@@ -43,7 +90,11 @@ func getGoogleOAuthConfig() *oauth2.Config {
 	}
 }
 
-func getFrontendURL() string {
+func getFrontendURL(c fiber.Ctx) string {
+	if publicBaseURL := getRequestPublicBaseURL(c); publicBaseURL != "" {
+		return publicBaseURL
+	}
+
 	u := os.Getenv("FRONTEND_URL")
 	if u == "" {
 		u = "http://localhost:3000"
@@ -327,7 +378,7 @@ func GoogleLoginHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to generate state"})
 	}
 
-	authURL := getGoogleOAuthConfig().AuthCodeURL(stateStr, oauth2.AccessTypeOnline)
+	authURL := getGoogleOAuthConfig(c).AuthCodeURL(stateStr, oauth2.AccessTypeOnline)
 	return c.Redirect().To(authURL)
 }
 
@@ -336,7 +387,7 @@ func GoogleLoginHandler(c fiber.Ctx) error {
 // =============================================================================
 
 func GoogleCallbackHandler(c fiber.Ctx) error {
-	frontendURL := getFrontendURL()
+	frontendURL := getFrontendURL(c)
 
 	redirectErr := func(path, msg string) error {
 		return c.Redirect().To(frontendURL + path + "?error=" + url.QueryEscape(msg))
@@ -369,13 +420,14 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 	if code == "" {
 		return redirectErr(loginPath, "No authorization code received")
 	}
-	oauthToken, err := getGoogleOAuthConfig().Exchange(context.Background(), code)
+	oauthConfig := getGoogleOAuthConfig(c)
+	oauthToken, err := oauthConfig.Exchange(context.Background(), code)
 	if err != nil {
 		return redirectErr(loginPath, "Failed to exchange OAuth code: "+err.Error())
 	}
 
 	// --- Fetch Google profile ---
-	client := getGoogleOAuthConfig().Client(context.Background(), oauthToken)
+	client := oauthConfig.Client(context.Background(), oauthToken)
 	resp, err := client.Get("https://www.googleapis.com/oauth2/v3/userinfo")
 	if err != nil || resp.StatusCode != http.StatusOK {
 		return redirectErr(loginPath, "Failed to fetch Google profile")
