@@ -1612,6 +1612,45 @@ func isQueueDeskFullyGraded(sessionID string, deskID string, assignmentID uint, 
 	return true, nil
 }
 
+func loadLatestCompletedGradingBookingForDesk(sessionID string, deskID string) (*models.QueueBooking, error) {
+	var booking models.QueueBooking
+	err := config.DB.
+		Where("queue_session_id = ? AND desk_id = ? AND booking_type = ? AND status = ?", sessionID, deskID, "grading", "completed").
+		Order("completed_at DESC NULLS LAST, updated_at DESC, id DESC").
+		First(&booking).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &booking, nil
+}
+
+func isStudentFullyGradedForQueueAssignment(assignmentID uint, studentID uint, subItems []models.AssignmentSubItem) (bool, error) {
+	gradedSubItemIDs, singleScore, err := loadGradedAssignmentState(assignmentID, studentID)
+	if err != nil {
+		return false, err
+	}
+
+	if len(subItems) == 0 {
+		return singleScore != nil, nil
+	}
+
+	gradedSet := make(map[uint]struct{}, len(gradedSubItemIDs))
+	for _, gradedID := range gradedSubItemIDs {
+		gradedSet[gradedID] = struct{}{}
+	}
+
+	for _, subItem := range subItems {
+		if _, ok := gradedSet[subItem.ID]; !ok {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
 func validateQueueBookingCompatibility(session *models.QueueSession, studentCode string, deskNumber int, bookingType string, mode queueBookingValidationMode) (*models.Student, *models.Desk, *models.QueueBooking, []fiber.Map, []fiber.Map, error) {
 	var validationErrors []fiber.Map
 	var warnings []fiber.Map
@@ -1770,21 +1809,40 @@ func validateQueueBookingCompatibility(session *models.QueueSession, studentCode
 
 				if deskStatus != nil && bookingType == "grading" {
 					if deskStatus.GradingStatus == "completed" {
-						if assignment != nil && len(subItems) > 0 {
-							deskFullyGraded, err := isQueueDeskFullyGraded(session.ID, desk.ID, assignment.ID, subItems)
+						completedBooking, err := loadLatestCompletedGradingBookingForDesk(session.ID, desk.ID)
+						if err != nil {
+							return nil, nil, nil, nil, nil, err
+						}
+
+						lockedToCurrentStudent := student != nil && completedBooking != nil && completedBooking.StudentID == student.ID
+						deskFullyGraded := assignment == nil || len(subItems) == 0
+						if completedBooking != nil && assignment != nil {
+							deskFullyGraded, err = isStudentFullyGradedForQueueAssignment(assignment.ID, completedBooking.StudentID, subItems)
 							if err != nil {
 								return nil, nil, nil, nil, nil, err
 							}
-							if deskFullyGraded {
-								validationErrors = append(validationErrors, fiber.Map{
-									"field":   "desk_number",
-									"message": fmt.Sprintf("โต๊ะหมายเลข %d ได้รับการตรวจครบแล้ว", deskNumber),
-								})
-							}
-						} else {
+						}
+
+						switch {
+						case completedBooking == nil:
 							validationErrors = append(validationErrors, fiber.Map{
 								"field":   "desk_number",
-								"message": fmt.Sprintf("โต๊ะหมายเลข %d ได้รับการตรวจงานแล้ว", deskNumber),
+								"message": fmt.Sprintf("โต๊ะหมายเลข %d ถูกล็อกหลังการตรวจสำเร็จแล้ว", deskNumber),
+							})
+						case lockedToCurrentStudent && !deskFullyGraded:
+							warnings = append(warnings, fiber.Map{
+								"field":   "desk_number",
+								"message": fmt.Sprintf("โต๊ะหมายเลข %d ถูกล็อกไว้สำหรับนักศึกษาคนเดิมจนกว่าจะตรวจครบทุกข้อ", deskNumber),
+							})
+						case deskFullyGraded:
+							validationErrors = append(validationErrors, fiber.Map{
+								"field":   "desk_number",
+								"message": fmt.Sprintf("โต๊ะหมายเลข %d ได้รับการตรวจครบแล้วและถูกล็อกไว้", deskNumber),
+							})
+						default:
+							validationErrors = append(validationErrors, fiber.Map{
+								"field":   "desk_number",
+								"message": fmt.Sprintf("โต๊ะหมายเลข %d ถูกล็อกไว้สำหรับนักศึกษาคนเดิมที่ยังตรวจไม่ครบ", deskNumber),
 							})
 						}
 					} else if deskStatus.GradingStatus == "waiting" || deskStatus.GradingStatus == "in_progress" {
@@ -1819,21 +1877,40 @@ func validateQueueBookingCompatibility(session *models.QueueSession, studentCode
 							"message": "โต๊ะนี้มีการจองตรวจงานอยู่แล้ว",
 						})
 					} else if deskStatus.GradingStatus == "completed" {
-						if assignment != nil && len(subItems) > 0 {
-							deskFullyGraded, err := isQueueDeskFullyGraded(session.ID, desk.ID, assignment.ID, subItems)
+						completedBooking, err := loadLatestCompletedGradingBookingForDesk(session.ID, desk.ID)
+						if err != nil {
+							return nil, nil, nil, nil, nil, err
+						}
+
+						lockedToCurrentStudent := student != nil && completedBooking != nil && completedBooking.StudentID == student.ID
+						deskFullyGraded := assignment == nil || len(subItems) == 0
+						if completedBooking != nil && assignment != nil {
+							deskFullyGraded, err = isStudentFullyGradedForQueueAssignment(assignment.ID, completedBooking.StudentID, subItems)
 							if err != nil {
 								return nil, nil, nil, nil, nil, err
 							}
-							if deskFullyGraded {
-								validationErrors = append(validationErrors, fiber.Map{
-									"field":   "desk_number",
-									"message": "โต๊ะนี้ได้รับการตรวจครบทุกข้อแล้ว",
-								})
-							}
-						} else {
+						}
+
+						switch {
+						case completedBooking == nil:
 							validationErrors = append(validationErrors, fiber.Map{
 								"field":   "desk_number",
-								"message": "โต๊ะนี้ได้รับการตรวจแล้ว",
+								"message": "โต๊ะนี้ถูกล็อกหลังการตรวจสำเร็จแล้ว",
+							})
+						case lockedToCurrentStudent && !deskFullyGraded:
+							warnings = append(warnings, fiber.Map{
+								"field":   "desk_number",
+								"message": "โต๊ะนี้ถูกล็อกไว้สำหรับคุณจนกว่าจะตรวจครบทุกข้อ",
+							})
+						case deskFullyGraded:
+							validationErrors = append(validationErrors, fiber.Map{
+								"field":   "desk_number",
+								"message": "โต๊ะนี้ได้รับการตรวจครบทุกข้อแล้วและถูกล็อกไว้",
+							})
+						default:
+							validationErrors = append(validationErrors, fiber.Map{
+								"field":   "desk_number",
+								"message": "โต๊ะนี้ถูกล็อกไว้สำหรับนักศึกษาคนเดิมที่ยังตรวจไม่ครบ",
 							})
 						}
 					}
@@ -2454,9 +2531,22 @@ func GetQueueDeskStatusesPublicHandler(c fiber.Ctx) error {
 		return queueLegacyError(c, 500, err.Error())
 	}
 
+	var completedGradingBookings []models.QueueBooking
+	if err := config.DB.Where("queue_session_id = ? AND booking_type = ? AND status = ? AND desk_id <> ''", sessionID, "grading", "completed").
+		Order("completed_at DESC NULLS LAST, updated_at DESC, id DESC").
+		Find(&completedGradingBookings).Error; err != nil {
+		return queueLegacyError(c, 500, err.Error())
+	}
+
 	studentIDs := make([]uint, 0)
 	studentSet := map[uint]struct{}{}
 	for _, booking := range activeBookings {
+		if _, ok := studentSet[booking.StudentID]; !ok {
+			studentSet[booking.StudentID] = struct{}{}
+			studentIDs = append(studentIDs, booking.StudentID)
+		}
+	}
+	for _, booking := range completedGradingBookings {
 		if _, ok := studentSet[booking.StudentID]; !ok {
 			studentSet[booking.StudentID] = struct{}{}
 			studentIDs = append(studentIDs, booking.StudentID)
@@ -2486,6 +2576,16 @@ func GetQueueDeskStatusesPublicHandler(c fiber.Ctx) error {
 		workerSet[*booking.AssignedWorkerID] = struct{}{}
 		workerIDs = append(workerIDs, *booking.AssignedWorkerID)
 	}
+	for _, booking := range completedGradingBookings {
+		if booking.AssignedWorkerID == nil {
+			continue
+		}
+		if _, ok := workerSet[*booking.AssignedWorkerID]; ok {
+			continue
+		}
+		workerSet[*booking.AssignedWorkerID] = struct{}{}
+		workerIDs = append(workerIDs, *booking.AssignedWorkerID)
+	}
 
 	workerMap := map[uint]models.User{}
 	if len(workerIDs) > 0 {
@@ -2501,6 +2601,7 @@ func GetQueueDeskStatusesPublicHandler(c fiber.Ctx) error {
 	selectedDeskBookings := map[string]models.QueueBooking{}
 	helpDeskBookings := map[string]models.QueueBooking{}
 	gradingDeskBookings := map[string]models.QueueBooking{}
+	completedDeskBookings := map[string]models.QueueBooking{}
 	for _, booking := range activeBookings {
 		if current, exists := selectedDeskBookings[booking.DeskID]; !exists || shouldReplaceDeskBooking(current, booking) {
 			selectedDeskBookings[booking.DeskID] = booking
@@ -2515,6 +2616,11 @@ func GetQueueDeskStatusesPublicHandler(c fiber.Ctx) error {
 			if current, exists := gradingDeskBookings[booking.DeskID]; !exists || shouldReplaceDeskBooking(current, booking) {
 				gradingDeskBookings[booking.DeskID] = booking
 			}
+		}
+	}
+	for _, booking := range completedGradingBookings {
+		if _, exists := completedDeskBookings[booking.DeskID]; !exists {
+			completedDeskBookings[booking.DeskID] = booking
 		}
 	}
 
@@ -2540,19 +2646,34 @@ func GetQueueDeskStatusesPublicHandler(c fiber.Ctx) error {
 		}
 		bookingMap[deskID] = entry
 	}
+	for deskID, booking := range completedDeskBookings {
+		if _, exists := bookingMap[deskID]; exists {
+			continue
+		}
+		student := studentMap[booking.StudentID]
+		entry := fiber.Map{
+			"id":           booking.ID,
+			"queue_number": booking.QueueNumber,
+			"booking_type": booking.BookingType,
+			"status":       booking.Status,
+			"student_name": student.FullName,
+			"student_code": student.StudentID,
+		}
+		if booking.AssignedWorkerID != nil {
+			if worker, ok := workerMap[*booking.AssignedWorkerID]; ok {
+				entry["assigned_worker"] = fiber.Map{
+					"id":        worker.ID,
+					"full_name": worker.FullName,
+					"avatar":    worker.Avatar,
+				}
+			}
+		}
+		bookingMap[deskID] = entry
+	}
 
 	statusMap := map[string]models.QueueDeskStatus{}
 	for _, deskStatus := range deskStatuses {
 		statusMap[deskStatus.DeskID] = deskStatus
-	}
-
-	var assignment *models.Assignment
-	var subItems []models.AssignmentSubItem
-	if session.LinkedAssignmentID != nil {
-		if loadedAssignment, loadedSubItems, loadErr := loadQueueAssignmentWithSubItems(*session.LinkedAssignmentID); loadErr == nil && loadedAssignment != nil {
-			assignment = loadedAssignment
-			subItems = loadedSubItems
-		}
 	}
 
 	desksWithStatus := make([]fiber.Map, 0, len(desks))
@@ -2572,12 +2693,10 @@ func GetQueueDeskStatusesPublicHandler(c fiber.Ctx) error {
 				"help_booking_id":    deskStatus.HelpBookingID,
 				"updated_at":         deskStatus.UpdatedAt,
 			}
-			if deskStatus.GradingStatus == "completed" && assignment != nil && len(subItems) > 0 {
-				deskFullyGraded, err := isQueueDeskFullyGraded(session.ID, desk.ID, assignment.ID, subItems)
-				if err != nil {
-					return queueLegacyError(c, 500, err.Error())
-				}
-				if !deskFullyGraded {
+			if deskStatus.GradingStatus == "completed" {
+				if completedBooking, ok := completedDeskBookings[desk.ID]; ok {
+					status["grading_booking_id"] = completedBooking.ID
+				} else {
 					status["grading_status"] = "not_started"
 					status["grading_booking_id"] = nil
 				}

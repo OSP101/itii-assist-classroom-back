@@ -1050,15 +1050,7 @@ func CompleteBookingWithScores(bookingID uint, workerID uint, score *float64, sc
 						}
 					}
 
-					var gradedSubItemIDs []uint
-					if err := tx.Model(&models.Score{}).
-						Where("assignment_id = ? AND student_id = ? AND sub_item_id IS NOT NULL AND status = ?", *session.LinkedAssignmentID, b.StudentID, "graded").
-						Pluck("sub_item_id", &gradedSubItemIDs).Error; err != nil {
-						return err
-					}
-					if len(gradedSubItemIDs) == len(subItems) {
-						deskStatusAfterComplete = "completed"
-					}
+					deskStatusAfterComplete = "completed"
 				} else {
 					if score == nil {
 						return fmt.Errorf("score is required")
@@ -1120,7 +1112,11 @@ func CompleteBookingWithScores(bookingID uint, workerID uint, score *float64, sc
 		}
 
 		if b.BookingType == "grading" {
-			if err := updateDeskStatus(tx, b.QueueSessionID, b.DeskID, b.BookingType, deskStatusAfterComplete, 0); err != nil {
+			gradingBookingRef := uint(0)
+			if deskStatusAfterComplete == "completed" {
+				gradingBookingRef = b.ID
+			}
+			if err := updateDeskStatus(tx, b.QueueSessionID, b.DeskID, b.BookingType, deskStatusAfterComplete, gradingBookingRef); err != nil {
 				return err
 			}
 		} else if err := syncHelpDeskStatus(tx, b.QueueSessionID, b.DeskID); err != nil {
