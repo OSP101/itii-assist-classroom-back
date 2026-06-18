@@ -33,6 +33,8 @@ func SetupSystemSettingsRoutes(app *fiber.App) {
 
 	settings.Get("/maintenance", handlers.GetMaintenanceModeHandler)
 	settings.Put("/maintenance", middlewares.RequirePrivilegedStepUp("system_settings.maintenance.update"), handlers.UpdateMaintenanceModeHandler)
+	settings.Get("/programs", handlers.GetStudentProgramsHandler)
+	settings.Put("/programs", handlers.UpdateStudentProgramsHandler)
 
 	settings.Get("/health", handlers.GetServiceHealthHandler)
 }

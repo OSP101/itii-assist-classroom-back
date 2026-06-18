@@ -54,6 +54,10 @@ type maintenanceModePayload struct {
 	WhitelistAdminUsers []uint     `json:"whitelist_admin_users"`
 }
 
+type studentProgramsPayload struct {
+	Programs []repositories.StudentProgramConfig `json:"programs"`
+}
+
 type runBackupNowPayload struct {
 	Reason string `json:"reason"`
 }
@@ -495,6 +499,38 @@ func UpdateMaintenanceModeHandler(c fiber.Ctx) error {
 	})
 
 	return c.JSON(fiber.Map{"success": true, "data": nextCfg})
+}
+
+func GetStudentProgramsHandler(c fiber.Ctx) error {
+	programs, err := repositories.GetStudentPrograms()
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ไม่สามารถดึงข้อมูลหลักสูตรได้"})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "data": programs})
+}
+
+func UpdateStudentProgramsHandler(c fiber.Ctx) error {
+	actorID, ok := middlewares.GetUserID(c)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "ไม่พบผู้ใช้ใน session"})
+	}
+
+	var payload studentProgramsPayload
+	if err := c.Bind().JSON(&payload); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
+	}
+
+	programs, err := repositories.SetStudentPrograms(payload.Programs)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
+	}
+
+	logPrivilegedAdminAction(c, actorID, "update_student_programs", "warn", "system_settings", "student_programs", fiber.Map{
+		"program_count": len(programs),
+	})
+
+	return c.JSON(fiber.Map{"success": true, "data": programs})
 }
 
 // GetPublicMaintenanceStatusHandler returns minimal maintenance status — no auth required.

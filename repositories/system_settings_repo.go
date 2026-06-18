@@ -16,6 +16,7 @@ import (
 
 const (
 	maintenanceModeConfigKey = "system.maintenance_mode"
+	studentProgramsConfigKey = "student.programs"
 	featureFlagConfigPrefix  = "feature_flag."
 	announcementContentText  = "text"
 	announcementContentImage = "image"
@@ -42,6 +43,12 @@ type MaintenanceModeConfig struct {
 	WhitelistAdminUsers []uint     `json:"whitelist_admin_users"`
 	UpdatedBy           *uint      `json:"updated_by,omitempty"`
 	UpdatedAt           time.Time  `json:"updated_at"`
+}
+
+type StudentProgramConfig struct {
+	ShortName         string `json:"short_name"`
+	FullName          string `json:"full_name"`
+	OriginalShortName string `json:"original_short_name,omitempty"`
 }
 
 type AnnouncementInput struct {
@@ -370,6 +377,110 @@ func SetMaintenanceModeConfig(next MaintenanceModeConfig) (MaintenanceModeConfig
 		return MaintenanceModeConfig{}, err
 	}
 	invalidateCachedConfigValue(maintenanceModeConfigKey)
+	return normalized, nil
+}
+
+func defaultStudentPrograms() []StudentProgramConfig {
+	return []StudentProgramConfig{
+		{ShortName: "SC-IT", FullName: "SC-IT"},
+		{ShortName: "SC-CS", FullName: "SC-CS"},
+		{ShortName: "CP-Cy", FullName: "CP-Cy"},
+		{ShortName: "CP-AI", FullName: "CP-AI"},
+		{ShortName: "SC-GIS", FullName: "SC-GIS"},
+	}
+}
+
+func normalizeStudentPrograms(programs []StudentProgramConfig) ([]StudentProgramConfig, error) {
+	normalized := make([]StudentProgramConfig, 0, len(programs))
+	seenShortNames := make(map[string]struct{}, len(programs))
+
+	for _, program := range programs {
+		shortName := strings.TrimSpace(program.ShortName)
+		fullName := strings.TrimSpace(program.FullName)
+
+		if shortName == "" || fullName == "" {
+			return nil, errors.New("short_name and full_name are required")
+		}
+
+		key := strings.ToLower(shortName)
+		if _, exists := seenShortNames[key]; exists {
+			return nil, errors.New("duplicate short_name is not allowed")
+		}
+		seenShortNames[key] = struct{}{}
+
+		normalized = append(normalized, StudentProgramConfig{
+			ShortName:         shortName,
+			FullName:          fullName,
+			OriginalShortName: strings.TrimSpace(program.OriginalShortName),
+		})
+	}
+
+	if len(normalized) == 0 {
+		return nil, errors.New("at least one program is required")
+	}
+
+	return normalized, nil
+}
+
+func GetStudentPrograms() ([]StudentProgramConfig, error) {
+	stored, err := GetAppConfigValue(studentProgramsConfigKey)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return defaultStudentPrograms(), nil
+		}
+		return nil, err
+	}
+
+	var programs []StudentProgramConfig
+	if unmarshalErr := json.Unmarshal([]byte(stored), &programs); unmarshalErr != nil {
+		return nil, unmarshalErr
+	}
+
+	normalized, normalizeErr := normalizeStudentPrograms(programs)
+	if normalizeErr != nil {
+		return nil, normalizeErr
+	}
+
+	return normalized, nil
+}
+
+func SetStudentPrograms(programs []StudentProgramConfig) ([]StudentProgramConfig, error) {
+	normalized, err := normalizeStudentPrograms(programs)
+	if err != nil {
+		return nil, err
+	}
+
+	renamedShortNames := make(map[string]string)
+	for _, program := range normalized {
+		originalShortName := strings.TrimSpace(program.OriginalShortName)
+		if originalShortName == "" || strings.EqualFold(originalShortName, program.ShortName) {
+			continue
+		}
+		renamedShortNames[originalShortName] = program.ShortName
+	}
+
+	raw, marshalErr := json.Marshal(normalized)
+	if marshalErr != nil {
+		return nil, marshalErr
+	}
+
+	if err := SetAppConfigValue(studentProgramsConfigKey, string(raw)); err != nil {
+		return nil, err
+	}
+	invalidateCachedConfigValue(studentProgramsConfigKey)
+
+	for oldShortName, newShortName := range renamedShortNames {
+		if execErr := config.DB.Exec(
+			`UPDATE students
+			 SET extra = jsonb_set(COALESCE(extra, '{}'::jsonb), '{program}', to_jsonb(?::text), true)
+			 WHERE extra->>'program' = ?`,
+			newShortName,
+			oldShortName,
+		).Error; execErr != nil {
+			return nil, execErr
+		}
+	}
+
 	return normalized, nil
 }
 
