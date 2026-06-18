@@ -399,7 +399,16 @@ func (h *QueueHandler) CloseQueueSession(c fiber.Ctx) error {
 		RequestID:   reqID,
 		IPAddress:   ip,
 	})
-	return c.JSON(fiber.Map{"success": true, "message": "Session closed"})
+	updatedSession, err := repositories.GetQueueSessionByID(sessionID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Session closed but failed to reload session"})
+	}
+	realtime.EmitToQueue(updatedSession.ID, "session-status-changed", fiber.Map{
+		"status":    updatedSession.Status,
+		"session":   updatedSession,
+		"timestamp": time.Now().UnixMilli(),
+	})
+	return c.JSON(fiber.Map{"success": true, "message": "Session closed", "data": updatedSession})
 }
 
 // POST /api/courses/:courseId/queue/sessions/:sessionId/verify-pin
