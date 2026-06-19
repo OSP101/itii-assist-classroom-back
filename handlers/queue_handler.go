@@ -1660,6 +1660,30 @@ func isStudentFullyGradedForQueueAssignment(assignmentID uint, studentID uint, s
 	return true, nil
 }
 
+func getStudentGradingRebookBlockReason(session *models.QueueSession, student *models.Student) (string, error) {
+	if session == nil || student == nil || session.LinkedAssignmentID == nil {
+		return "", nil
+	}
+
+	assignment, subItems, err := loadQueueAssignmentWithSubItems(*session.LinkedAssignmentID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+
+	fullyGraded, err := isStudentFullyGradedForQueueAssignment(assignment.ID, student.ID, subItems)
+	if err != nil {
+		return "", err
+	}
+	if !fullyGraded {
+		return "", nil
+	}
+
+	return "คุณได้รับการตรวจงานครบแล้ว ไม่สามารถจองคิวตรวจงานได้อีก", nil
+}
+
 func validateQueueBookingCompatibility(session *models.QueueSession, studentCode string, deskNumber int, bookingType string, mode queueBookingValidationMode) (*models.Student, *models.Desk, *models.QueueBooking, []fiber.Map, []fiber.Map, error) {
 	var validationErrors []fiber.Map
 	var warnings []fiber.Map
@@ -2170,6 +2194,15 @@ func ValidateQueueBookingInfoPublicHandler(c fiber.Ctx) error {
 		return queueLegacyError(c, 500, err.Error())
 	}
 
+	gradingAllowed := true
+	gradingReason := ""
+	if reason, err := getStudentGradingRebookBlockReason(session, student); err != nil {
+		return queueLegacyError(c, 500, err.Error())
+	} else if reason != "" {
+		gradingAllowed = false
+		gradingReason = reason
+	}
+
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data": fiber.Map{
@@ -2183,6 +2216,16 @@ func ValidateQueueBookingInfoPublicHandler(c fiber.Ctx) error {
 			"cutoff_note":             session.CutoffNote,
 			"is_late_booking_preview": queueBookingIsAfterCutoff(session, time.Now()),
 			"late_reason_preview":     queueBookingLateReason(session),
+			"booking_type_availability": fiber.Map{
+				"grading": fiber.Map{
+					"allowed": gradingAllowed,
+					"reason":  gradingReason,
+				},
+				"help": fiber.Map{
+					"allowed": true,
+					"reason":  "",
+				},
+			},
 		},
 	})
 }
