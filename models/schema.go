@@ -423,6 +423,7 @@ type AttendanceSession struct {
 	CourseID             string     `gorm:"type:varchar(21);not null;index" json:"course_id"`
 	CourseSectionID      *uint      `gorm:"index" json:"course_section_id,omitempty"`
 	Title                string     `gorm:"type:varchar(255);default:'Attendance'" json:"title"`
+	AutoRotatePin        bool       `gorm:"type:boolean;default:true" json:"auto_rotate_pin"`
 	PinCode              string     `gorm:"type:varchar(50)" json:"pin_code"`
 	PreviousPinCode      string     `gorm:"type:varchar(50)" json:"previous_pin_code"`
 	SessionType          string     `gorm:"type:varchar(20);default:'lecture'" json:"session_type"` // lecture, lab, online

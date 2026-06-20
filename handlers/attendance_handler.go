@@ -276,6 +276,7 @@ func attendanceSessionDetailResponse(detail *repositories.AttendanceSessionDetai
 		"course_section_id":      detail.CourseSectionID,
 		"course_section_ids":     detail.CourseSectionIDs,
 		"title":                  detail.Title,
+		"auto_rotate_pin":        detail.AutoRotatePin,
 		"pin_code":               detail.PinCode,
 		"pin_issued_at":          detail.PinIssuedAt,
 		"pin_rotates_at":         detail.PinRotatesAt,
@@ -314,6 +315,7 @@ func attendanceSessionPayload(session models.AttendanceSession, sectionIDs []uin
 		"course_section_id":      session.CourseSectionID,
 		"course_section_ids":     uniqueUintValues(sectionIDs),
 		"title":                  session.Title,
+		"auto_rotate_pin":        session.AutoRotatePin,
 		"pin_code":               session.PinCode,
 		"pin_issued_at":          session.PinIssuedAt,
 		"pin_rotates_at":         session.PinRotatesAt,
@@ -482,6 +484,7 @@ func (h *AttendanceHandler) CreateAttendanceSession(c fiber.Ctx) error {
 		CourseSectionIDs     []uint    `json:"course_section_ids"`
 		SectionIDs           []uint    `json:"section_ids"`
 		Title                string    `json:"title"`
+		AutoRotatePin        *bool     `json:"auto_rotate_pin"`
 		PinCode              string    `json:"pin_code"`
 		SessionType          string    `json:"session_type"`
 		CheckLocation        bool      `json:"check_location"`
@@ -539,6 +542,7 @@ func (h *AttendanceHandler) CreateAttendanceSession(c fiber.Ctx) error {
 		CourseID:             input.CourseID,
 		CourseSectionID:      legacySectionID,
 		Title:                title,
+		AutoRotatePin:        input.AutoRotatePin == nil || *input.AutoRotatePin,
 		PinCode:              pin,
 		SessionType:          sessionType,
 		CheckLocation:        input.CheckLocation,
@@ -593,6 +597,7 @@ func UpdateAttendanceSessionHandler(c fiber.Ctx) error {
 
 	var input struct {
 		Title                *string    `json:"title"`
+		AutoRotatePin        *bool      `json:"auto_rotate_pin"`
 		PinCode              *string    `json:"pin_code"`
 		SessionType          *string    `json:"session_type"`
 		CheckLocation        *bool      `json:"check_location"`
@@ -637,14 +642,21 @@ func UpdateAttendanceSessionHandler(c fiber.Ctx) error {
 	if input.Title != nil {
 		session.Title = *input.Title
 	}
+	if input.AutoRotatePin != nil {
+		session.AutoRotatePin = *input.AutoRotatePin
+	}
 	if input.PinCode != nil && strings.TrimSpace(*input.PinCode) != "" {
 		session.PinCode = strings.TrimSpace(*input.PinCode)
 		session.PreviousPinCode = ""
 		session.PinGraceUntil = nil
 		now := time.Now()
 		session.PinIssuedAt = &now
-		rotatesAt := now.Add(time.Duration(observability.AttendancePinRotationMinutes()) * time.Minute)
-		session.PinRotatesAt = &rotatesAt
+		if session.AutoRotatePin && observability.AttendancePinAutoRotateEnabled() {
+			rotatesAt := now.Add(time.Duration(observability.AttendancePinRotationMinutes()) * time.Minute)
+			session.PinRotatesAt = &rotatesAt
+		} else {
+			session.PinRotatesAt = nil
+		}
 	}
 	if input.RegeneratePin {
 		session.PinCode = ""
@@ -982,6 +994,7 @@ func CloseAttendanceSessionHandler(c fiber.Ctx) error {
 func emitAttendancePinUpdated(session models.AttendanceSession) {
 	payload := fiber.Map{
 		"session_id":     session.ID,
+		"auto_rotate_pin": session.AutoRotatePin,
 		"pin_code":       session.PinCode,
 		"pin_issued_at":  session.PinIssuedAt,
 		"pin_rotates_at": session.PinRotatesAt,

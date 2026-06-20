@@ -358,6 +358,7 @@ func MigrateAttendancePinCompatibility() {
 	}
 
 	statements := []string{
+		`ALTER TABLE attendance_sessions ADD COLUMN IF NOT EXISTS auto_rotate_pin boolean NOT NULL DEFAULT true`,
 		`ALTER TABLE attendance_sessions ADD COLUMN IF NOT EXISTS previous_pin_code varchar(50) NOT NULL DEFAULT ''`,
 		`ALTER TABLE attendance_sessions ADD COLUMN IF NOT EXISTS pin_issued_at timestamptz`,
 		`ALTER TABLE attendance_sessions ADD COLUMN IF NOT EXISTS pin_grace_until timestamptz`,

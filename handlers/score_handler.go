@@ -6,6 +6,7 @@ import (
 	"itii-assist/models"
 	"itii-assist/repositories"
 	"itii-assist/services"
+	"itii-assist/utils"
 	"sort"
 	"strconv"
 	"strings"
@@ -356,6 +357,43 @@ func buildScoreMatrixHandlerData(courseID string, sectionID string, assignmentTy
 		}
 	}
 
+	type weeklyStudentGroupInfo struct {
+		GroupID   uint
+		GroupName string
+	}
+	studentWeeklyGroupMap := map[uint]map[int]weeklyStudentGroupInfo{}
+	if assignmentType == "weekly_group" && len(studentIDs) > 0 {
+		var weeklyGroupRows []struct {
+			StudentID  uint   `gorm:"column:student_id"`
+			GroupID    uint   `gorm:"column:group_id"`
+			GroupName  string `gorm:"column:group_name"`
+			WeekNumber *int   `gorm:"column:week_number"`
+		}
+		if err := config.DB.Raw(`
+			SELECT sgm.student_id, sg.id AS group_id, sg.name AS group_name, sg.week_number
+			FROM student_group_members sgm
+			JOIN student_groups sg ON sg.id = sgm.group_id
+			WHERE sg.course_id = ? AND sgm.student_id IN ? AND sg.group_type = 'temporary' AND sg.week_number IS NOT NULL
+			ORDER BY sg.week_number ASC, sg.id ASC
+		`, courseID, studentIDs).Scan(&weeklyGroupRows).Error; err != nil {
+			return nil, err
+		}
+		for _, row := range weeklyGroupRows {
+			if row.WeekNumber == nil {
+				continue
+			}
+			if studentWeeklyGroupMap[row.StudentID] == nil {
+				studentWeeklyGroupMap[row.StudentID] = map[int]weeklyStudentGroupInfo{}
+			}
+			if _, exists := studentWeeklyGroupMap[row.StudentID][*row.WeekNumber]; !exists {
+				studentWeeklyGroupMap[row.StudentID][*row.WeekNumber] = weeklyStudentGroupInfo{
+					GroupID:   row.GroupID,
+					GroupName: row.GroupName,
+				}
+			}
+		}
+	}
+
 	var bonusRows []struct {
 		StudentID uint    `gorm:"column:student_id"`
 		Total     float64 `gorm:"column:total"`
@@ -479,6 +517,17 @@ func buildScoreMatrixHandlerData(courseID string, sectionID string, assignmentTy
 			row["group_id"] = groupInfo.GroupID
 			row["group_name"] = groupInfo.GroupName
 		}
+		if weeklyGroups := studentWeeklyGroupMap[student.ID]; len(weeklyGroups) > 0 {
+			weeklyGroupIDs := fiber.Map{}
+			weeklyGroupNames := fiber.Map{}
+			for weekNumber, info := range weeklyGroups {
+				weekKey := strconv.Itoa(weekNumber)
+				weeklyGroupIDs[weekKey] = info.GroupID
+				weeklyGroupNames[weekKey] = info.GroupName
+			}
+			row["weekly_group_ids"] = weeklyGroupIDs
+			row["weekly_group_names"] = weeklyGroupNames
+		}
 		scoresPayload := row["scores"].(fiber.Map)
 		for _, assignment := range assignments {
 			subItems := subItemsByAssignment[assignment.ID]
@@ -504,6 +553,12 @@ func buildScoreMatrixHandlerData(courseID string, sectionID string, assignmentTy
 						}
 						row["total_score"] = row["total_score"].(float64) + cell.Score
 						row["scored_count"] = row["scored_count"].(int) + 1
+					} else if assignment.AssignmentType == "weekly_group" && assignment.WeekNumber != nil {
+						if weeklyGroups := studentWeeklyGroupMap[student.ID]; weeklyGroups != nil {
+							if info, exists := weeklyGroups[*assignment.WeekNumber]; exists {
+								payload["group_name"] = info.GroupName
+							}
+						}
 					}
 					scoresPayload[cellKey] = payload
 					row["total_max_score"] = row["total_max_score"].(float64) + subItem.MaxScore
@@ -529,6 +584,12 @@ func buildScoreMatrixHandlerData(courseID string, sectionID string, assignmentTy
 					payload["group_name"] = cell.GroupName
 					row["total_score"] = row["total_score"].(float64) + cell.Score
 					row["scored_count"] = row["scored_count"].(int) + 1
+				} else if assignment.AssignmentType == "weekly_group" && assignment.WeekNumber != nil {
+					if weeklyGroups := studentWeeklyGroupMap[student.ID]; weeklyGroups != nil {
+						if info, exists := weeklyGroups[*assignment.WeekNumber]; exists {
+							payload["group_name"] = info.GroupName
+						}
+					}
 				}
 				scoresPayload[cellKey] = payload
 				row["total_max_score"] = row["total_max_score"].(float64) + assignment.MaxScore
@@ -608,7 +669,7 @@ func buildScoreMatrixHandlerData(courseID string, sectionID string, assignmentTy
 		for j, subItem := range subItems {
 			formattedSubItems[j] = fiber.Map{"id": subItem.ID, "name": subItem.Name, "max_score": subItem.MaxScore}
 		}
-		formattedAssignments[i] = fiber.Map{"id": assignment.ID, "title": assignment.Name, "short_title": assignment.Name, "max_score": assignment.MaxScore, "assignment_type": assignment.AssignmentType, "subItems": formattedSubItems}
+		formattedAssignments[i] = fiber.Map{"id": assignment.ID, "title": assignment.Name, "short_title": assignment.Name, "max_score": assignment.MaxScore, "assignment_type": assignment.AssignmentType, "week_number": assignment.WeekNumber, "subItems": formattedSubItems}
 	}
 
 	sectionsPayload := make([]fiber.Map, len(sections))
@@ -1170,7 +1231,20 @@ func (h *ScoreHandler) SubmitScore(c fiber.Ctx) error {
 	}
 
 	var assignment models.Assignment
-	_ = config.DB.Select("id", "course_id", "name").First(&assignment, input.AssignmentID).Error
+	if err := config.DB.Select("id", "course_id", "name", "max_score").First(&assignment, input.AssignmentID).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Assignment not found"})
+	}
+	maxScore := assignment.MaxScore
+	if input.SubItemID != nil {
+		var subItem models.AssignmentSubItem
+		if err := config.DB.Select("id", "max_score").Where("id = ? AND assignment_id = ?", *input.SubItemID, input.AssignmentID).First(&subItem).Error; err != nil {
+			return c.Status(404).JSON(fiber.Map{"success": false, "message": "Sub-item not found"})
+		}
+		maxScore = subItem.MaxScore
+	}
+	if err := utils.ValidateScoreValue(input.Score, maxScore); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
+	}
 
 	userID := c.Locals("user_id").(uint)
 	now := time.Now()
@@ -1219,14 +1293,30 @@ func BulkSubmitScoresHandler(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
 	}
+	if input.AssignmentID == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "assignment_id required"})
+	}
 
 	var assignment models.Assignment
-	_ = config.DB.Select("id", "course_id", "name").First(&assignment, input.AssignmentID).Error
+	if err := config.DB.Select("id", "course_id", "name", "max_score").First(&assignment, input.AssignmentID).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Assignment not found"})
+	}
 
 	userID := c.Locals("user_id").(uint)
 	now := time.Now()
 	var scores []models.Score
 	for _, s := range input.Scores {
+		maxScore := assignment.MaxScore
+		if s.SubItemID != nil {
+			var subItem models.AssignmentSubItem
+			if err := config.DB.Select("id", "max_score").Where("id = ? AND assignment_id = ?", *s.SubItemID, input.AssignmentID).First(&subItem).Error; err != nil {
+				return c.Status(404).JSON(fiber.Map{"success": false, "message": "Sub-item not found"})
+			}
+			maxScore = subItem.MaxScore
+		}
+		if err := utils.ValidateScoreValue(s.Score, maxScore); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
+		}
 		scores = append(scores, models.Score{
 			AssignmentID: input.AssignmentID,
 			StudentID:    s.StudentID,
@@ -1275,8 +1365,8 @@ func SubmitGroupScoreHandler(c fiber.Ctx) error {
 		}
 		maxScore = subItem.MaxScore
 	}
-	if input.Score < 0 || input.Score > maxScore {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": fmt.Sprintf("Score must be between 0 and %.2f", maxScore)})
+	if err := utils.ValidateScoreValue(input.Score, maxScore); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
 
 	var memberRows []struct {

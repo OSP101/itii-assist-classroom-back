@@ -15,7 +15,7 @@ FROM alpine:3.20
 
 WORKDIR /app
 
-RUN apk add --no-cache ca-certificates tzdata docker-cli
+RUN apk add --no-cache ca-certificates tzdata docker-cli postgresql16-client
 
 COPY --from=builder /api /app/api
 COPY --from=builder /seed-admin /app/seed-admin

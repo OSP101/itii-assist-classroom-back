@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
-	ua "github.com/mileusna/useragent"
 	"gorm.io/datatypes"
 )
 
@@ -236,19 +235,11 @@ func (h *AuthHandler) Login(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "สร้าง Token ไม่สำเร็จ"})
 	}
 
-	// Build meta for session tracking
-	meta := sessionMeta{
-		IP:        c.IP(),
-		UserAgent: string(c.Request().Header.UserAgent()),
-		Provider:  "local",
-	}
-	metaJSON, _ := json.Marshal(meta)
-
 	if err := repositories.CreateRefreshToken(&models.RefreshToken{
 		JTI:       jti,
 		UserID:    user.ID,
 		ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
-		Meta:      datatypes.JSON(metaJSON),
+		Meta:      buildSessionMeta(c, "local"),
 	}); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึก Token ไม่สำเร็จ"})
 	}
@@ -317,6 +308,7 @@ func RefreshHandler(c fiber.Ctx) error {
 			UserID:    student.ID,
 			Kind:      "s",
 			ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
+			Meta:      buildSessionMeta(c, "student"),
 		}); err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึก Token ใหม่ไม่สำเร็จ"})
 		}
@@ -348,6 +340,7 @@ func RefreshHandler(c fiber.Ctx) error {
 		UserID:    user.ID,
 		Kind:      "u",
 		ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
+		Meta:      buildSessionMeta(c, "refresh"),
 	}); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึก Token ใหม่ไม่สำเร็จ"})
 	}
@@ -876,6 +869,60 @@ type sessionMeta struct {
 	Provider  string `json:"provider"`
 }
 
+func buildSessionMeta(c fiber.Ctx, provider string) datatypes.JSON {
+	metaJSON, _ := json.Marshal(sessionMeta{
+		IP:        c.IP(),
+		UserAgent: string(c.Request().Header.UserAgent()),
+		Provider:  provider,
+	})
+	return datatypes.JSON(metaJSON)
+}
+
+func loadNearestSessionMetaFallback(userID uint, token models.RefreshToken) sessionMeta {
+	if token.CreatedAt.IsZero() {
+		return sessionMeta{}
+	}
+
+	var previous models.RefreshToken
+	err := config.DB.
+		Where("user_id = ? AND id <> ? AND meta IS NOT NULL AND meta::text <> '' AND created_at >= ? AND created_at <= ?", userID, token.ID, token.CreatedAt.Add(-5*time.Minute), token.CreatedAt).
+		Order("created_at DESC").
+		First(&previous).Error
+	if err != nil || previous.Meta == nil {
+		return sessionMeta{}
+	}
+
+	var meta sessionMeta
+	if err := json.Unmarshal(previous.Meta, &meta); err != nil {
+		return sessionMeta{}
+	}
+	return meta
+}
+
+func parseSessionDisplay(meta sessionMeta) (ip, browser, osName, device, provider string) {
+	ip = strings.TrimSpace(meta.IP)
+	provider = strings.TrimSpace(meta.Provider)
+
+	deviceType, parsedBrowser, parsedOS := utils.ParseUserAgent(strings.TrimSpace(meta.UserAgent))
+	browser = parsedBrowser
+	osName = parsedOS
+
+	switch deviceType {
+	case "mobile":
+		device = "mobile"
+	case "tablet":
+		device = "tablet"
+	case "bot":
+		device = "bot"
+	case "desktop":
+		device = "desktop"
+	default:
+		device = ""
+	}
+
+	return ip, browser, osName, device, provider
+}
+
 func GetSessionsHandler(c fiber.Ctx) error {
 	userID, ok := middlewares.GetUserID(c)
 	if !ok {
@@ -909,35 +956,51 @@ func GetSessionsHandler(c fiber.Ctx) error {
 		if t.Meta != nil {
 			_ = json.Unmarshal(t.Meta, &meta)
 		}
+		isCurrent := currentJTI != "" && t.JTI == currentJTI
 
-		// Parse user agent
-		parsed := ua.Parse(meta.UserAgent)
-		browser := parsed.Name
-		if parsed.Version != "" {
-			browser += " " + parsed.Version
+		if strings.TrimSpace(meta.IP) == "" || strings.TrimSpace(meta.UserAgent) == "" {
+			fallback := loadNearestSessionMetaFallback(userID, t)
+			if strings.TrimSpace(meta.IP) == "" {
+				meta.IP = fallback.IP
+			}
+			if strings.TrimSpace(meta.UserAgent) == "" {
+				meta.UserAgent = fallback.UserAgent
+			}
+			if strings.TrimSpace(meta.Provider) == "" {
+				meta.Provider = fallback.Provider
+			}
 		}
-		device := "Desktop"
-		if parsed.Mobile {
-			device = "Mobile"
-		} else if parsed.Tablet {
-			device = "Tablet"
+		if isCurrent {
+			if strings.TrimSpace(meta.IP) == "" {
+				meta.IP = c.IP()
+			}
+			if strings.TrimSpace(meta.UserAgent) == "" {
+				meta.UserAgent = string(c.Request().Header.UserAgent())
+			}
 		}
-		osName := parsed.OS
-		if parsed.OSVersion != "" {
-			osName += " " + parsed.OSVersion
+
+		ip, browser, osName, device, provider := parseSessionDisplay(meta)
+		if browser == "" {
+			browser = "Unknown browser"
+		}
+		if osName == "" {
+			osName = "Unknown device"
+		}
+		if device == "" {
+			device = "desktop"
 		}
 
 		result = append(result, sessionItem{
 			ID:        t.ID,
 			JTI:       t.JTI,
-			IP:        meta.IP,
+			IP:        ip,
 			Browser:   browser,
 			OS:        osName,
 			Device:    device,
-			Provider:  meta.Provider,
+			Provider:  provider,
 			LoginAt:   t.CreatedAt,
 			ExpiresAt: t.ExpiresAt,
-			IsCurrent: currentJTI != "" && t.JTI == currentJTI,
+			IsCurrent: isCurrent,
 		})
 	}
 

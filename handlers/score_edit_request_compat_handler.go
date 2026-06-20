@@ -8,6 +8,7 @@ import (
 	"itii-assist/models"
 	"itii-assist/repositories"
 	"itii-assist/services"
+	"itii-assist/utils"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -546,8 +547,8 @@ func CreateScoreEditRequestCompatHandler(c fiber.Ctx) error {
 	if context.SubItemMaxScore != nil {
 		maxScore = *context.SubItemMaxScore
 	}
-	if newScore < 0 || newScore > maxScore {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": fmt.Sprintf("Score must be between 0 and %.2f", maxScore)})
+	if err := utils.ValidateScoreValue(newScore, maxScore); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
 	if existing, pendingErr := findPendingScoreEditRequestByScoreID(scoreID); pendingErr == nil && existing != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "รายการคะแนนนี้มีคำร้องแก้ไขที่รออนุมัติอยู่แล้ว"})
@@ -603,8 +604,8 @@ func CreateBatchScoreEditRequestCompatHandler(c fiber.Ctx) error {
 	if contexts[0].SubItemMaxScore != nil {
 		maxScore = *contexts[0].SubItemMaxScore
 	}
-	if newScore < 0 || newScore > maxScore {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": fmt.Sprintf("Score must be between 0 and %.2f", maxScore)})
+	if err := utils.ValidateScoreValue(newScore, maxScore); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
 
 	// Check for duplicate pending requests — skip those, continue with the rest

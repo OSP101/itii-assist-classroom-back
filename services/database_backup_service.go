@@ -646,6 +646,10 @@ func runPgDump(ctx context.Context, dbCfg dbConnConfig, outputPath string) error
 	if pgDumpBin == "" {
 		pgDumpBin = "pg_dump"
 	}
+	resolvedBin, err := resolveCommandBinary(pgDumpBin)
+	if err != nil {
+		return fmt.Errorf("pg_dump binary unavailable: %w", err)
+	}
 
 	args := []string{
 		"-h", dbCfg.Host,
@@ -656,7 +660,7 @@ func runPgDump(ctx context.Context, dbCfg dbConnConfig, outputPath string) error
 		"-f", outputPath,
 	}
 
-	cmd := exec.CommandContext(ctx, pgDumpBin, args...)
+	cmd := exec.CommandContext(ctx, resolvedBin, args...)
 	cmd.Env = append(os.Environ(), "PGPASSWORD="+dbCfg.Password)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -669,6 +673,10 @@ func runPgRestore(ctx context.Context, dbCfg dbConnConfig, dumpPath string) erro
 	pgRestoreBin := strings.TrimSpace(os.Getenv("BACKUP_PG_RESTORE_BIN"))
 	if pgRestoreBin == "" {
 		pgRestoreBin = "pg_restore"
+	}
+	resolvedBin, err := resolveCommandBinary(pgRestoreBin)
+	if err != nil {
+		return fmt.Errorf("pg_restore binary unavailable: %w", err)
 	}
 
 	args := []string{
@@ -683,7 +691,7 @@ func runPgRestore(ctx context.Context, dbCfg dbConnConfig, dumpPath string) erro
 		dumpPath,
 	}
 
-	cmd := exec.CommandContext(ctx, pgRestoreBin, args...)
+	cmd := exec.CommandContext(ctx, resolvedBin, args...)
 	cmd.Env = append(os.Environ(), "PGPASSWORD="+dbCfg.Password)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -728,6 +736,27 @@ func onlyTransactionTimeoutErrors(output string) bool {
 		return false
 	}
 	return hasTransactionTimeoutError
+}
+
+func resolveCommandBinary(configured string) (string, error) {
+	configured = strings.TrimSpace(configured)
+	if configured == "" {
+		return "", errors.New("empty command")
+	}
+
+	if _, err := exec.LookPath(configured); err == nil {
+		return configured, nil
+	}
+
+	base := filepath.Base(configured)
+	if base != configured && base != "." && base != string(filepath.Separator) {
+		if _, err := exec.LookPath(base); err == nil {
+			log.Printf("⚠️  Backup command %q not found, falling back to %q from PATH", configured, base)
+			return base, nil
+		}
+	}
+
+	return "", fmt.Errorf("%q not found in PATH", configured)
 }
 
 func envInt(name string, defaultValue int) int {

@@ -75,6 +75,7 @@ type AttendanceSessionInfo struct {
 	Title                string                  `json:"title"`
 	SessionType          string                  `json:"session_type"`
 	CheckLocation        bool                    `json:"check_location"`
+	AutoRotatePin        bool                    `json:"auto_rotate_pin"`
 	PinCode              string                  `json:"pin_code"`
 	PinIssuedAt          *time.Time              `json:"pin_issued_at,omitempty"`
 	PinRotatesAt         *time.Time              `json:"pin_rotates_at,omitempty"`
@@ -153,6 +154,20 @@ func nextDistinctAttendancePIN(current string) string {
 	return pin
 }
 
+func generateUniqueAttendancePIN(tx *gorm.DB, sessionID uint, current string) string {
+	for attempt := 0; attempt < 32; attempt++ {
+		pin := nextDistinctAttendancePIN(current)
+		var matches int64
+		err := tx.Model(&models.AttendanceSession{}).
+			Where("id <> ? AND status = 'active' AND (pin_code = ? OR previous_pin_code = ?)", sessionID, pin, pin).
+			Count(&matches).Error
+		if err == nil && matches == 0 {
+			return pin
+		}
+	}
+	return nextDistinctAttendancePIN(current)
+}
+
 func applyAttendancePinState(tx *gorm.DB, session *models.AttendanceSession, now time.Time) (AttendancePinStateChange, error) {
 	change := AttendancePinStateChange{
 		SessionID: session.ID,
@@ -184,6 +199,7 @@ func applyAttendancePinState(tx *gorm.DB, session *models.AttendanceSession, now
 	} else {
 		rotationWindow := attendancePinRotationWindow()
 		graceWindow := attendancePinGraceWindow()
+		autoRotate := session.AutoRotatePin && observability.AttendancePinAutoRotateEnabled()
 
 		if session.PreviousPinCode != "" && (session.PinGraceUntil == nil || !session.PinGraceUntil.After(now)) {
 			updates["previous_pin_code"] = ""
@@ -193,15 +209,21 @@ func applyAttendancePinState(tx *gorm.DB, session *models.AttendanceSession, now
 		}
 
 		needsIssue := strings.TrimSpace(session.PinCode) == ""
-		needsRotate := !needsIssue && observability.AttendancePinAutoRotateEnabled() && (session.PinRotatesAt == nil || !session.PinRotatesAt.After(now))
+		needsRotate := autoRotate && !needsIssue && (session.PinRotatesAt == nil || !session.PinRotatesAt.After(now))
 
 		if needsIssue || needsRotate {
-			nextPin := nextDistinctAttendancePIN(session.PinCode)
+			nextPin := generateUniqueAttendancePIN(tx, session.ID, session.PinCode)
 			issuedAt := now
-			rotatesAt := now.Add(rotationWindow)
 			updates["pin_code"] = nextPin
 			updates["pin_issued_at"] = issuedAt
-			updates["pin_rotates_at"] = rotatesAt
+			if autoRotate {
+				rotatesAt := now.Add(rotationWindow)
+				updates["pin_rotates_at"] = rotatesAt
+				session.PinRotatesAt = &rotatesAt
+			} else {
+				updates["pin_rotates_at"] = nil
+				session.PinRotatesAt = nil
+			}
 
 			if needsRotate && session.PinCode != "" {
 				graceUntil := now.Add(graceWindow)
@@ -220,14 +242,21 @@ func applyAttendancePinState(tx *gorm.DB, session *models.AttendanceSession, now
 
 			session.PinCode = nextPin
 			session.PinIssuedAt = &issuedAt
-			session.PinRotatesAt = &rotatesAt
 		} else {
+			if !autoRotate && (session.PreviousPinCode != "" || session.PinGraceUntil != nil || session.PinRotatesAt != nil) {
+				updates["previous_pin_code"] = ""
+				updates["pin_grace_until"] = nil
+				updates["pin_rotates_at"] = nil
+				session.PreviousPinCode = ""
+				session.PinGraceUntil = nil
+				session.PinRotatesAt = nil
+			}
 			if session.PinIssuedAt == nil {
 				issuedAt := now
 				updates["pin_issued_at"] = issuedAt
 				session.PinIssuedAt = &issuedAt
 			}
-			if session.PinRotatesAt == nil {
+			if autoRotate && session.PinRotatesAt == nil {
 				anchor := now
 				if session.PinIssuedAt != nil {
 					anchor = *session.PinIssuedAt
@@ -866,6 +895,7 @@ func GetSessionInfo(sessionID uint) (*AttendanceSessionInfo, error) {
 		Title:                session.Title,
 		SessionType:          session.SessionType,
 		CheckLocation:        session.CheckLocation,
+		AutoRotatePin:        session.AutoRotatePin,
 		PinCode:              session.PinCode,
 		PinIssuedAt:          session.PinIssuedAt,
 		PinRotatesAt:         session.PinRotatesAt,

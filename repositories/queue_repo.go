@@ -1015,8 +1015,8 @@ func CompleteBookingWithScores(bookingID uint, workerID uint, score *float64, sc
 						if !ok {
 							return fmt.Errorf("invalid sub_item_id %d", item.SubItemID)
 						}
-						if item.Score < 0 || item.Score > maxScore {
-							return fmt.Errorf("score for sub_item_id %d must be between 0 and %.2f", item.SubItemID, maxScore)
+						if err := utils.ValidateScoreValue(item.Score, maxScore); err != nil {
+							return fmt.Errorf("score for sub_item_id %d: %w", item.SubItemID, err)
 						}
 						if _, duplicated := seenSubItemIDs[item.SubItemID]; duplicated {
 							return fmt.Errorf("duplicate sub_item_id %d", item.SubItemID)
@@ -1054,6 +1054,13 @@ func CompleteBookingWithScores(bookingID uint, workerID uint, score *float64, sc
 				} else {
 					if score == nil {
 						return fmt.Errorf("score is required")
+					}
+					var assignment models.Assignment
+					if err := tx.Select("id", "max_score").First(&assignment, *session.LinkedAssignmentID).Error; err != nil {
+						return err
+					}
+					if err := utils.ValidateScoreValue(*score, assignment.MaxScore); err != nil {
+						return err
 					}
 
 					var existingScore models.Score

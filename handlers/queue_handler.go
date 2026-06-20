@@ -10,6 +10,7 @@ import (
 	"itii-assist/realtime"
 	"itii-assist/repositories"
 	"itii-assist/services"
+	"itii-assist/utils"
 	"strconv"
 	"strings"
 	"time"
@@ -1148,10 +1149,18 @@ func CompleteQueueBookingCompatHandler(c fiber.Ctx) error {
 	workerID := c.Locals("user_id").(uint)
 	subItemScores := make([]repositories.QueueBookingSubItemScoreInput, 0, len(input.SubItemScores))
 	for _, item := range input.SubItemScores {
+		if err := utils.ValidateScoreValue(item.Score, -1); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
+		}
 		subItemScores = append(subItemScores, repositories.QueueBookingSubItemScoreInput{
 			SubItemID: item.SubItemID,
 			Score:     item.Score,
 		})
+	}
+	if input.Score != nil {
+		if err := utils.ValidateScoreValue(*input.Score, -1); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
+		}
 	}
 
 	booking, err := repositories.CompleteBookingWithScores(uint(bookingID), workerID, input.Score, input.ScoreComment, input.WorkerNote, subItemScores)
