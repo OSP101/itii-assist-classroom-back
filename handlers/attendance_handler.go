@@ -278,6 +278,7 @@ func attendanceSessionDetailResponse(detail *repositories.AttendanceSessionDetai
 		"course_section_ids":     detail.CourseSectionIDs,
 		"title":                  detail.Title,
 		"auto_rotate_pin":        detail.AutoRotatePin,
+		"pin_mode":               detail.PinMode,
 		"pin_code":               detail.PinCode,
 		"pin_issued_at":          detail.PinIssuedAt,
 		"pin_rotates_at":         detail.PinRotatesAt,
@@ -317,6 +318,7 @@ func attendanceSessionPayload(session models.AttendanceSession, sectionIDs []uin
 		"course_section_ids":     uniqueUintValues(sectionIDs),
 		"title":                  session.Title,
 		"auto_rotate_pin":        session.AutoRotatePin,
+		"pin_mode":               session.PinMode,
 		"pin_code":               session.PinCode,
 		"pin_issued_at":          session.PinIssuedAt,
 		"pin_rotates_at":         session.PinRotatesAt,
@@ -544,6 +546,7 @@ func (h *AttendanceHandler) CreateAttendanceSession(c fiber.Ctx) error {
 		CourseSectionID:      legacySectionID,
 		Title:                title,
 		AutoRotatePin:        input.AutoRotatePin == nil || *input.AutoRotatePin,
+		PinMode:              repositories.ConfiguredAttendancePinMode(input.AutoRotatePin == nil || *input.AutoRotatePin),
 		PinCode:              pin,
 		SessionType:          sessionType,
 		CheckLocation:        input.CheckLocation,
@@ -645,6 +648,7 @@ func UpdateAttendanceSessionHandler(c fiber.Ctx) error {
 	}
 	if input.AutoRotatePin != nil {
 		session.AutoRotatePin = *input.AutoRotatePin
+		session.PinMode = repositories.ConfiguredAttendancePinMode(*input.AutoRotatePin)
 	}
 	if input.PinCode != nil && strings.TrimSpace(*input.PinCode) != "" {
 		session.PinCode = strings.TrimSpace(*input.PinCode)
@@ -1132,12 +1136,13 @@ func firstNonEmpty(values ...string) string {
 
 func emitAttendancePinUpdated(session models.AttendanceSession) {
 	payload := fiber.Map{
-		"session_id":     session.ID,
+		"session_id":      session.ID,
 		"auto_rotate_pin": session.AutoRotatePin,
-		"pin_code":       session.PinCode,
-		"pin_issued_at":  session.PinIssuedAt,
-		"pin_rotates_at": session.PinRotatesAt,
-		"status":         session.Status,
+		"pin_mode":        session.PinMode,
+		"pin_code":        session.PinCode,
+		"pin_issued_at":   session.PinIssuedAt,
+		"pin_rotates_at":  session.PinRotatesAt,
+		"status":          session.Status,
 	}
 	realtime.EmitToInstructor(session.ID, "attendance-pin-updated", payload)
 	realtime.EmitToAttendanceDisplay(session.ID, "attendance-pin-updated", payload)

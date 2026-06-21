@@ -78,6 +78,7 @@ type AttendanceSessionInfo struct {
 	SessionType          string                  `json:"session_type"`
 	CheckLocation        bool                    `json:"check_location"`
 	AutoRotatePin        bool                    `json:"auto_rotate_pin"`
+	PinMode              string                  `json:"pin_mode"`
 	PinCode              string                  `json:"pin_code"`
 	PinIssuedAt          *time.Time              `json:"pin_issued_at,omitempty"`
 	PinRotatesAt         *time.Time              `json:"pin_rotates_at,omitempty"`
@@ -154,6 +155,13 @@ func nextDistinctAttendancePIN(current string) string {
 		pin = GeneratePIN()
 	}
 	return pin
+}
+
+func ConfiguredAttendancePinMode(autoRotate bool) string {
+	if autoRotate {
+		return "rotating"
+	}
+	return "static"
 }
 
 func generateUniqueAttendancePIN(tx *gorm.DB, sessionID uint, current string) string {
@@ -646,6 +654,7 @@ func GetAttendanceSession(id uint) (*AttendanceSessionDetail, error) {
 
 func CreateAttendanceSession(session *models.AttendanceSession, sectionIDs []uint) error {
 	db := config.DB
+	session.PinMode = ConfiguredAttendancePinMode(session.AutoRotatePin)
 	session.PinCode = ""
 	session.PreviousPinCode = ""
 	session.PinIssuedAt = nil
@@ -937,6 +946,7 @@ func GetSessionInfo(sessionID uint) (*AttendanceSessionInfo, error) {
 		SessionType:          session.SessionType,
 		CheckLocation:        session.CheckLocation,
 		AutoRotatePin:        session.AutoRotatePin,
+		PinMode:              session.PinMode,
 		PinCode:              session.PinCode,
 		PinIssuedAt:          session.PinIssuedAt,
 		PinRotatesAt:         session.PinRotatesAt,

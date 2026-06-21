@@ -213,12 +213,18 @@ func startAttendancePinLifecycleWorker() {
 
 			for _, change := range changes {
 				if change.Rotated || change.Released || change.StatusChanged {
+					pinMode := "static"
+					if change.PinRotatesAt != nil {
+						pinMode = "rotating"
+					}
 					payload := fiber.Map{
-						"session_id":     change.SessionID,
-						"pin_code":       change.PinCode,
-						"pin_issued_at":  change.PinIssuedAt,
-						"pin_rotates_at": change.PinRotatesAt,
-						"status":         change.Status,
+						"session_id":      change.SessionID,
+						"auto_rotate_pin": change.PinRotatesAt != nil,
+						"pin_mode":        pinMode,
+						"pin_code":        change.PinCode,
+						"pin_issued_at":   change.PinIssuedAt,
+						"pin_rotates_at":  change.PinRotatesAt,
+						"status":          change.Status,
 					}
 					realtime.EmitToInstructor(change.SessionID, "attendance-pin-updated", payload)
 					realtime.EmitToAttendanceDisplay(change.SessionID, "attendance-pin-updated", payload)
