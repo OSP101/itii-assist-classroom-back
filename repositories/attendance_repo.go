@@ -1,7 +1,9 @@
 package repositories
 
 import (
+	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"itii-assist/config"
 	"itii-assist/models"
@@ -625,7 +627,7 @@ func GetAttendanceSession(id uint) (*AttendanceSessionDetail, error) {
 		stats.NotCheckedIn = stats.TotalStudents - stats.CheckedIn
 	}
 
-	return &AttendanceSessionDetail{
+	detail := &AttendanceSessionDetail{
 		AttendanceSession: *session,
 		CourseSectionIDs:  sectionIDs,
 		Section:           section,
@@ -633,7 +635,13 @@ func GetAttendanceSession(id uint) (*AttendanceSessionDetail, error) {
 		Creator:           creator,
 		Records:           records,
 		Stats:             stats,
-	}, nil
+	}
+
+	if resolvedSession, _, err := ResolveAttendanceSessionPinState(context.Background(), id, true); err == nil && resolvedSession != nil {
+		detail.AttendanceSession = *resolvedSession
+	}
+
+	return detail, nil
 }
 
 func CreateAttendanceSession(session *models.AttendanceSession, sectionIDs []uint) error {
@@ -758,17 +766,29 @@ type AttendanceRecordUpdate struct {
 
 // Student check-in (public)
 func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, lng *float64, googleEmail string, googleID string) (*AttendanceCheckInResult, error) {
+	startedAt := time.Now()
+	observability.RecordAttendanceCheckInAttempt()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	lookupSessionID, err := LookupAttendanceSessionIDByPIN(ctx, pin)
+	if err != nil {
+		observability.RecordAttendanceWrongPin(time.Since(startedAt))
+		return nil, err
+	}
+	if lookupSessionID != sessionID {
+		observability.RecordAttendanceWrongPin(time.Since(startedAt))
+		return nil, ErrAttendanceInvalidPIN
+	}
+
 	db := config.DB
 	var result AttendanceCheckInResult
-	err := db.Transaction(func(tx *gorm.DB) error {
+	err = db.Transaction(func(tx *gorm.DB) error {
 		var session models.AttendanceSession
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&session, sessionID).Error; err != nil {
 			return fmt.Errorf("ไม่พบ session")
 		}
-		if _, err := applyAttendancePinState(tx, &session, time.Now()); err != nil {
-			return err
-		}
-
 		now := time.Now()
 		if now.Before(session.StartTime) {
 			return fmt.Errorf("ยังไม่ถึงเวลาเช็คชื่อ")
@@ -781,9 +801,10 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 		if providedPin == "" {
 			return fmt.Errorf("กรุณากรอกรหัส PIN")
 		}
-		pinAccepted := providedPin == session.PinCode
-		if !pinAccepted && session.PreviousPinCode != "" && session.PinGraceUntil != nil && session.PinGraceUntil.After(now) {
-			pinAccepted = providedPin == session.PreviousPinCode
+		pinHash := attendancePinHash(providedPin)
+		pinAccepted := pinHash == session.CurrentPinHash
+		if !pinAccepted && session.PreviousPinHash != "" && session.PinGraceUntil != nil && session.PinGraceUntil.After(now) {
+			pinAccepted = pinHash == session.PreviousPinHash
 		}
 		if !pinAccepted {
 			return fmt.Errorf("รหัส PIN ไม่ถูกต้อง")
@@ -843,8 +864,26 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 			updates["location_lng"] = *lng
 		}
 
+		var existing models.AttendanceRecord
+		if err := tx.Where("attendance_session_id = ? AND student_id = ?", sessionID, studentID).First(&existing).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("à¸„à¸¸à¸“à¹„à¸¡à¹ˆà¹„à¸”à¹‰à¸¥à¸‡à¸—à¸°à¹€à¸šà¸µà¸¢à¸™à¹ƒà¸™à¸£à¸²à¸¢à¸§à¸´à¸Šà¸²à¸™à¸µà¹‰")
+			}
+			return err
+		}
+		if existing.CheckInTime != nil && existing.Status != "absent" {
+			result = AttendanceCheckInResult{
+				Status:           existing.Status,
+				CheckInTime:      *existing.CheckInTime,
+				LocationVerified: existing.LocationVerified,
+				DistanceMeters:   existing.DistanceMeters,
+			}
+			observability.RecordAttendanceCheckInDuplicate(time.Since(startedAt))
+			return nil
+		}
+
 		updateResult := tx.Model(&models.AttendanceRecord{}).
-			Where("attendance_session_id = ? AND student_id = ?", sessionID, studentID).
+			Where("id = ?", existing.ID).
 			Updates(updates)
 		if updateResult.RowsAffected == 0 {
 			return fmt.Errorf("คุณไม่ได้ลงทะเบียนในรายวิชานี้")
@@ -862,14 +901,16 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 		return nil
 	})
 	if err != nil {
+		observability.RecordAttendanceCheckInFailure(time.Since(startedAt))
 		return nil, err
 	}
 
+	observability.RecordAttendanceCheckInSuccess(time.Since(startedAt))
 	return &result, nil
 }
 
 func GetSessionInfo(sessionID uint) (*AttendanceSessionInfo, error) {
-	session, _, err := syncAttendanceSessionPinState(config.DB, sessionID)
+	session, _, err := ResolveAttendanceSessionPinState(context.Background(), sessionID, true)
 	if err != nil {
 		return nil, err
 	}

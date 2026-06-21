@@ -34,6 +34,9 @@ type AttendanceMetricsSnapshot struct {
 		GraceSeconds      int    `json:"graceSeconds"`
 		Rotations         uint64 `json:"rotations"`
 		ManualRefreshes   uint64 `json:"manualRefreshes"`
+		Collisions        uint64 `json:"collisions"`
+		RedisSetFailures  uint64 `json:"redisSetFailures"`
+		DBInsertFailures  uint64 `json:"dbInsertFailures"`
 	} `json:"pin"`
 	LastEventAt *time.Time `json:"lastEventAt,omitempty"`
 }
@@ -49,6 +52,9 @@ type attendanceMetrics struct {
 	rateLimited   uint64
 	rotations     uint64
 	manualRefresh uint64
+	collisions    uint64
+	redisFailures uint64
+	dbFailures    uint64
 	latenciesMs   []float64
 	maxSamples    int
 	lastEventAt   *time.Time
@@ -128,6 +134,30 @@ func RecordAttendancePinManualRefresh() {
 	globalAttendanceMetrics.touchLocked(time.Now())
 }
 
+func RecordAttendancePinCollision() {
+	globalAttendanceMetrics.mu.Lock()
+	defer globalAttendanceMetrics.mu.Unlock()
+
+	globalAttendanceMetrics.collisions++
+	globalAttendanceMetrics.touchLocked(time.Now())
+}
+
+func RecordAttendanceRedisFailure() {
+	globalAttendanceMetrics.mu.Lock()
+	defer globalAttendanceMetrics.mu.Unlock()
+
+	globalAttendanceMetrics.redisFailures++
+	globalAttendanceMetrics.touchLocked(time.Now())
+}
+
+func RecordAttendanceDBInsertFailure() {
+	globalAttendanceMetrics.mu.Lock()
+	defer globalAttendanceMetrics.mu.Unlock()
+
+	globalAttendanceMetrics.dbFailures++
+	globalAttendanceMetrics.touchLocked(time.Now())
+}
+
 func SnapshotAttendanceMetrics() AttendanceMetricsSnapshot {
 	globalAttendanceMetrics.mu.Lock()
 	defer globalAttendanceMetrics.mu.Unlock()
@@ -144,6 +174,9 @@ func SnapshotAttendanceMetrics() AttendanceMetricsSnapshot {
 	snapshot.Pin.GraceSeconds = AttendancePinGraceSeconds()
 	snapshot.Pin.Rotations = globalAttendanceMetrics.rotations
 	snapshot.Pin.ManualRefreshes = globalAttendanceMetrics.manualRefresh
+	snapshot.Pin.Collisions = globalAttendanceMetrics.collisions
+	snapshot.Pin.RedisSetFailures = globalAttendanceMetrics.redisFailures
+	snapshot.Pin.DBInsertFailures = globalAttendanceMetrics.dbFailures
 	snapshot.LastEventAt = globalAttendanceMetrics.lastEventAt
 	snapshot.Latency = buildLatencySnapshot(globalAttendanceMetrics.latenciesMs)
 	return snapshot

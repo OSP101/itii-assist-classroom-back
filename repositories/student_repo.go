@@ -150,6 +150,10 @@ type LookupStudentCourse struct {
 	Name     string                       `json:"name"`
 	Year     int                          `json:"year"`
 	Semester int                          `json:"semester"`
+	Image    string                       `json:"image"`
+	CoverPositionX float64                `json:"cover_position_x"`
+	CoverPositionY float64                `json:"cover_position_y"`
+	CoverZoom float64                     `json:"cover_zoom"`
 	IsActive bool                         `json:"is_active"`
 	Sections []LookupStudentCourseSection `json:"sections"`
 }
@@ -250,6 +254,10 @@ type studentLookupEnrollmentRow struct {
 	Name      string `gorm:"column:name"`
 	Year      int    `gorm:"column:year"`
 	Semester  int    `gorm:"column:semester"`
+	Image     string `gorm:"column:image"`
+	CoverPositionX float64 `gorm:"column:cover_position_x"`
+	CoverPositionY float64 `gorm:"column:cover_position_y"`
+	CoverZoom float64 `gorm:"column:cover_zoom"`
 	IsActive  bool   `gorm:"column:is_active"`
 	SectionNo string `gorm:"column:section_no"`
 	SectionID uint   `gorm:"column:section_id"`
@@ -363,7 +371,7 @@ func lookupStudentScores(studentID string, courseID string) (*LookupStudentResul
 		Joins("JOIN course_sections AS cs ON cs.id = css.course_section_id").
 		Joins("JOIN courses AS c ON c.id = cs.course_id").
 		Where("css.student_id = ?", student.ID).
-		Select("c.id AS course_id, c.code, c.name, c.year, c.semester, c.is_active, cs.id AS section_id, cs.section_no AS section_no").
+		Select("c.id AS course_id, c.code, c.name, c.year, c.semester, c.image, c.cover_position_x, c.cover_position_y, c.cover_zoom, c.is_active, cs.id AS section_id, cs.section_no AS section_no").
 		Order("c.id ASC, cs.id ASC")
 	if strings.TrimSpace(courseID) != "" {
 		enrollmentQuery = enrollmentQuery.Where("c.id = ?", strings.TrimSpace(courseID))
@@ -384,13 +392,17 @@ func lookupStudentScores(studentID string, courseID string) (*LookupStudentResul
 		if !exists {
 			courseEntry = &LookupStudentCourseOverview{
 				Course: LookupStudentCourse{
-					ID:       enrollment.CourseID,
-					Code:     enrollment.Code,
-					Name:     enrollment.Name,
-					Year:     enrollment.Year,
-					Semester: enrollment.Semester,
-					IsActive: enrollment.IsActive,
-					Sections: []LookupStudentCourseSection{},
+					ID:             enrollment.CourseID,
+					Code:           enrollment.Code,
+					Name:           enrollment.Name,
+					Year:           enrollment.Year,
+					Semester:       enrollment.Semester,
+					Image:          enrollment.Image,
+					CoverPositionX: enrollment.CoverPositionX,
+					CoverPositionY: enrollment.CoverPositionY,
+					CoverZoom:      enrollment.CoverZoom,
+					IsActive:       enrollment.IsActive,
+					Sections:       []LookupStudentCourseSection{},
 				},
 				Assignments: []LookupStudentAssignment{},
 				BonusScore:  LookupStudentBonusScore{Records: []LookupStudentBonusRecord{}},

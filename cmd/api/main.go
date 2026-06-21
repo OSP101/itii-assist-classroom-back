@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"strings"
@@ -32,6 +33,7 @@ func main() {
 
 	// 2. เชื่อมต่อ Database
 	config.ConnectDB()
+	config.ConnectRedis()
 	observability.InitPrometheusMetrics(config.DB)
 
 	// 2.5 แก้ไข column types ที่เคยสร้างเป็น bigint แต่ต้องเป็น varchar(21) สำหรับ NanoID
@@ -81,6 +83,7 @@ func main() {
 		&models.AttendanceSession{},
 		&models.AttendanceSessionSection{},
 		&models.AttendanceRecord{},
+		&models.AttendancePinHistory{},
 		&models.AttendanceDisplayDevice{},
 		&models.AttendanceDisplayPairing{},
 		&models.AttendanceDisplayGrant{},
@@ -107,6 +110,7 @@ func main() {
 	log.Println("✅ All tables migrated successfully!")
 
 	config.MigrateAttendancePinCompatibility()
+	config.MigrateAttendanceRealtimeCompatibility()
 	config.MigrateScoreSchemaCompatibility()
 	config.MigrateQueueSessionCounterCompatibility()
 	config.MigratePerformanceIndexes()
@@ -201,7 +205,7 @@ func startAttendancePinLifecycleWorker() {
 	go func() {
 		defer ticker.Stop()
 		for range ticker.C {
-			changes, err := repositories.MaintainAttendanceSessionPins(time.Now())
+			changes, err := repositories.MaintainAttendanceRuntimeSessions(context.Background(), time.Now())
 			if err != nil {
 				log.Printf("⚠️  Attendance PIN lifecycle worker failed: %v", err)
 				continue

@@ -14,6 +14,7 @@ func SetupAttendanceRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	// Public check-in endpoints (no auth)
 	app.Get("/api/attendance/check-in/:sessionId/info", handlers.GetSessionInfoHandler)
 	app.Post("/api/attendance/check-in/:sessionId", middlewares.AttendanceCheckInGuard(), handlers.StudentCheckInHandler)
+	app.Post("/api/attendance/check-in", middlewares.AttendanceCheckInGuard(), handlers.StudentCheckInByPINHandler)
 	app.Post("/api/attendance/verify-student", handlers.VerifyStudentHandler)
 	app.Post("/api/attendance/display/bootstrap", handlers.BootstrapAttendanceDisplayHandler)
 	app.Post("/api/attendance/display/confirm", handlers.ConfirmAttendanceDisplayHandler)
@@ -31,6 +32,10 @@ func SetupAttendanceRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	// Protected endpoints
 	api := app.Group("/api/attendance", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"))
 	api.Use(middlewares.RequireAdminFeature("menu.attendance"))
+	api.Post("/sessions/start", handlers.StartAttendanceSessionHandler)
+	api.Get("/sessions/:id/pin", middlewares.RequireCourseAccess(middlewares.CourseIDFromAttendanceSessionParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromAttendanceSessionParam("id"), repositories.PermissionViewAttendance, "instructor", "ta"), handlers.GetAttendanceSessionPinHandler)
+	api.Post("/sessions/:id/rotate", middlewares.RequireCourseAccess(middlewares.CourseIDFromAttendanceSessionParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromAttendanceSessionParam("id"), repositories.PermissionUpdateAttendanceSessions, "instructor", "ta"), handlers.RotateAttendanceSessionPinHandler)
+	api.Post("/sessions/:id/close", middlewares.RequireCourseAccess(middlewares.CourseIDFromAttendanceSessionParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromAttendanceSessionParam("id"), repositories.PermissionUpdateAttendanceSessions, "instructor", "ta"), handlers.CloseAttendanceSessionHandler)
 	api.Get("/", middlewares.RequireCourseAccess(middlewares.CourseIDFromQuery("course_id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromQuery("course_id"), repositories.PermissionViewAttendance, "instructor", "ta"), handlers.GetAttendanceSessionsHandler)
 	api.Post("/", middlewares.RequireCourseAccess(middlewares.CourseIDFromBody("course_id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromBody("course_id"), repositories.PermissionCreateAttendanceSessions, "instructor", "ta"), attendanceHandler.CreateAttendanceSession)
 	api.Post("/:id/preview-section-change", middlewares.RequireCourseAccess(middlewares.CourseIDFromAttendanceSessionParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromAttendanceSessionParam("id"), repositories.PermissionUpdateAttendanceSessions, "instructor", "ta"), handlers.PreviewSectionChangeHandler)

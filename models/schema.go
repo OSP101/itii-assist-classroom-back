@@ -144,6 +144,9 @@ type Course struct {
 	Instructor         *User     `gorm:"foreignKey:InstructorID" json:"-"`
 	Description        string    `gorm:"type:text" json:"description"`
 	Image              string    `gorm:"type:text" json:"image"`
+	CoverPositionX     float64   `gorm:"type:double precision;default:50" json:"cover_position_x"`
+	CoverPositionY     float64   `gorm:"type:double precision;default:50" json:"cover_position_y"`
+	CoverZoom          float64   `gorm:"type:double precision;default:1" json:"cover_zoom"`
 	IsActive           bool      `gorm:"type:boolean;default:true" json:"is_active"`
 	AttentionThreshold int       `gorm:"default:60" json:"attention_threshold"`
 	CreatedAt          time.Time `gorm:"type:timestamptz" json:"created_at"`
@@ -424,8 +427,12 @@ type AttendanceSession struct {
 	CourseSectionID      *uint      `gorm:"index" json:"course_section_id,omitempty"`
 	Title                string     `gorm:"type:varchar(255);default:'Attendance'" json:"title"`
 	AutoRotatePin        bool       `gorm:"type:boolean;default:true" json:"auto_rotate_pin"`
+	PinMode              string     `gorm:"type:varchar(20);default:'rotating'" json:"pin_mode"`
 	PinCode              string     `gorm:"type:varchar(50)" json:"pin_code"`
 	PreviousPinCode      string     `gorm:"type:varchar(50)" json:"previous_pin_code"`
+	PinHash              string     `gorm:"type:char(64)" json:"-"`
+	CurrentPinHash       string     `gorm:"type:char(64)" json:"-"`
+	PreviousPinHash      string     `gorm:"type:char(64)" json:"-"`
 	SessionType          string     `gorm:"type:varchar(20);default:'lecture'" json:"session_type"` // lecture, lab, online
 	CheckLocation        bool       `gorm:"type:boolean;default:false" json:"check_location"`
 	LocationLat          *float64   `gorm:"type:decimal(10,7)" json:"location_lat,omitempty"`
@@ -433,6 +440,9 @@ type AttendanceSession struct {
 	RadiusMeters         int        `gorm:"default:50" json:"radius_meters"`
 	StartTime            time.Time  `gorm:"type:timestamptz;not null" json:"start_time"`
 	EndTime              time.Time  `gorm:"type:timestamptz;not null" json:"end_time"`
+	StartedAt            *time.Time `gorm:"type:timestamptz" json:"started_at,omitempty"`
+	ExpiresAt            *time.Time `gorm:"type:timestamptz" json:"expires_at,omitempty"`
+	ClosedAt             *time.Time `gorm:"type:timestamptz" json:"closed_at,omitempty"`
 	PinIssuedAt          *time.Time `gorm:"type:timestamptz" json:"pin_issued_at,omitempty"`
 	PinGraceUntil        *time.Time `gorm:"type:timestamptz" json:"pin_grace_until,omitempty"`
 	PinRotatesAt         *time.Time `gorm:"type:timestamptz" json:"pin_rotates_at,omitempty"`
@@ -468,6 +478,16 @@ type AttendanceRecord struct {
 	UpdatedBy           *uint      `gorm:"index" json:"updated_by,omitempty"`
 	CreatedAt           time.Time  `gorm:"type:timestamptz" json:"created_at"`
 	UpdatedAt           time.Time  `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+}
+
+type AttendancePinHistory struct {
+	ID         uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	SessionID  uint      `gorm:"not null;index" json:"session_id"`
+	PinHash    string    `gorm:"type:char(64);not null" json:"-"`
+	ValidFrom  time.Time `gorm:"type:timestamptz;not null" json:"valid_from"`
+	ValidUntil time.Time `gorm:"type:timestamptz;not null" json:"valid_until"`
+	Reason     string    `gorm:"type:varchar(32);not null" json:"reason"`
+	CreatedAt  time.Time `gorm:"type:timestamptz" json:"created_at"`
 }
 
 type AttendanceDisplayDevice struct {

@@ -391,3 +391,47 @@ func MigrateAttendancePinCompatibility() {
 
 	log.Println("✅ Attendance PIN compatibility synchronized")
 }
+func MigrateAttendanceRealtimeCompatibility() {
+	if DB == nil {
+		return
+	}
+
+	statements := []string{
+		`ALTER TABLE attendance_sessions ADD COLUMN IF NOT EXISTS pin_mode varchar(20) NOT NULL DEFAULT 'rotating'`,
+		`ALTER TABLE attendance_sessions ADD COLUMN IF NOT EXISTS pin_hash char(64) NOT NULL DEFAULT ''`,
+		`ALTER TABLE attendance_sessions ADD COLUMN IF NOT EXISTS current_pin_hash char(64) NOT NULL DEFAULT ''`,
+		`ALTER TABLE attendance_sessions ADD COLUMN IF NOT EXISTS previous_pin_hash char(64) NOT NULL DEFAULT ''`,
+		`ALTER TABLE attendance_sessions ADD COLUMN IF NOT EXISTS started_at timestamptz`,
+		`ALTER TABLE attendance_sessions ADD COLUMN IF NOT EXISTS expires_at timestamptz`,
+		`ALTER TABLE attendance_sessions ADD COLUMN IF NOT EXISTS closed_at timestamptz`,
+		`CREATE TABLE IF NOT EXISTS attendance_pin_histories (
+			id bigserial PRIMARY KEY,
+			session_id bigint NOT NULL,
+			pin_hash char(64) NOT NULL,
+			valid_from timestamptz NOT NULL,
+			valid_until timestamptz NOT NULL,
+			reason varchar(32) NOT NULL,
+			created_at timestamptz NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_attendance_pin_histories_session_id ON attendance_pin_histories (session_id)`,
+		`UPDATE attendance_sessions
+		 SET pin_mode = CASE
+		     WHEN auto_rotate_pin = false THEN 'static'
+		     ELSE 'rotating'
+		 END
+		 WHERE COALESCE(pin_mode, '') = ''`,
+		`UPDATE attendance_sessions
+		 SET started_at = COALESCE(started_at, CASE WHEN status = 'active' THEN start_time ELSE NULL END),
+		     expires_at = COALESCE(expires_at, CASE WHEN status = 'active' THEN end_time ELSE NULL END),
+		     closed_at = COALESCE(closed_at, CASE WHEN status = 'closed' THEN end_time ELSE NULL END)`,
+	}
+
+	for _, statement := range statements {
+		if err := DB.Exec(statement).Error; err != nil {
+			log.Printf("âš ï¸  Failed attendance realtime compatibility migration: %v", err)
+			return
+		}
+	}
+
+	log.Println("âœ… Attendance realtime compatibility synchronized")
+}

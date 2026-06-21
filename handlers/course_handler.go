@@ -338,15 +338,18 @@ func CreateCourseHandler(c fiber.Ctx) error {
 	actorRole := c.Locals("user_role").(string)
 
 	var input struct {
-		Code               string `json:"code"`
-		Name               string `json:"name"`
-		Year               int    `json:"year"`
-		Semester           int    `json:"semester"`
-		Description        string `json:"description"`
-		Image              string `json:"image"`
-		AttentionThreshold *int   `json:"attention_threshold"`
-		InstructorIDs      []uint `json:"instructor_ids"`
-		InstructorID       *uint  `json:"instructor_id"`
+		Code               string   `json:"code"`
+		Name               string   `json:"name"`
+		Year               int      `json:"year"`
+		Semester           int      `json:"semester"`
+		Description        string   `json:"description"`
+		Image              string   `json:"image"`
+		CoverPositionX     *float64 `json:"cover_position_x"`
+		CoverPositionY     *float64 `json:"cover_position_y"`
+		CoverZoom          *float64 `json:"cover_zoom"`
+		AttentionThreshold *int     `json:"attention_threshold"`
+		InstructorIDs      []uint   `json:"instructor_ids"`
+		InstructorID       *uint    `json:"instructor_id"`
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
@@ -408,8 +411,20 @@ func CreateCourseHandler(c fiber.Ctx) error {
 		InstructorID:       primaryInstructorID,
 		Description:        input.Description,
 		Image:              input.Image,
+		CoverPositionX:     50,
+		CoverPositionY:     50,
+		CoverZoom:          1,
 		IsActive:           true,
 		AttentionThreshold: threshold,
+	}
+	if input.CoverPositionX != nil {
+		course.CoverPositionX = *input.CoverPositionX
+	}
+	if input.CoverPositionY != nil {
+		course.CoverPositionY = *input.CoverPositionY
+	}
+	if input.CoverZoom != nil {
+		course.CoverZoom = *input.CoverZoom
 	}
 
 	if err := repositories.CreateCourse(&course); err != nil {
@@ -456,16 +471,19 @@ func UpdateCourseHandler(c fiber.Ctx) error {
 	}
 
 	var input struct {
-		Code               string `json:"code"`
-		Name               string `json:"name"`
-		Year               *int   `json:"year"`
-		Semester           *int   `json:"semester"`
-		Description        string `json:"description"`
-		Image              string `json:"image"`
-		IsActive           *bool  `json:"is_active"`
-		AttentionThreshold *int   `json:"attention_threshold"`
-		InstructorIDs      []uint `json:"instructor_ids"`
-		InstructorID       *uint  `json:"instructor_id"`
+		Code               string   `json:"code"`
+		Name               string   `json:"name"`
+		Year               *int     `json:"year"`
+		Semester           *int     `json:"semester"`
+		Description        *string  `json:"description"`
+		Image              *string  `json:"image"`
+		CoverPositionX     *float64 `json:"cover_position_x"`
+		CoverPositionY     *float64 `json:"cover_position_y"`
+		CoverZoom          *float64 `json:"cover_zoom"`
+		IsActive           *bool    `json:"is_active"`
+		AttentionThreshold *int     `json:"attention_threshold"`
+		InstructorIDs      []uint   `json:"instructor_ids"`
+		InstructorID       *uint    `json:"instructor_id"`
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
@@ -502,11 +520,20 @@ func UpdateCourseHandler(c fiber.Ctx) error {
 	if input.Semester != nil {
 		updated.Semester = *input.Semester
 	}
-	if input.Description != "" {
-		updated.Description = input.Description
+	if input.Description != nil {
+		updated.Description = strings.TrimSpace(*input.Description)
 	}
-	if input.Image != "" {
-		updated.Image = input.Image
+	if input.Image != nil {
+		updated.Image = strings.TrimSpace(*input.Image)
+	}
+	if input.CoverPositionX != nil {
+		updated.CoverPositionX = *input.CoverPositionX
+	}
+	if input.CoverPositionY != nil {
+		updated.CoverPositionY = *input.CoverPositionY
+	}
+	if input.CoverZoom != nil {
+		updated.CoverZoom = *input.CoverZoom
 	}
 	if input.IsActive != nil {
 		updated.IsActive = *input.IsActive

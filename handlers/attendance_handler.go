@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
 	"itii-assist/config"
 	"itii-assist/models"
@@ -919,23 +920,18 @@ func ActivateAttendanceSessionHandler(c fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Attendance session not found"})
 	}
 	session := detail.AttendanceSession
-	if repositories.ComputeSessionStatus(session) == "draft" {
-		now := time.Now()
-		session.StartTime = now
-		if session.EndTime.Before(now) {
-			session.EndTime = now.Add(time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if _, err := repositories.StartAttendanceSession(ctx, session.ID, c.Get("Idempotency-Key")); err != nil {
+		if err == repositories.ErrAttendanceRedisUnavailable {
+			return c.Status(503).JSON(fiber.Map{"success": false, "message": "Attendance PIN service is temporarily unavailable"})
 		}
-		if err := repositories.UpdateAttendanceSession(&session); err != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to activate session"})
-		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to activate session"})
 	}
-	if refreshedSession, pinChange, err := repositories.RefreshAttendanceSessionPinState(session.ID); err == nil && refreshedSession != nil {
+	if refreshedSession, _, err := repositories.ResolveAttendanceSessionPinState(ctx, session.ID, false); err == nil && refreshedSession != nil {
 		session = *refreshedSession
-		if pinChange.Rotated || pinChange.StatusChanged || session.PinCode != "" {
-			emitAttendancePinUpdated(session)
-		}
-	} else {
-		session.Status = repositories.ComputeSessionStatus(session)
+		emitAttendancePinUpdated(session)
 	}
 	actorUID := c.Locals("user_id").(uint)
 	logCourseActivity(c, session.CourseID, actorUID, "activate_attendance_session", "attendance", "attendance_session", session.ID, session.Title, fiber.Map{"status": session.Status})
@@ -961,18 +957,15 @@ func CloseAttendanceSessionHandler(c fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Attendance session not found"})
 	}
 	session := detail.AttendanceSession
-	now := time.Now()
-	if session.StartTime.After(now) {
-		session.StartTime = now.Add(-1 * time.Second)
-	}
-	session.EndTime = now
-	if err := repositories.UpdateAttendanceSession(&session); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := repositories.CloseAttendanceRuntimeSession(ctx, session.ID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to close session"})
 	}
-	if refreshedSession, _, err := repositories.RefreshAttendanceSessionPinState(session.ID); err == nil && refreshedSession != nil {
+	if refreshedSession, _, err := repositories.ResolveAttendanceSessionPinState(ctx, session.ID, false); err == nil && refreshedSession != nil {
 		session = *refreshedSession
 	} else {
-		session.Status = repositories.ComputeSessionStatus(session)
+		session.Status = "closed"
 		session.PinCode = ""
 	}
 	actorCloseUID := c.Locals("user_id").(uint)
@@ -989,6 +982,152 @@ func CloseAttendanceSessionHandler(c fiber.Ctx) error {
 	realtime.EmitToAttendanceDisplay(session.ID, "session-closed", fiber.Map{"session_id": session.ID})
 	emitAttendancePinUpdated(session)
 	return c.JSON(fiber.Map{"success": true, "message": "Session closed", "data": attendanceSessionPayload(session, detail.CourseSectionIDs)})
+}
+
+func StartAttendanceSessionHandler(c fiber.Ctx) error {
+	var input struct {
+		AttendanceSessionID uint   `json:"attendance_session_id"`
+		IdempotencyKey      string `json:"idempotency_key"`
+	}
+	if err := c.Bind().JSON(&input); err != nil || input.AttendanceSessionID == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "attendance_session_id is required"})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result, err := repositories.StartAttendanceSession(ctx, input.AttendanceSessionID, strings.TrimSpace(firstNonEmpty(input.IdempotencyKey, c.Get("Idempotency-Key"))))
+	if err != nil {
+		if err == repositories.ErrAttendanceRedisUnavailable {
+			return c.Status(503).JSON(fiber.Map{"success": false, "message": "Attendance PIN service is temporarily unavailable"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to start attendance session"})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data": fiber.Map{
+			"session_id":        result.SessionID,
+			"current_pin":       result.CurrentPIN,
+			"expires_at":        result.ExpiresAt,
+			"next_rotation_at":  result.NextRotationAt,
+			"mode":              result.State.Mode,
+			"status":            result.State.Status,
+		},
+	})
+}
+
+func GetAttendanceSessionPinHandler(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid ID"})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	session, state, err := repositories.ResolveAttendanceSessionPinState(ctx, uint(id), true)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Attendance session not found"})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data": fiber.Map{
+			"session_id":        session.ID,
+			"status":            session.Status,
+			"mode":              session.PinMode,
+			"current_pin":       session.PinCode,
+			"previous_pin":      session.PreviousPinCode,
+			"expires_at":        session.ExpiresAt,
+			"pin_issued_at":     session.PinIssuedAt,
+			"next_rotation_at":  session.PinRotatesAt,
+			"next_pin_ready":    state != nil && strings.TrimSpace(state.NextPIN) != "",
+		},
+	})
+}
+
+func RotateAttendanceSessionPinHandler(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid ID"})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	state, err := repositories.RotateAttendanceSessionPIN(ctx, uint(id), "manual_regenerate")
+	if err != nil {
+		if err == repositories.ErrAttendanceRedisUnavailable {
+			return c.Status(503).JSON(fiber.Map{"success": false, "message": "Attendance PIN service is temporarily unavailable"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to rotate attendance PIN"})
+	}
+
+	session, _, resolveErr := repositories.ResolveAttendanceSessionPinState(ctx, uint(id), false)
+	if resolveErr == nil && session != nil {
+		emitAttendancePinUpdated(*session)
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data": fiber.Map{
+			"session_id":       id,
+			"current_pin":      state.CurrentPIN,
+			"previous_pin":     state.PreviousPIN,
+			"pin_issued_at":    state.PinIssuedAt,
+			"next_rotation_at": state.NextRotationAt,
+		},
+	})
+}
+
+func StudentCheckInByPINHandler(c fiber.Ctx) error {
+	var input struct {
+		PinCode     string   `json:"pin_code"`
+		GoogleEmail string   `json:"google_email"`
+		GoogleID    string   `json:"google_id"`
+		StudentID   *uint    `json:"student_id"`
+		LocationLat *float64 `json:"location_lat"`
+		LocationLng *float64 `json:"location_lng"`
+	}
+	if err := c.Bind().JSON(&input); err != nil || strings.TrimSpace(input.PinCode) == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "pin_code is required"})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	sessionID, err := repositories.LookupAttendanceSessionIDByPIN(ctx, input.PinCode)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid or expired PIN"})
+	}
+
+	studentID := uint(0)
+	if input.StudentID != nil {
+		studentID = *input.StudentID
+	} else {
+		var student models.Student
+		if err := config.DB.Select("id").Where("LOWER(email) = LOWER(?)", input.GoogleEmail).First(&student).Error; err != nil {
+			return c.Status(404).JSON(fiber.Map{"success": false, "message": "Student not found"})
+		}
+		studentID = student.ID
+	}
+
+	result, err := repositories.StudentCheckIn(sessionID, studentID, input.PinCode, input.LocationLat, input.LocationLng, input.GoogleEmail, input.GoogleID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "data": result})
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func emitAttendancePinUpdated(session models.AttendanceSession) {
