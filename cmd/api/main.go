@@ -191,6 +191,7 @@ func main() {
 		}
 	}()
 	startQueueMidnightWorker()
+	startQueuePausedSessionLeaseWorker()
 	log.Fatal(app.Listen(":8000"))
 }
 
@@ -277,6 +278,41 @@ func startQueueMidnightWorker() {
 				lastDate = today
 				runCleanup()
 			}
+		}
+	}()
+}
+
+func startQueuePausedSessionLeaseWorker() {
+	const (
+		queuePausedLeaseTimeout = 2 * time.Minute
+		queuePausedLeaseCheck   = 30 * time.Second
+	)
+
+	runCleanup := func() {
+		closed, err := repositories.AutoCloseAbandonedPausedQueueSessions(queuePausedLeaseTimeout)
+		if err != nil {
+			log.Printf("⚠️  Queue paused-session lease cleanup error: %v", err)
+			return
+		}
+		for _, s := range closed {
+			log.Printf("🛑 Auto-closed abandoned paused queue session %s (course %s, cancelled %d waiting booking(s))",
+				s.SessionID, s.CourseID, s.CancelledWaiting)
+			realtime.EmitToQueue(s.SessionID, "session-status-changed", fiber.Map{
+				"status":    "closed",
+				"reason":    "auto_paused_timeout",
+				"timestamp": time.Now().UnixMilli(),
+			})
+		}
+	}
+
+	go func() {
+		runCleanup()
+
+		ticker := time.NewTicker(queuePausedLeaseCheck)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			runCleanup()
 		}
 	}()
 }

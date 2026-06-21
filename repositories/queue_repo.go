@@ -363,9 +363,10 @@ func StartQueueSession(id string, classroomID string) error {
 		return err
 	}
 	if err := db.Model(&models.QueueSession{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"status":     "active",
-		"start_time": now,
-		"pin_code":   newPIN,
+		"status":                 "active",
+		"start_time":             now,
+		"pin_code":               newPIN,
+		"projector_last_seen_at": now,
 	}).Error; err != nil {
 		return err
 	}
@@ -388,14 +389,19 @@ func StartQueueSession(id string, classroomID string) error {
 }
 
 func PauseQueueSession(id string) error {
-	return config.DB.Model(&models.QueueSession{}).Where("id = ?", id).Update("status", "paused").Error
+	now := time.Now()
+	return config.DB.Model(&models.QueueSession{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"status":                 "paused",
+		"projector_last_seen_at": now,
+	}).Error
 }
 
 func CloseQueueSession(id string) error {
 	now := time.Now()
 	return config.DB.Model(&models.QueueSession{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"status":   "closed",
-		"end_time": now,
+		"status":                 "closed",
+		"end_time":               now,
+		"projector_last_seen_at": nil,
 	}).Error
 }
 
@@ -404,10 +410,32 @@ func ResumeQueueSession(id string) error {
 	if err != nil {
 		return err
 	}
+	now := time.Now()
 	return config.DB.Model(&models.QueueSession{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"status":   "active",
-		"pin_code": newPIN,
+		"status":                 "active",
+		"pin_code":               newPIN,
+		"projector_last_seen_at": now,
 	}).Error
+}
+
+func TouchQueueSessionProjectorHeartbeat(id string) (*models.QueueSession, error) {
+	var session models.QueueSession
+	if err := config.DB.First(&session, "id = ?", id).Error; err != nil {
+		return nil, err
+	}
+	if session.Status == "closed" {
+		return &session, gorm.ErrRecordNotFound
+	}
+	if session.Status != "active" && session.Status != "paused" {
+		return &session, nil
+	}
+
+	now := time.Now()
+	if err := config.DB.Model(&models.QueueSession{}).Where("id = ?", id).Update("projector_last_seen_at", now).Error; err != nil {
+		return nil, err
+	}
+	session.ProjectorLastSeenAt = &now
+	return &session, nil
 }
 
 // ---------- QueueBooking ----------
@@ -1414,6 +1442,57 @@ func AutoCloseStaleQueueSessions(loc *time.Location) ([]AutoClosedQueueSession, 
 			Updates(map[string]interface{}{
 				"status":   "closed",
 				"end_time": endTime,
+			}).Error; err != nil {
+			return results, err
+		}
+
+		results = append(results, AutoClosedQueueSession{
+			SessionID:        s.ID,
+			CourseID:         s.CourseID,
+			CancelledWaiting: cancelled,
+		})
+	}
+
+	return results, nil
+}
+
+// AutoCloseAbandonedPausedQueueSessions closes queue sessions that are paused
+// and have not reported projector heartbeat within the given timeout.
+func AutoCloseAbandonedPausedQueueSessions(timeout time.Duration) ([]AutoClosedQueueSession, error) {
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+
+	cutoff := time.Now().Add(-timeout)
+
+	var sessions []models.QueueSession
+	if err := config.DB.
+		Where("status = 'paused' AND COALESCE(projector_last_seen_at, updated_at) < ?", cutoff).
+		Find(&sessions).Error; err != nil {
+		return nil, err
+	}
+	if len(sessions) == 0 {
+		return nil, nil
+	}
+
+	var results []AutoClosedQueueSession
+	endTime := time.Now().UTC()
+
+	for _, s := range sessions {
+		res := config.DB.Model(&models.QueueBooking{}).
+			Where("queue_session_id = ? AND status = 'waiting'", s.ID).
+			Update("status", "cancelled")
+		if res.Error != nil {
+			return results, res.Error
+		}
+		cancelled := int(res.RowsAffected)
+
+		if err := config.DB.Model(&models.QueueSession{}).
+			Where("id = ? AND status = 'paused'", s.ID).
+			Updates(map[string]interface{}{
+				"status":                 "closed",
+				"end_time":               endTime,
+				"projector_last_seen_at": nil,
 			}).Error; err != nil {
 			return results, err
 		}

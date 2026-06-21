@@ -550,6 +550,7 @@ type QueueSession struct {
 	Status                    string     `gorm:"type:varchar(20);default:'draft'" json:"status"` // draft, active, paused, closed
 	StartTime                 *time.Time `gorm:"type:timestamptz" json:"start_time,omitempty"`
 	EndTime                   *time.Time `gorm:"type:timestamptz" json:"end_time,omitempty"`
+	ProjectorLastSeenAt       *time.Time `gorm:"type:timestamptz;index" json:"projector_last_seen_at,omitempty"`
 	CreatedBy                 *uint      `gorm:"index" json:"created_by,omitempty"`
 	CreatedAt                 time.Time  `gorm:"type:timestamptz" json:"created_at"`
 	UpdatedAt                 time.Time  `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`

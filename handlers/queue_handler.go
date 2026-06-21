@@ -412,6 +412,28 @@ func (h *QueueHandler) CloseQueueSession(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "message": "Session closed", "data": updatedSession})
 }
 
+// POST /api/courses/:courseId/queue/sessions/:sessionId/heartbeat
+func HeartbeatQueueProjectorSessionHandler(c fiber.Ctx) error {
+	sessionID := c.Params("sessionId")
+	session, err := repositories.GetQueueSessionByID(sessionID)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
+	}
+	if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+		return err
+	}
+
+	updatedSession, err := repositories.TouchQueueSessionProjectorHeartbeat(sessionID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return c.Status(409).JSON(fiber.Map{"success": false, "message": "Session already closed"})
+	}
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to record projector heartbeat"})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "data": updatedSession})
+}
+
 // POST /api/courses/:courseId/queue/sessions/:sessionId/verify-pin
 func VerifyQueuePINHandler(c fiber.Ctx) error {
 	sessionID := c.Params("sessionId")
