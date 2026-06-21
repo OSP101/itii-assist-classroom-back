@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"strings"
+
 	"itii-assist/models"
 	"itii-assist/repositories"
 
@@ -10,6 +12,8 @@ import (
 type SearchStudentsByIDsCompatInput struct {
 	StudentIDsCamel []string `json:"studentIds"`
 	StudentIDsSnake []string `json:"student_ids"`
+	CourseID        string   `json:"course_id"`
+	Section         string   `json:"section"`
 }
 
 func SearchStudentsByIDsCompatHandler(c fiber.Ctx) error {
@@ -26,7 +30,14 @@ func SearchStudentsByIDsCompatHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "กรุณาส่ง studentIds"})
 	}
 
-	students, err := repositories.FindStudentsByStudentIDs(studentIDs)
+	var students []models.Student
+	var err error
+	courseID := strings.TrimSpace(input.CourseID)
+	if courseID != "" {
+		students, err = repositories.FindStudentsByStudentIDsInCourse(studentIDs, courseID)
+	} else {
+		students, err = repositories.FindStudentsByStudentIDs(studentIDs)
+	}
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ค้นหาไม่สำเร็จ"})
 	}

@@ -145,17 +145,17 @@ type LookupStudentCourseSection struct {
 }
 
 type LookupStudentCourse struct {
-	ID       string                       `json:"id"`
-	Code     string                       `json:"code"`
-	Name     string                       `json:"name"`
-	Year     int                          `json:"year"`
-	Semester int                          `json:"semester"`
-	Image    string                       `json:"image"`
-	CoverPositionX float64                `json:"cover_position_x"`
-	CoverPositionY float64                `json:"cover_position_y"`
-	CoverZoom float64                     `json:"cover_zoom"`
-	IsActive bool                         `json:"is_active"`
-	Sections []LookupStudentCourseSection `json:"sections"`
+	ID             string                       `json:"id"`
+	Code           string                       `json:"code"`
+	Name           string                       `json:"name"`
+	Year           int                          `json:"year"`
+	Semester       int                          `json:"semester"`
+	Image          string                       `json:"image"`
+	CoverPositionX float64                      `json:"cover_position_x"`
+	CoverPositionY float64                      `json:"cover_position_y"`
+	CoverZoom      float64                      `json:"cover_zoom"`
+	IsActive       bool                         `json:"is_active"`
+	Sections       []LookupStudentCourseSection `json:"sections"`
 }
 
 type LookupStudentGroupInfo struct {
@@ -249,18 +249,18 @@ type LookupStudentResult struct {
 }
 
 type studentLookupEnrollmentRow struct {
-	CourseID  string `gorm:"column:course_id"`
-	Code      string `gorm:"column:code"`
-	Name      string `gorm:"column:name"`
-	Year      int    `gorm:"column:year"`
-	Semester  int    `gorm:"column:semester"`
-	Image     string `gorm:"column:image"`
+	CourseID       string  `gorm:"column:course_id"`
+	Code           string  `gorm:"column:code"`
+	Name           string  `gorm:"column:name"`
+	Year           int     `gorm:"column:year"`
+	Semester       int     `gorm:"column:semester"`
+	Image          string  `gorm:"column:image"`
 	CoverPositionX float64 `gorm:"column:cover_position_x"`
 	CoverPositionY float64 `gorm:"column:cover_position_y"`
-	CoverZoom float64 `gorm:"column:cover_zoom"`
-	IsActive  bool   `gorm:"column:is_active"`
-	SectionNo string `gorm:"column:section_no"`
-	SectionID uint   `gorm:"column:section_id"`
+	CoverZoom      float64 `gorm:"column:cover_zoom"`
+	IsActive       bool    `gorm:"column:is_active"`
+	SectionNo      string  `gorm:"column:section_no"`
+	SectionID      uint    `gorm:"column:section_id"`
 }
 
 type studentLookupGroupMembershipRow struct {
@@ -922,6 +922,22 @@ func GetStudentStats() (*StudentStats, error) {
 func FindStudentsByStudentIDs(studentIDs []string) ([]models.Student, error) {
 	var students []models.Student
 	err := config.DB.Where("student_id IN ?", studentIDs).Find(&students).Error
+	return students, err
+}
+
+// FindStudentsByStudentIDsInCourse returns only students whose student_id is in studentIDs
+// AND who are enrolled in at least one section of the given course.
+func FindStudentsByStudentIDsInCourse(studentIDs []string, courseID string) ([]models.Student, error) {
+	var students []models.Student
+	err := config.DB.
+		Where("student_id IN ?", studentIDs).
+		Where("id IN (?)",
+			config.DB.Table("course_section_students AS css").
+				Select("css.student_id").
+				Joins("JOIN course_sections AS cs ON cs.id = css.course_section_id").
+				Where("cs.course_id = ?", courseID),
+		).
+		Find(&students).Error
 	return students, err
 }
 
