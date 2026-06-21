@@ -541,6 +541,7 @@ func GetMeHandler(c fiber.Ctx) error {
 					"provider":   "google",
 					"is_active":  student.IsActive,
 					"avatar":     "",
+					"extra":      student.Extra,
 					"preferences": fiber.Map{
 						"theme":    "system",
 						"fontSize": "md",

@@ -65,7 +65,7 @@ func attendanceRedisAvailable() bool {
 }
 
 func attendanceModeForSession(session *models.AttendanceSession) string {
-	if session.AutoRotatePin && observability.AttendancePinAutoRotateEnabled() {
+	if (session.AutoRotatePin != nil && *session.AutoRotatePin) && observability.AttendancePinAutoRotateEnabled() {
 		return "rotating"
 	}
 	return "static"

@@ -209,7 +209,7 @@ func applyAttendancePinState(tx *gorm.DB, session *models.AttendanceSession, now
 	} else {
 		rotationWindow := attendancePinRotationWindow()
 		graceWindow := attendancePinGraceWindow()
-		autoRotate := session.AutoRotatePin && observability.AttendancePinAutoRotateEnabled()
+		autoRotate := (session.AutoRotatePin != nil && *session.AutoRotatePin) && observability.AttendancePinAutoRotateEnabled()
 
 		if session.PreviousPinCode != "" && (session.PinGraceUntil == nil || !session.PinGraceUntil.After(now)) {
 			updates["previous_pin_code"] = ""
@@ -654,7 +654,7 @@ func GetAttendanceSession(id uint) (*AttendanceSessionDetail, error) {
 
 func CreateAttendanceSession(session *models.AttendanceSession, sectionIDs []uint) error {
 	db := config.DB
-	session.PinMode = ConfiguredAttendancePinMode(session.AutoRotatePin)
+	session.PinMode = ConfiguredAttendancePinMode(session.AutoRotatePin != nil && *session.AutoRotatePin)
 	session.PinCode = ""
 	session.PreviousPinCode = ""
 	session.PinIssuedAt = nil
@@ -945,7 +945,7 @@ func GetSessionInfo(sessionID uint) (*AttendanceSessionInfo, error) {
 		Title:                session.Title,
 		SessionType:          session.SessionType,
 		CheckLocation:        session.CheckLocation,
-		AutoRotatePin:        session.AutoRotatePin,
+		AutoRotatePin:        session.AutoRotatePin != nil && *session.AutoRotatePin,
 		PinMode:              session.PinMode,
 		PinCode:              session.PinCode,
 		PinIssuedAt:          session.PinIssuedAt,

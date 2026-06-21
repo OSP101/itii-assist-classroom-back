@@ -541,12 +541,13 @@ func (h *AttendanceHandler) CreateAttendanceSession(c fiber.Ctx) error {
 		legacySectionID = &sectionIDs[0]
 	}
 
+	autoRotatePin := input.AutoRotatePin == nil || *input.AutoRotatePin
 	session := models.AttendanceSession{
 		CourseID:             input.CourseID,
 		CourseSectionID:      legacySectionID,
 		Title:                title,
-		AutoRotatePin:        input.AutoRotatePin == nil || *input.AutoRotatePin,
-		PinMode:              repositories.ConfiguredAttendancePinMode(input.AutoRotatePin == nil || *input.AutoRotatePin),
+		AutoRotatePin:        &autoRotatePin,
+		PinMode:              repositories.ConfiguredAttendancePinMode(autoRotatePin),
 		PinCode:              pin,
 		SessionType:          sessionType,
 		CheckLocation:        input.CheckLocation,
@@ -647,7 +648,7 @@ func UpdateAttendanceSessionHandler(c fiber.Ctx) error {
 		session.Title = *input.Title
 	}
 	if input.AutoRotatePin != nil {
-		session.AutoRotatePin = *input.AutoRotatePin
+		session.AutoRotatePin = input.AutoRotatePin
 		session.PinMode = repositories.ConfiguredAttendancePinMode(*input.AutoRotatePin)
 	}
 	if input.PinCode != nil && strings.TrimSpace(*input.PinCode) != "" {
@@ -656,7 +657,7 @@ func UpdateAttendanceSessionHandler(c fiber.Ctx) error {
 		session.PinGraceUntil = nil
 		now := time.Now()
 		session.PinIssuedAt = &now
-		if session.AutoRotatePin && observability.AttendancePinAutoRotateEnabled() {
+		if (session.AutoRotatePin != nil && *session.AutoRotatePin) && observability.AttendancePinAutoRotateEnabled() {
 			rotatesAt := now.Add(time.Duration(observability.AttendancePinRotationMinutes()) * time.Minute)
 			session.PinRotatesAt = &rotatesAt
 		} else {

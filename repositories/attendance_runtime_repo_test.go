@@ -25,10 +25,11 @@ func setupAttendanceRuntimeTest(t *testing.T) (*miniredis.Miniredis, func()) {
 		t.Fatalf("migrate sqlite: %v", err)
 	}
 
+	autoRotateProbe := false
 	probe := models.AttendanceSession{
 		CourseID:             "probe",
 		Title:                "probe",
-		AutoRotatePin:        false,
+		AutoRotatePin:        &autoRotateProbe,
 		SessionType:          "lecture",
 		StartTime:            time.Now(),
 		EndTime:              time.Now().Add(time.Minute),
@@ -70,7 +71,7 @@ func createAttendanceSessionFixture(t *testing.T, autoRotate bool) models.Attend
 	session := models.AttendanceSession{
 		CourseID:             "CP101",
 		Title:                "Quiz attendance",
-		AutoRotatePin:        autoRotate,
+		AutoRotatePin:        &autoRotate,
 		SessionType:          "lecture",
 		StartTime:            now.Add(5 * time.Minute),
 		EndTime:              now.Add(65 * time.Minute),
