@@ -33,18 +33,18 @@ var (
 )
 
 type AttendanceRuntimeState struct {
-	SessionID        uint       `json:"session_id"`
-	Mode             string     `json:"mode"`
-	Status           string     `json:"status"`
-	CurrentPIN       string     `json:"current_pin"`
-	NextPIN          string     `json:"next_pin,omitempty"`
-	PreviousPIN      string     `json:"previous_pin,omitempty"`
-	PinIssuedAt      *time.Time `json:"pin_issued_at,omitempty"`
+	SessionID          uint       `json:"session_id"`
+	Mode               string     `json:"mode"`
+	Status             string     `json:"status"`
+	CurrentPIN         string     `json:"current_pin"`
+	NextPIN            string     `json:"next_pin,omitempty"`
+	PreviousPIN        string     `json:"previous_pin,omitempty"`
+	PinIssuedAt        *time.Time `json:"pin_issued_at,omitempty"`
 	PreviousValidUntil *time.Time `json:"previous_valid_until,omitempty"`
-	NextRotationAt   *time.Time `json:"next_rotation_at,omitempty"`
-	StartedAt        *time.Time `json:"started_at,omitempty"`
-	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
-	ClosedAt         *time.Time `json:"closed_at,omitempty"`
+	NextRotationAt     *time.Time `json:"next_rotation_at,omitempty"`
+	StartedAt          *time.Time `json:"started_at,omitempty"`
+	ExpiresAt          *time.Time `json:"expires_at,omitempty"`
+	ClosedAt           *time.Time `json:"closed_at,omitempty"`
 }
 
 type AttendanceStartResult struct {

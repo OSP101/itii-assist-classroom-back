@@ -1012,12 +1012,12 @@ func StartAttendanceSessionHandler(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data": fiber.Map{
-			"session_id":        result.SessionID,
-			"current_pin":       result.CurrentPIN,
-			"expires_at":        result.ExpiresAt,
-			"next_rotation_at":  result.NextRotationAt,
-			"mode":              result.State.Mode,
-			"status":            result.State.Status,
+			"session_id":       result.SessionID,
+			"current_pin":      result.CurrentPIN,
+			"expires_at":       result.ExpiresAt,
+			"next_rotation_at": result.NextRotationAt,
+			"mode":             result.State.Mode,
+			"status":           result.State.Status,
 		},
 	})
 }
@@ -1039,15 +1039,15 @@ func GetAttendanceSessionPinHandler(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data": fiber.Map{
-			"session_id":        session.ID,
-			"status":            session.Status,
-			"mode":              session.PinMode,
-			"current_pin":       session.PinCode,
-			"previous_pin":      session.PreviousPinCode,
-			"expires_at":        session.ExpiresAt,
-			"pin_issued_at":     session.PinIssuedAt,
-			"next_rotation_at":  session.PinRotatesAt,
-			"next_pin_ready":    state != nil && strings.TrimSpace(state.NextPIN) != "",
+			"session_id":       session.ID,
+			"status":           session.Status,
+			"mode":             session.PinMode,
+			"current_pin":      session.PinCode,
+			"previous_pin":     session.PreviousPinCode,
+			"expires_at":       session.ExpiresAt,
+			"pin_issued_at":    session.PinIssuedAt,
+			"next_rotation_at": session.PinRotatesAt,
+			"next_pin_ready":   state != nil && strings.TrimSpace(state.NextPIN) != "",
 		},
 	})
 }
