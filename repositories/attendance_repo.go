@@ -381,6 +381,178 @@ func countAttendanceTargetStudents(courseID string, sectionIDs []uint) (int, err
 	return row.Total, nil
 }
 
+func attendanceSessionSectionIDsWithDB(db *gorm.DB, session *models.AttendanceSession) ([]uint, error) {
+	type sectionRow struct {
+		CourseSectionID uint `gorm:"column:course_section_id"`
+	}
+
+	var sectionRows []sectionRow
+	if err := db.Raw(`SELECT course_section_id FROM attendance_session_sections WHERE attendance_session_id = ?`, session.ID).Scan(&sectionRows).Error; err != nil {
+		return nil, err
+	}
+
+	sectionIDs := make([]uint, 0, len(sectionRows))
+	for _, row := range sectionRows {
+		if row.CourseSectionID > 0 {
+			sectionIDs = append(sectionIDs, row.CourseSectionID)
+		}
+	}
+	if len(sectionIDs) == 0 && session.CourseSectionID != nil && *session.CourseSectionID > 0 {
+		sectionIDs = append(sectionIDs, *session.CourseSectionID)
+	}
+
+	return sectionIDs, nil
+}
+
+func attendanceStudentEligibleWithDB(db *gorm.DB, courseID string, sectionIDs []uint, studentID uint) (bool, error) {
+	type countRow struct {
+		Total int `gorm:"column:total"`
+	}
+
+	var row countRow
+	if len(sectionIDs) > 0 {
+		if err := db.Raw(`
+			SELECT COUNT(*) AS total
+			FROM course_section_students
+			WHERE student_id = ? AND course_section_id IN ?
+		`, studentID, sectionIDs).Scan(&row).Error; err != nil {
+			return false, err
+		}
+		return row.Total > 0, nil
+	}
+
+	if err := db.Raw(`
+		SELECT COUNT(*) AS total
+		FROM course_section_students css
+		JOIN course_sections cs ON cs.id = css.course_section_id
+		WHERE css.student_id = ? AND cs.course_id = ?
+	`, studentID, courseID).Scan(&row).Error; err != nil {
+		return false, err
+	}
+	return row.Total > 0, nil
+}
+
+func backfillAttendanceRecordsWithDB(db *gorm.DB, session *models.AttendanceSession, sectionIDs []uint) error {
+	type idRow struct {
+		StudentID uint `gorm:"column:student_id"`
+	}
+
+	var targetRows []idRow
+	if len(sectionIDs) > 0 {
+		if err := db.Raw(`SELECT DISTINCT student_id FROM course_section_students WHERE course_section_id IN ?`, sectionIDs).Scan(&targetRows).Error; err != nil {
+			return err
+		}
+	} else {
+		if err := db.Raw(`
+			SELECT DISTINCT css.student_id
+			FROM course_section_students css
+			JOIN course_sections cs ON cs.id = css.course_section_id
+			WHERE cs.course_id = ?
+		`, session.CourseID).Scan(&targetRows).Error; err != nil {
+			return err
+		}
+	}
+
+	if len(targetRows) == 0 {
+		return nil
+	}
+
+	var existingRows []idRow
+	if err := db.Raw(`SELECT student_id FROM attendance_records WHERE attendance_session_id = ?`, session.ID).Scan(&existingRows).Error; err != nil {
+		return err
+	}
+
+	existing := make(map[uint]bool, len(existingRows))
+	for _, row := range existingRows {
+		existing[row.StudentID] = true
+	}
+
+	now := time.Now()
+	newRecords := make([]models.AttendanceRecord, 0)
+	for _, row := range targetRows {
+		if row.StudentID == 0 || existing[row.StudentID] {
+			continue
+		}
+		newRecords = append(newRecords, models.AttendanceRecord{
+			AttendanceSessionID: session.ID,
+			StudentID:           row.StudentID,
+			Status:              "absent",
+			CreatedAt:           now,
+			UpdatedAt:           now,
+		})
+	}
+
+	if len(newRecords) == 0 {
+		return nil
+	}
+	return db.Create(&newRecords).Error
+}
+
+func ensureAttendanceRecordInTx(tx *gorm.DB, session *models.AttendanceSession, studentID uint) (*models.AttendanceRecord, error) {
+	sectionIDs, err := attendanceSessionSectionIDsWithDB(tx, session)
+	if err != nil {
+		return nil, err
+	}
+
+	allowed, err := attendanceStudentEligibleWithDB(tx, session.CourseID, sectionIDs, studentID)
+	if err != nil {
+		return nil, err
+	}
+	if !allowed {
+		return nil, fmt.Errorf("student is not registered in this attendance session")
+	}
+
+	var record models.AttendanceRecord
+	if err := tx.Where("attendance_session_id = ? AND student_id = ?", session.ID, studentID).First(&record).Error; err == nil {
+		return &record, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	now := time.Now()
+	record = models.AttendanceRecord{
+		AttendanceSessionID: session.ID,
+		StudentID:           studentID,
+		Status:              "absent",
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+	if err := tx.Create(&record).Error; err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
+func EnsureAttendanceRecordForStudent(sessionID uint, studentID uint) (*models.AttendanceRecord, error) {
+	tx := config.DB.Begin()
+	if tx.Error != nil {
+		return nil, tx.Error
+	}
+
+	defer func() {
+		if recover() != nil {
+			tx.Rollback()
+		}
+	}()
+
+	var session models.AttendanceSession
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&session, sessionID).Error; err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+
+	record, err := ensureAttendanceRecordInTx(tx, &session, studentID)
+	if err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
 func GetAttendanceSessions(courseID string, status string) ([]AttendanceSessionWithStats, error) {
 	db := config.DB
 	var sessions []models.AttendanceSession
@@ -472,16 +644,12 @@ func GetAttendanceSession(id uint) (*AttendanceSessionDetail, error) {
 		return nil, err
 	}
 
-	// Get section IDs
-	type sectionRow struct{ CourseSectionID uint }
-	var sectionRows []sectionRow
-	db.Raw(`SELECT course_section_id FROM attendance_session_sections WHERE attendance_session_id = ?`, id).Scan(&sectionRows)
-	sectionIDs := make([]uint, len(sectionRows))
-	for i, r := range sectionRows {
-		sectionIDs[i] = r.CourseSectionID
+	sectionIDs, err := attendanceSessionSectionIDsWithDB(db, session)
+	if err != nil {
+		return nil, err
 	}
-	if len(sectionIDs) == 0 && session.CourseSectionID != nil && *session.CourseSectionID > 0 {
-		sectionIDs = []uint{*session.CourseSectionID}
+	if err := backfillAttendanceRecordsWithDB(db, session, sectionIDs); err != nil {
+		return nil, err
 	}
 
 	var section *AttendanceSectionBasic
