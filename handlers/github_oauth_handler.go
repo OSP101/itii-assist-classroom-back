@@ -239,10 +239,11 @@ func GitHubCallbackHandler(c fiber.Ctx) error {
 			return redirectErr("/auth/link-callback", "Failed to create session")
 		}
 
-		return c.Redirect().To(fmt.Sprintf(
-			"%s/auth/link-callback?linked=github&accessToken=%s&refreshToken=%s",
-			frontendURL, at, rt,
-		))
+		return c.Redirect().To(buildFrontendRedirectWithFragment(frontendURL, "/auth/link-callback", map[string]string{
+			"linked":       "github",
+			"accessToken":  at,
+			"refreshToken": rt,
+		}))
 	}
 
 	user, oauthAccount := findUserByGitHub(*profile)
@@ -270,10 +271,9 @@ func GitHubCallbackHandler(c fiber.Ctx) error {
 			"twoFactorMethod":   user.TwoFactorMethod,
 			"userId":            user.ID,
 		})
-		return c.Redirect().To(fmt.Sprintf(
-			"%s/auth/callback?twoFactor=%s",
-			frontendURL, url.QueryEscape(string(twoFactorJSON)),
-		))
+		return c.Redirect().To(buildFrontendRedirectWithFragment(frontendURL, "/auth/callback", map[string]string{
+			"twoFactor": string(twoFactorJSON),
+		}))
 	}
 
 	at, rt, err := issueOAuthSession(c, user, "github")
@@ -287,8 +287,8 @@ func GitHubCallbackHandler(c fiber.Ctx) error {
 		"loginFlow": "oauth",
 	})
 
-	return c.Redirect().To(fmt.Sprintf(
-		"%s/auth/callback?accessToken=%s&refreshToken=%s",
-		frontendURL, at, rt,
-	))
+	return c.Redirect().To(buildFrontendRedirectWithFragment(frontendURL, "/auth/callback", map[string]string{
+		"accessToken":  at,
+		"refreshToken": rt,
+	}))
 }

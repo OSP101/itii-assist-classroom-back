@@ -102,6 +102,18 @@ func getFrontendURL(c fiber.Ctx) string {
 	return strings.TrimRight(u, "/")
 }
 
+func buildFrontendRedirectWithFragment(baseURL, path string, params map[string]string) string {
+	fragment := url.Values{}
+	for key, value := range params {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		fragment.Set(key, value)
+	}
+
+	return fmt.Sprintf("%s%s#%s", baseURL, path, fragment.Encode())
+}
+
 // =============================================================================
 // Stateless CSRF — encode action + nonce in the state parameter and sign
 // with HMAC-SHA256 using JWT_SECRET.  No cookies needed, works across any
@@ -486,10 +498,11 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 		if err != nil {
 			return redirectErr("/auth/link-callback", "Failed to create session")
 		}
-		return c.Redirect().To(fmt.Sprintf(
-			"%s/auth/link-callback?linked=google&accessToken=%s&refreshToken=%s",
-			frontendURL, at, rt,
-		))
+		return c.Redirect().To(buildFrontendRedirectWithFragment(frontendURL, "/auth/link-callback", map[string]string{
+			"linked":       "google",
+			"accessToken":  at,
+			"refreshToken": rt,
+		}))
 	}
 
 	// =========================================================================
@@ -511,10 +524,10 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 			"email":      student.Email,
 			"provider":   "google",
 		})
-		return c.Redirect().To(fmt.Sprintf(
-			"%s/auth/callback?accessToken=%s&refreshToken=%s",
-			frontendURL, at, rt,
-		))
+		return c.Redirect().To(buildFrontendRedirectWithFragment(frontendURL, "/auth/callback", map[string]string{
+			"accessToken":  at,
+			"refreshToken": rt,
+		}))
 	}
 
 	user, oauthAccount := findUserByGoogle(profile, payload.Audience)
@@ -541,10 +554,9 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 			"twoFactorMethod":   user.TwoFactorMethod,
 			"userId":            user.ID,
 		})
-		return c.Redirect().To(fmt.Sprintf(
-			"%s/auth/callback?twoFactor=%s",
-			frontendURL, url.QueryEscape(string(twoFactorJSON)),
-		))
+		return c.Redirect().To(buildFrontendRedirectWithFragment(frontendURL, "/auth/callback", map[string]string{
+			"twoFactor": string(twoFactorJSON),
+		}))
 	}
 
 	at, rt, err := issueOAuthSession(c, user, "google")
@@ -557,8 +569,8 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 		"provider":  "google",
 		"loginFlow": "oauth",
 	})
-	return c.Redirect().To(fmt.Sprintf(
-		"%s/auth/callback?accessToken=%s&refreshToken=%s",
-		frontendURL, at, rt,
-	))
+	return c.Redirect().To(buildFrontendRedirectWithFragment(frontendURL, "/auth/callback", map[string]string{
+		"accessToken":  at,
+		"refreshToken": rt,
+	}))
 }
