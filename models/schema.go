@@ -786,6 +786,7 @@ type SystemAnnouncementAck struct {
 	ID             uint      `gorm:"primaryKey;autoIncrement" json:"id"`
 	AnnouncementID uint      `gorm:"not null;index" json:"announcement_id"`
 	UserID         uint      `gorm:"not null;index" json:"user_id"`
+	StudentID      *uint     `gorm:"index" json:"student_id,omitempty"`
 	AcknowledgedAt time.Time `gorm:"type:timestamptz" json:"acknowledged_at"`
 	CreatedAt      time.Time `gorm:"type:timestamptz" json:"created_at"`
 }

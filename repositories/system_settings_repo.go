@@ -553,7 +553,7 @@ func ListAnnouncements(includeExpired bool) ([]AnnouncementWithAck, error) {
 	return result, nil
 }
 
-func ListActiveAnnouncementsForUser(userID uint, role string) ([]ActiveAnnouncementForUser, error) {
+func ListActiveAnnouncementsForUser(userID uint, studentID uint, role string) ([]ActiveAnnouncementForUser, error) {
 	normalizedRole := strings.ToLower(strings.TrimSpace(role))
 	if normalizedRole == "" {
 		normalizedRole = "student"
@@ -582,8 +582,19 @@ func ListActiveAnnouncementsForUser(userID uint, role string) ([]ActiveAnnouncem
 		for _, row := range rows {
 			announcementIDs = append(announcementIDs, row.ID)
 		}
-		if err := config.DB.Where("user_id = ? AND announcement_id IN ?", userID, announcementIDs).Find(&ackRows).Error; err != nil {
-			return nil, err
+		ackQuery := config.DB.Where("announcement_id IN ?", announcementIDs)
+		switch {
+		case userID > 0:
+			ackQuery = ackQuery.Where("user_id = ?", userID)
+		case studentID > 0:
+			ackQuery = ackQuery.Where("student_id = ?", studentID)
+		default:
+			ackQuery = nil
+		}
+		if ackQuery != nil {
+			if err := ackQuery.Find(&ackRows).Error; err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -794,14 +805,23 @@ func UpdateAnnouncement(id uint, input AnnouncementInput) (*models.SystemAnnounc
 	return &announcement, nil
 }
 
-func AcknowledgeAnnouncement(announcementID uint, userID uint) error {
+func AcknowledgeAnnouncement(announcementID uint, userID uint, studentID uint) error {
 	var announcement models.SystemAnnouncement
 	if err := config.DB.Where("id = ? AND is_active = ?", announcementID, true).First(&announcement).Error; err != nil {
 		return err
 	}
 
 	var existing models.SystemAnnouncementAck
-	if err := config.DB.Where("announcement_id = ? AND user_id = ?", announcementID, userID).First(&existing).Error; err == nil {
+	lookup := config.DB.Where("announcement_id = ?", announcementID)
+	switch {
+	case userID > 0:
+		lookup = lookup.Where("user_id = ?", userID)
+	case studentID > 0:
+		lookup = lookup.Where("student_id = ?", studentID)
+	default:
+		return errors.New("announcement acknowledgement actor is required")
+	}
+	if err := lookup.First(&existing).Error; err == nil {
 		return nil
 	}
 
@@ -809,6 +829,9 @@ func AcknowledgeAnnouncement(announcementID uint, userID uint) error {
 		AnnouncementID: announcementID,
 		UserID:         userID,
 		AcknowledgedAt: time.Now(),
+	}
+	if studentID > 0 {
+		ack.StudentID = &studentID
 	}
 	return config.DB.Create(&ack).Error
 }

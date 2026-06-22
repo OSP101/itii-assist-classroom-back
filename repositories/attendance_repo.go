@@ -896,43 +896,75 @@ func DeleteAttendanceSession(id uint) error {
 // ============================================================
 
 func UpdateAttendanceRecord(sessionID uint, studentID uint, status string, note string, updatedBy uint) error {
-	now := time.Now()
-	result := config.DB.Model(&models.AttendanceRecord{}).
-		Where("attendance_session_id = ? AND student_id = ?", sessionID, studentID).
-		Updates(map[string]interface{}{
-			"status": status,
-			"check_in_time": func() *time.Time {
-				if status != "absent" {
-					return &now
-				}
-				return nil
-			}(),
-			"note":       note,
-			"updated_by": updatedBy,
-			"updated_at": now,
-		})
-	return result.Error
+	return config.DB.Transaction(func(tx *gorm.DB) error {
+		var session models.AttendanceSession
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&session, sessionID).Error; err != nil {
+			return err
+		}
+
+		record, err := ensureAttendanceRecordInTx(tx, &session, studentID)
+		if err != nil {
+			return err
+		}
+
+		sectionIDs, err := attendanceSessionSectionIDsWithDB(tx, &session)
+		if err != nil {
+			return err
+		}
+		if err := backfillAttendanceRecordsWithDB(tx, &session, sectionIDs); err != nil {
+			return err
+		}
+		now := time.Now()
+		return tx.Model(&models.AttendanceRecord{}).
+			Where("id = ?", record.ID).
+			Updates(map[string]interface{}{
+				"status": status,
+				"check_in_time": func() *time.Time {
+					if status != "absent" {
+						return &now
+					}
+					return nil
+				}(),
+				"note":       note,
+				"updated_by": updatedBy,
+				"updated_at": now,
+			}).Error
+	})
 }
 
 func BulkUpdateAttendanceRecords(sessionID uint, updates []AttendanceRecordUpdate, updatedBy uint) error {
-	db := config.DB
-	now := time.Now()
-	for _, u := range updates {
-		var checkInTime *time.Time
-		if u.Status != "absent" {
-			checkInTime = &now
+	return config.DB.Transaction(func(tx *gorm.DB) error {
+		var session models.AttendanceSession
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&session, sessionID).Error; err != nil {
+			return err
 		}
-		db.Model(&models.AttendanceRecord{}).
-			Where("attendance_session_id = ? AND student_id = ?", sessionID, u.StudentID).
-			Updates(map[string]interface{}{
-				"status":        u.Status,
-				"check_in_time": checkInTime,
-				"note":          u.Note,
-				"updated_by":    updatedBy,
-				"updated_at":    now,
-			})
-	}
-	return nil
+
+		now := time.Now()
+		for _, u := range updates {
+			record, err := ensureAttendanceRecordInTx(tx, &session, u.StudentID)
+			if err != nil {
+				return err
+			}
+
+			var checkInTime *time.Time
+			if u.Status != "absent" {
+				checkInTime = &now
+			}
+
+			if err := tx.Model(&models.AttendanceRecord{}).
+				Where("id = ?", record.ID).
+				Updates(map[string]interface{}{
+					"status":        u.Status,
+					"check_in_time": checkInTime,
+					"note":          u.Note,
+					"updated_by":    updatedBy,
+					"updated_at":    now,
+				}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 type AttendanceRecordUpdate struct {
@@ -965,6 +997,13 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 		var session models.AttendanceSession
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&session, sessionID).Error; err != nil {
 			return fmt.Errorf("ไม่พบ session")
+		}
+		sectionIDs, err := attendanceSessionSectionIDsWithDB(tx, &session)
+		if err != nil {
+			return err
+		}
+		if err := backfillAttendanceRecordsWithDB(tx, &session, sectionIDs); err != nil {
+			return err
 		}
 		now := time.Now()
 		if now.Before(session.StartTime) {

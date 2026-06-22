@@ -1174,6 +1174,9 @@ func VerifyStudentHandler(c fiber.Ctx) error {
 	}
 
 	if input.SessionID != nil {
+		if _, err := repositories.EnsureAttendanceRecordForStudent(*input.SessionID, student.ID); err != nil {
+			return c.Status(404).JSON(fiber.Map{"success": false, "message": "à¸„à¸¸à¸“à¹„à¸¡à¹ˆà¹„à¸”à¹‰à¸¥à¸‡à¸—à¸°à¹€à¸šà¸µà¸¢à¸™à¹ƒà¸™à¸£à¸²à¸¢à¸§à¸´à¸Šà¸²à¸™à¸µà¹‰"})
+		}
 		var record models.AttendanceRecord
 		if err := config.DB.Where("attendance_session_id = ? AND student_id = ?", *input.SessionID, student.ID).First(&record).Error; err != nil {
 			return c.Status(404).JSON(fiber.Map{"success": false, "message": "คุณไม่ได้ลงทะเบียนในรายวิชานี้"})

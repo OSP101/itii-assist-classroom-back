@@ -305,8 +305,9 @@ func ClearReadNotificationsHandler(c fiber.Ctx) error {
 
 // POST /api/notifications/announcements/:id/ack
 func AcknowledgeAnnouncementFromInboxHandler(c fiber.Ctx) error {
-	userID, ok := getNotificationUserID(c)
-	if !ok {
+	userID, hasUserID := middlewares.GetUserID(c)
+	studentID, hasStudentID := middlewares.GetStudentID(c)
+	if !hasUserID && !hasStudentID {
 		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
 	}
 	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
@@ -314,7 +315,7 @@ func AcknowledgeAnnouncementFromInboxHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid announcement ID"})
 	}
 
-	if err := repositories.AcknowledgeAnnouncement(uint(id), userID); err != nil {
+	if err := repositories.AcknowledgeAnnouncement(uint(id), userID, studentID); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Failed to acknowledge announcement"})
 	}
 

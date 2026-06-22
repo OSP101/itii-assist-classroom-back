@@ -234,15 +234,20 @@ func ListAnnouncementsHandler(c fiber.Ctx) error {
 }
 
 func ListActiveAnnouncementsForCurrentUserHandler(c fiber.Ctx) error {
+	role, _ := middlewares.GetUserRole(c)
 	userID, ok := middlewares.GetUserID(c)
+	studentID, hasStudentID := middlewares.GetStudentID(c)
 	if !ok {
-		return c.Status(401).JSON(fiber.Map{"success": false, "message": "ไม่พบผู้ใช้ใน session"})
+		// Student sessions only populate student_id in auth middleware.
+		if !hasStudentID {
+			return c.Status(401).JSON(fiber.Map{"success": false, "message": "user not found in session"})
+		}
+		userID = 0
 	}
 
-	role, _ := middlewares.GetUserRole(c)
-	rows, err := repositories.ListActiveAnnouncementsForUser(userID, role)
+	rows, err := repositories.ListActiveAnnouncementsForUser(userID, studentID, role)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ไม่สามารถดึงประกาศสำหรับผู้ใช้ได้"})
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "failed to load active announcements"})
 	}
 
 	return c.JSON(fiber.Map{"success": true, "data": rows})
@@ -419,7 +424,7 @@ func AcknowledgeAnnouncementHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "id ไม่ถูกต้อง"})
 	}
 
-	if err := repositories.AcknowledgeAnnouncement(uint(id), userID); err != nil {
+	if err := repositories.AcknowledgeAnnouncement(uint(id), userID, 0); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไม่สามารถยืนยันประกาศได้"})
 	}
 
