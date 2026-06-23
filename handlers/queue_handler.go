@@ -11,6 +11,7 @@ import (
 	"itii-assist/repositories"
 	"itii-assist/services"
 	"itii-assist/utils"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -410,6 +411,7 @@ func (h *QueueHandler) CloseQueueSession(c fiber.Ctx) error {
 		"session":   updatedSession,
 		"timestamp": time.Now().UnixMilli(),
 	})
+	go emitQueueReportSnapshot(updatedSession.ID)
 	return c.JSON(fiber.Map{"success": true, "message": "Session closed", "data": updatedSession})
 }
 
@@ -525,14 +527,31 @@ func GetQueueSessionReportHandler(c fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
 	}
 
+	reportData, err := buildQueueSessionReportData(courseID, sessionID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": err.Error()})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "data": reportData})
+}
+
+func buildQueueSessionReportData(courseID string, sessionID string) (fiber.Map, error) {
+	session, err := repositories.GetQueueSessionByID(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch session")
+	}
+	if courseID != "" && session.CourseID != courseID {
+		return nil, fmt.Errorf("session not found")
+	}
+
 	bookings, err := repositories.GetBookingsBySession(sessionID)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch bookings"})
+		return nil, fmt.Errorf("failed to fetch bookings")
 	}
 
 	workers, err := repositories.GetWorkersBySession(sessionID)
 	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch workers"})
+		return nil, fmt.Errorf("failed to fetch workers")
 	}
 
 	studentIDs := make([]uint, 0)
@@ -562,7 +581,7 @@ func GetQueueSessionReportHandler(c fiber.Ctx) error {
 	if len(studentIDs) > 0 {
 		var students []models.Student
 		if err := config.DB.Select("id", "student_id", "full_name").Where("id IN ?", studentIDs).Find(&students).Error; err != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch students"})
+			return nil, fmt.Errorf("failed to fetch students")
 		}
 		for _, student := range students {
 			studentMap[student.ID] = student
@@ -573,7 +592,7 @@ func GetQueueSessionReportHandler(c fiber.Ctx) error {
 	if len(workerIDs) > 0 {
 		var users []models.User
 		if err := config.DB.Select("id", "full_name").Where("id IN ?", workerIDs).Find(&users).Error; err != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch workers"})
+			return nil, fmt.Errorf("failed to fetch workers")
 		}
 		for _, user := range users {
 			workerMap[user.ID] = user
@@ -603,7 +622,7 @@ func GetQueueSessionReportHandler(c fiber.Ctx) error {
 			Where("course_id = ? AND target_type = ? AND target_id = ? AND action IN ? AND actor_user_id IN ?", courseID, "queue_session", sessionID, []string{"join_queue_worker", "leave_queue_worker"}, workerIDs).
 			Order("created_at ASC").
 			Scan(&activityLogs).Error; err != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch worker activity"})
+			return nil, fmt.Errorf("failed to fetch worker activity")
 		}
 
 		for _, logEntry := range activityLogs {
@@ -820,7 +839,7 @@ func GetQueueSessionReportHandler(c fiber.Ctx) error {
 			Where("course_id = ? AND action = ? AND target_type = ? AND target_id IN ?", courseID, "update_queue_booking", "queue_booking", bookingIDFilters).
 			Order("created_at ASC").
 			Scan(&actionLogs).Error; err != nil {
-			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to aggregate reject reasons"})
+			return nil, fmt.Errorf("failed to aggregate reject reasons")
 		}
 
 		for _, logEntry := range actionLogs {
@@ -867,19 +886,16 @@ func GetQueueSessionReportHandler(c fiber.Ctx) error {
 		})
 	}
 
-	return c.JSON(fiber.Map{
-		"success": true,
-		"data": fiber.Map{
-			"generated_at": now,
-			"session": fiber.Map{
-				"id":    session.ID,
-				"title": session.Title,
-			},
-			"bookings":            bookingReports,
-			"worker_stats":        workerStats,
-			"reject_reason_stats": rejectReasonStats,
+	return fiber.Map{
+		"generated_at": now,
+		"session": fiber.Map{
+			"id":    session.ID,
+			"title": session.Title,
 		},
-	})
+		"bookings":            bookingReports,
+		"worker_stats":        workerStats,
+		"reject_reason_stats": rejectReasonStats,
+	}, nil
 }
 
 func queueBookingDeviceLabel(userAgent string) string {
@@ -998,6 +1014,7 @@ func WorkerJoinHandler(c fiber.Ctx) error {
 
 	logCourseActivity(c, session.CourseID, userID, "join_queue_worker", "queue", "queue_session", session.ID, session.Title, fiber.Map{"accept_grading": input.AcceptGrading, "accept_help": input.AcceptHelp})
 	realtime.EmitToQueue(sessionID, "worker-joined", fiber.Map{"worker": worker, "timestamp": time.Now().UnixMilli()})
+	go emitQueueReportSnapshot(sessionID)
 	return c.JSON(fiber.Map{"success": true, "data": worker, "assignedBooking": assignedBookingPayload})
 }
 
@@ -1047,6 +1064,7 @@ func WorkerLeaveHandler(c fiber.Ctx) error {
 
 	logCourseActivity(c, session.CourseID, userID, "leave_queue_worker", "queue", "queue_session", session.ID, session.Title, fiber.Map{"status": newStatus})
 	realtime.EmitToQueue(sessionID, "worker-left", fiber.Map{"worker_id": userID, "status": newStatus, "timestamp": time.Now().UnixMilli()})
+	go emitQueueReportSnapshot(sessionID)
 
 	return c.JSON(fiber.Map{"success": true, "message": message, "data": fiber.Map{"status": newStatus}})
 }
@@ -2901,6 +2919,265 @@ func GetQueueDeskStatusesPublicHandler(c fiber.Ctx) error {
 	})
 }
 
+func buildQueueDeskStatusesSnapshotData(sessionID string) (fiber.Map, error) {
+	session, err := repositories.GetQueueSessionByID(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch queue session")
+	}
+
+	classroom, err := loadQueueClassroom(session.ClassroomID)
+	if err != nil {
+		return nil, err
+	}
+
+	var desks []models.Desk
+	if err := config.DB.Where("classroom_id = ? AND (is_enabled = ? OR type = ?)", session.ClassroomID, true, "teacher").Order("number ASC").Find(&desks).Error; err != nil {
+		return nil, err
+	}
+
+	var deskStatuses []models.QueueDeskStatus
+	if err := config.DB.Where("queue_session_id = ?", sessionID).Find(&deskStatuses).Error; err != nil {
+		return nil, err
+	}
+
+	var activeBookings []models.QueueBooking
+	if err := config.DB.Where("queue_session_id = ? AND status IN ? AND desk_id <> ''", sessionID, []string{"waiting", "in_progress"}).Order("created_at DESC").Find(&activeBookings).Error; err != nil {
+		return nil, err
+	}
+
+	var completedGradingBookings []models.QueueBooking
+	if err := config.DB.Where("queue_session_id = ? AND booking_type = ? AND status = ? AND desk_id <> ''", sessionID, "grading", "completed").
+		Order("completed_at DESC NULLS LAST, updated_at DESC, id DESC").
+		Find(&completedGradingBookings).Error; err != nil {
+		return nil, err
+	}
+
+	studentIDs := make([]uint, 0)
+	studentSet := map[uint]struct{}{}
+	for _, booking := range activeBookings {
+		if _, ok := studentSet[booking.StudentID]; !ok {
+			studentSet[booking.StudentID] = struct{}{}
+			studentIDs = append(studentIDs, booking.StudentID)
+		}
+	}
+	for _, booking := range completedGradingBookings {
+		if _, ok := studentSet[booking.StudentID]; !ok {
+			studentSet[booking.StudentID] = struct{}{}
+			studentIDs = append(studentIDs, booking.StudentID)
+		}
+	}
+
+	studentMap := map[uint]models.Student{}
+	if len(studentIDs) > 0 {
+		var students []models.Student
+		if err := config.DB.Where("id IN ?", studentIDs).Find(&students).Error; err != nil {
+			return nil, err
+		}
+		for _, student := range students {
+			studentMap[student.ID] = student
+		}
+	}
+
+	workerIDs := make([]uint, 0)
+	workerSet := map[uint]struct{}{}
+	for _, booking := range activeBookings {
+		if booking.AssignedWorkerID == nil {
+			continue
+		}
+		if _, ok := workerSet[*booking.AssignedWorkerID]; ok {
+			continue
+		}
+		workerSet[*booking.AssignedWorkerID] = struct{}{}
+		workerIDs = append(workerIDs, *booking.AssignedWorkerID)
+	}
+	for _, booking := range completedGradingBookings {
+		if booking.AssignedWorkerID == nil {
+			continue
+		}
+		if _, ok := workerSet[*booking.AssignedWorkerID]; ok {
+			continue
+		}
+		workerSet[*booking.AssignedWorkerID] = struct{}{}
+		workerIDs = append(workerIDs, *booking.AssignedWorkerID)
+	}
+
+	workerMap := map[uint]models.User{}
+	if len(workerIDs) > 0 {
+		var workers []models.User
+		if err := config.DB.Select("id", "full_name", "avatar").Where("id IN ?", workerIDs).Find(&workers).Error; err != nil {
+			return nil, err
+		}
+		for _, worker := range workers {
+			workerMap[worker.ID] = worker
+		}
+	}
+
+	selectedDeskBookings := map[string]models.QueueBooking{}
+	helpDeskBookings := map[string]models.QueueBooking{}
+	gradingDeskBookings := map[string]models.QueueBooking{}
+	completedDeskBookings := map[string]models.QueueBooking{}
+	for _, booking := range activeBookings {
+		if current, exists := selectedDeskBookings[booking.DeskID]; !exists || shouldReplaceDeskBooking(current, booking) {
+			selectedDeskBookings[booking.DeskID] = booking
+		}
+
+		switch booking.BookingType {
+		case "help":
+			if current, exists := helpDeskBookings[booking.DeskID]; !exists || shouldReplaceDeskBooking(current, booking) {
+				helpDeskBookings[booking.DeskID] = booking
+			}
+		case "grading":
+			if current, exists := gradingDeskBookings[booking.DeskID]; !exists || shouldReplaceDeskBooking(current, booking) {
+				gradingDeskBookings[booking.DeskID] = booking
+			}
+		}
+	}
+	for _, booking := range completedGradingBookings {
+		if _, exists := completedDeskBookings[booking.DeskID]; !exists {
+			completedDeskBookings[booking.DeskID] = booking
+		}
+	}
+
+	bookingMap := map[string]fiber.Map{}
+	for deskID, booking := range selectedDeskBookings {
+		student := studentMap[booking.StudentID]
+		entry := fiber.Map{
+			"id":           booking.ID,
+			"queue_number": booking.QueueNumber,
+			"booking_type": booking.BookingType,
+			"status":       booking.Status,
+			"student_name": student.FullName,
+			"student_code": student.StudentID,
+		}
+		if booking.Status == "in_progress" && booking.AssignedWorkerID != nil {
+			if worker, ok := workerMap[*booking.AssignedWorkerID]; ok {
+				entry["assigned_worker"] = fiber.Map{
+					"id":        worker.ID,
+					"full_name": worker.FullName,
+					"avatar":    worker.Avatar,
+				}
+			}
+		}
+		bookingMap[deskID] = entry
+	}
+	for deskID, booking := range completedDeskBookings {
+		if _, exists := bookingMap[deskID]; exists {
+			continue
+		}
+		student := studentMap[booking.StudentID]
+		entry := fiber.Map{
+			"id":           booking.ID,
+			"queue_number": booking.QueueNumber,
+			"booking_type": booking.BookingType,
+			"status":       booking.Status,
+			"student_name": student.FullName,
+			"student_code": student.StudentID,
+		}
+		if booking.AssignedWorkerID != nil {
+			if worker, ok := workerMap[*booking.AssignedWorkerID]; ok {
+				entry["assigned_worker"] = fiber.Map{
+					"id":        worker.ID,
+					"full_name": worker.FullName,
+					"avatar":    worker.Avatar,
+				}
+			}
+		}
+		bookingMap[deskID] = entry
+	}
+
+	statusMap := map[string]models.QueueDeskStatus{}
+	for _, deskStatus := range deskStatuses {
+		statusMap[deskStatus.DeskID] = deskStatus
+	}
+
+	desksWithStatus := make([]fiber.Map, 0, len(desks))
+	for _, desk := range desks {
+		status := fiber.Map{
+			"grading_status": "not_started",
+			"help_status":    "none",
+		}
+		if deskStatus, ok := statusMap[desk.ID]; ok {
+			status = fiber.Map{
+				"id":                 deskStatus.ID,
+				"queue_session_id":   deskStatus.QueueSessionID,
+				"desk_id":            deskStatus.DeskID,
+				"grading_status":     deskStatus.GradingStatus,
+				"grading_booking_id": deskStatus.GradingBookingID,
+				"help_status":        deskStatus.HelpStatus,
+				"help_booking_id":    deskStatus.HelpBookingID,
+				"updated_at":         deskStatus.UpdatedAt,
+			}
+			if deskStatus.GradingStatus == "completed" {
+				if completedBooking, ok := completedDeskBookings[desk.ID]; ok {
+					status["grading_booking_id"] = completedBooking.ID
+				} else {
+					status["grading_status"] = "not_started"
+					status["grading_booking_id"] = nil
+				}
+			}
+		}
+		if helpBooking, ok := helpDeskBookings[desk.ID]; ok {
+			status["help_status"] = helpBooking.Status
+			status["help_booking_id"] = helpBooking.ID
+		}
+		if gradingBooking, ok := gradingDeskBookings[desk.ID]; ok {
+			status["grading_status"] = gradingBooking.Status
+			status["grading_booking_id"] = gradingBooking.ID
+		}
+
+		desksWithStatus = append(desksWithStatus, fiber.Map{
+			"id":           desk.ID,
+			"classroom_id": desk.ClassroomID,
+			"number":       desk.Number,
+			"x":            desk.X,
+			"y":            desk.Y,
+			"type":         desk.Type,
+			"is_enabled":   desk.IsEnabled,
+			"created_at":   desk.CreatedAt,
+			"updated_at":   desk.UpdatedAt,
+			"status":       status,
+			"booking":      bookingMap[desk.ID],
+		})
+	}
+
+	var queueCounts []struct {
+		BookingType string
+		Count       int64
+	}
+	if err := config.DB.Model(&models.QueueBooking{}).
+		Select("booking_type, COUNT(id) AS count").
+		Where("queue_session_id = ? AND status = ?", sessionID, "waiting").
+		Group("booking_type").
+		Scan(&queueCounts).Error; err != nil {
+		return nil, err
+	}
+
+	queueStats := fiber.Map{"grading_waiting": int64(0), "help_waiting": int64(0)}
+	for _, row := range queueCounts {
+		queueStats[fmt.Sprintf("%s_waiting", row.BookingType)] = row.Count
+	}
+
+	return fiber.Map{
+		"session": fiber.Map{
+			"id":                session.ID,
+			"course_id":         session.CourseID,
+			"title":             session.Title,
+			"pin_code":          session.PinCode,
+			"status":            session.Status,
+			"is_cutoff_enabled": session.IsCutoffEnabled,
+			"cutoff_at":         session.CutoffAt,
+			"cutoff_note":       session.CutoffNote,
+		},
+		"classroom": fiber.Map{
+			"id":       classroom.ID,
+			"name":     classroom.Name,
+			"building": classroom.Building,
+		},
+		"desks":      desksWithStatus,
+		"queueStats": queueStats,
+	}, nil
+}
+
 // POST /api/queue/sessions/:sessionId/status
 func UpdateQueueSessionStatusPublicHandler(c fiber.Ctx) error {
 	var input struct {
@@ -2953,6 +3230,7 @@ func UpdateQueueSessionStatusPublicHandler(c fiber.Ctx) error {
 		logCourseActivity(c, updatedSession.CourseID, actorID, "update_queue_session_status", "queue", "queue_session", updatedSession.ID, updatedSession.Title, fiber.Map{"status": updatedSession.Status, "source": "projector"})
 	}
 	realtime.EmitToQueue(updatedSession.ID, "session-status-changed", fiber.Map{"status": updatedSession.Status, "session": updatedSession, "timestamp": time.Now().UnixMilli()})
+	go emitQueueReportSnapshot(updatedSession.ID)
 
 	return c.JSON(fiber.Map{"success": true, "data": updatedSession})
 }
@@ -3007,6 +3285,7 @@ func UpdateQueueSessionCutoffPublicHandler(c fiber.Ctx) error {
 		"cutoff_at":         updatedSession.CutoffAt,
 		"timestamp":         time.Now().UnixMilli(),
 	})
+	go emitQueueReportSnapshot(updatedSession.ID)
 
 	return c.JSON(fiber.Map{"success": true, "data": updatedSession})
 }
@@ -3057,6 +3336,7 @@ func UpdateQueueSessionStatusCompatHandler(c fiber.Ctx) error {
 		return queueLegacyError(c, 500, err.Error())
 	}
 	realtime.EmitToQueue(updatedSession.ID, "session-status-changed", fiber.Map{"status": updatedSession.Status, "session": updatedSession, "timestamp": time.Now().UnixMilli()})
+	go emitQueueReportSnapshot(updatedSession.ID)
 
 	return c.JSON(fiber.Map{"success": true, "data": updatedSession})
 }
@@ -3097,6 +3377,29 @@ func emitQueueBookingChanged(sessionID string, event string, booking *models.Que
 	realtime.EmitToQueue(sessionID, event, payload)
 	realtime.EmitToBooking(booking.ID, event, payload)
 	realtime.EmitDataUpdate("queue", "update", booking.ID, payload)
+	go emitQueueReportSnapshot(sessionID)
+}
+
+func emitQueueReportSnapshot(sessionID string) {
+	reportData, reportErr := buildQueueSessionReportData("", sessionID)
+	if reportErr != nil {
+		log.Printf("queue snapshot: failed to build report session=%s err=%v", sessionID, reportErr)
+		return
+	}
+
+	deskData, deskErr := buildQueueDeskStatusesSnapshotData(sessionID)
+	if deskErr != nil {
+		log.Printf("queue snapshot: failed to build desk snapshot session=%s err=%v", sessionID, deskErr)
+		return
+	}
+
+	realtime.EmitToQueue(sessionID, "queue-report-snapshot", fiber.Map{
+		"snapshot": fiber.Map{
+			"report":   reportData,
+			"deskData": deskData,
+		},
+		"timestamp": time.Now().UnixMilli(),
+	})
 }
 
 func emitQueueActionChanged(booking *models.QueueBooking, action string) {
