@@ -116,6 +116,39 @@ func TestStartAttendanceSessionStatic(t *testing.T) {
 	}
 }
 
+func TestRefreshAttendanceSessionPinStateKeepsStaticDraftPIN(t *testing.T) {
+	_, cleanup := setupAttendanceRuntimeTest(t)
+	defer cleanup()
+
+	session := createAttendanceSessionFixture(t, false)
+
+	refreshed, change, err := RefreshAttendanceSessionPinState(session.ID)
+	if err != nil {
+		t.Fatalf("refresh session pin state: %v", err)
+	}
+	if refreshed.Status != "draft" {
+		t.Fatalf("expected draft status, got %q", refreshed.Status)
+	}
+	if refreshed.PinCode == "" {
+		t.Fatal("expected static draft session to expose a preview pin")
+	}
+	if refreshed.PinRotatesAt != nil {
+		t.Fatal("expected static draft session to have no rotation timestamp")
+	}
+	if change.Released {
+		t.Fatal("did not expect static draft preview pin to be released")
+	}
+
+	firstPin := refreshed.PinCode
+	refreshedAgain, _, err := RefreshAttendanceSessionPinState(session.ID)
+	if err != nil {
+		t.Fatalf("refresh session pin state again: %v", err)
+	}
+	if refreshedAgain.PinCode != firstPin {
+		t.Fatalf("expected static draft preview pin %q to persist, got %q", firstPin, refreshedAgain.PinCode)
+	}
+}
+
 func TestStartAttendanceSessionRotatingAndRotate(t *testing.T) {
 	_, cleanup := setupAttendanceRuntimeTest(t)
 	defer cleanup()

@@ -463,8 +463,8 @@ type AttendanceSessionSection struct {
 
 type AttendanceRecord struct {
 	ID                  uint       `gorm:"primaryKey;autoIncrement" json:"id"`
-	AttendanceSessionID uint       `gorm:"not null;index" json:"attendance_session_id"`
-	StudentID           uint       `gorm:"not null;index" json:"student_id"`
+	AttendanceSessionID uint       `gorm:"not null;index;uniqueIndex:idx_attendance_session_student" json:"attendance_session_id"`
+	StudentID           uint       `gorm:"not null;index;uniqueIndex:idx_attendance_session_student" json:"student_id"`
 	CheckInTime         *time.Time `gorm:"type:timestamptz" json:"check_in_time,omitempty"`
 	Status              string     `gorm:"type:varchar(20);default:'absent'" json:"status"` // present, late, leave, absent
 	GoogleEmail         string     `gorm:"type:varchar(255)" json:"google_email"`

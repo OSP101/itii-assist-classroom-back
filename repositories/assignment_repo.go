@@ -12,7 +12,18 @@ import (
 
 type AssignmentWithSubItems struct {
 	models.Assignment
-	SubItems []models.AssignmentSubItem `json:"subItems"`
+	SubItems                 []models.AssignmentSubItem `json:"subItems"`
+	LinkedAttendanceSession  *LinkedAttendanceSession   `json:"linkedAttendanceSession,omitempty"`
+	LinkedAttendanceSessions []LinkedAttendanceSession  `json:"linkedAttendanceSessions"`
+}
+
+type LinkedAttendanceSession struct {
+	ID              uint      `json:"id"`
+	Title           string    `json:"title"`
+	StartTime       time.Time `json:"start_time"`
+	EndTime         time.Time `json:"end_time"`
+	SessionType     string    `json:"session_type,omitempty"`
+	CourseSectionID *uint     `json:"course_section_id,omitempty"`
 }
 
 func GetAssignments(courseID string) ([]AssignmentWithSubItems, error) {
@@ -40,13 +51,32 @@ func GetAssignments(courseID string) ([]AssignmentWithSubItems, error) {
 		subItemsMap[si.AssignmentID] = append(subItemsMap[si.AssignmentID], si)
 	}
 
+	linkedSessionsMap, err := loadAssignmentAttendanceLinks(assignmentIDs)
+	if err != nil {
+		return nil, err
+	}
+
 	result := make([]AssignmentWithSubItems, len(assignments))
 	for i, a := range assignments {
 		subs := subItemsMap[a.ID]
 		if subs == nil {
 			subs = []models.AssignmentSubItem{}
 		}
-		result[i] = AssignmentWithSubItems{Assignment: a, SubItems: subs}
+		linkedSessions := linkedSessionsMap[a.ID]
+		if linkedSessions == nil {
+			linkedSessions = []LinkedAttendanceSession{}
+		}
+		var legacyLinkedSession *LinkedAttendanceSession
+		if len(linkedSessions) > 0 {
+			first := linkedSessions[0]
+			legacyLinkedSession = &first
+		}
+		result[i] = AssignmentWithSubItems{
+			Assignment:               a,
+			SubItems:                 subs,
+			LinkedAttendanceSession:  legacyLinkedSession,
+			LinkedAttendanceSessions: linkedSessions,
+		}
 	}
 	return result, nil
 }
@@ -61,7 +91,25 @@ func GetAssignmentWithSubItems(id uint) (*AssignmentWithSubItems, error) {
 	if subItems == nil {
 		subItems = []models.AssignmentSubItem{}
 	}
-	return &AssignmentWithSubItems{Assignment: a, SubItems: subItems}, nil
+	linkedSessionsMap, err := loadAssignmentAttendanceLinks([]uint{id})
+	if err != nil {
+		return nil, err
+	}
+	linkedSessions := linkedSessionsMap[id]
+	if linkedSessions == nil {
+		linkedSessions = []LinkedAttendanceSession{}
+	}
+	var legacyLinkedSession *LinkedAttendanceSession
+	if len(linkedSessions) > 0 {
+		first := linkedSessions[0]
+		legacyLinkedSession = &first
+	}
+	return &AssignmentWithSubItems{
+		Assignment:               a,
+		SubItems:                 subItems,
+		LinkedAttendanceSession:  legacyLinkedSession,
+		LinkedAttendanceSessions: linkedSessions,
+	}, nil
 }
 
 func CreateAssignment(a *models.Assignment, subItems []models.AssignmentSubItem) error {
@@ -137,4 +185,54 @@ func LinkAttendanceSessions(assignmentID uint, sessionIDs []uint) error {
 		}
 	}
 	return db.Create(&links).Error
+}
+
+func loadAssignmentAttendanceLinks(assignmentIDs []uint) (map[uint][]LinkedAttendanceSession, error) {
+	result := make(map[uint][]LinkedAttendanceSession, len(assignmentIDs))
+	if len(assignmentIDs) == 0 {
+		return result, nil
+	}
+
+	type assignmentAttendanceRow struct {
+		AssignmentID    uint      `gorm:"column:assignment_id"`
+		ID              uint      `gorm:"column:id"`
+		Title           string    `gorm:"column:title"`
+		StartTime       time.Time `gorm:"column:start_time"`
+		EndTime         time.Time `gorm:"column:end_time"`
+		SessionType     string    `gorm:"column:session_type"`
+		CourseSectionID *uint     `gorm:"column:course_section_id"`
+	}
+
+	var rows []assignmentAttendanceRow
+	err := config.DB.
+		Table("assignment_attendance_links AS aal").
+		Select(`
+			aal.assignment_id,
+			s.id,
+			s.title,
+			s.start_time,
+			s.end_time,
+			s.session_type,
+			s.course_section_id
+		`).
+		Joins("JOIN attendance_sessions AS s ON s.id = aal.attendance_session_id").
+		Where("aal.assignment_id IN ?", assignmentIDs).
+		Order("aal.assignment_id ASC, s.start_time ASC, s.id ASC").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	for _, row := range rows {
+		result[row.AssignmentID] = append(result[row.AssignmentID], LinkedAttendanceSession{
+			ID:              row.ID,
+			Title:           row.Title,
+			StartTime:       row.StartTime,
+			EndTime:         row.EndTime,
+			SessionType:     row.SessionType,
+			CourseSectionID: row.CourseSectionID,
+		})
+	}
+
+	return result, nil
 }

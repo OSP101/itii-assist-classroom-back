@@ -1,4 +1,4 @@
-﻿package handlers
+package handlers
 
 import (
 	"itii-assist/models"
@@ -39,17 +39,20 @@ func GetAssignmentHandler(c fiber.Ctx) error {
 // POST /api/assignments
 func CreateAssignmentHandler(c fiber.Ctx) error {
 	var input struct {
-		CourseID       string     `json:"course_id"`
-		Name           string     `json:"name"`
-		Description    string     `json:"description"`
-		AssignmentType string     `json:"assignment_type"`
-		WeekNumber     *int       `json:"week_number"`
-		MaxScore       float64    `json:"max_score"`
-		DueDate        *time.Time `json:"due_date"`
-		IsScoreVisible bool       `json:"is_score_visible"`
-		IsDraft        bool       `json:"is_draft"`
-		PublishAt      *time.Time `json:"publish_at"`
-		SubItems       []struct {
+		CourseID                   string     `json:"course_id"`
+		Name                       string     `json:"name"`
+		Description                string     `json:"description"`
+		AssignmentType             string     `json:"assignment_type"`
+		WeekNumber                 *int       `json:"week_number"`
+		LinkedAttendanceSessionID  *uint      `json:"linked_attendance_session_id"`
+		LinkedAttendanceSessionIDs []uint     `json:"linked_attendance_session_ids"`
+		AttendanceCondition        string     `json:"attendance_condition"`
+		MaxScore                   float64    `json:"max_score"`
+		DueDate                    *time.Time `json:"due_date"`
+		IsScoreVisible             bool       `json:"is_score_visible"`
+		IsDraft                    bool       `json:"is_draft"`
+		PublishAt                  *time.Time `json:"publish_at"`
+		SubItems                   []struct {
 			Name     string  `json:"name"`
 			MaxScore float64 `json:"max_score"`
 		} `json:"sub_items"`
@@ -72,18 +75,23 @@ func CreateAssignmentHandler(c fiber.Ctx) error {
 	}
 
 	assignment := models.Assignment{
-		CourseID:       input.CourseID,
-		Name:           input.Name,
-		Description:    input.Description,
-		AssignmentType: assignType,
-		WeekNumber:     input.WeekNumber,
-		MaxScore:       maxScore,
-		DueDate:        input.DueDate,
-		IsScoreVisible: input.IsScoreVisible,
-		IsDraft:        input.IsDraft,
-		PublishAt:      input.PublishAt,
-		IsActive:       true,
-		CreatedBy:      userID,
+		CourseID:            input.CourseID,
+		Name:                input.Name,
+		Description:         input.Description,
+		AssignmentType:      assignType,
+		WeekNumber:          input.WeekNumber,
+		AttendanceCondition: "or",
+		MaxScore:            maxScore,
+		DueDate:             input.DueDate,
+		IsScoreVisible:      input.IsScoreVisible,
+		IsDraft:             input.IsDraft,
+		PublishAt:           input.PublishAt,
+		IsActive:            true,
+		CreatedBy:           userID,
+	}
+
+	if input.AttendanceCondition == "and" || input.AttendanceCondition == "or" {
+		assignment.AttendanceCondition = input.AttendanceCondition
 	}
 
 	var subItems []models.AssignmentSubItem
@@ -94,11 +102,24 @@ func CreateAssignmentHandler(c fiber.Ctx) error {
 	if err := repositories.CreateAssignment(&assignment, subItems); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to create assignment"})
 	}
+	sessionIDs := input.LinkedAttendanceSessionIDs
+	if len(sessionIDs) == 0 && input.LinkedAttendanceSessionID != nil {
+		sessionIDs = []uint{*input.LinkedAttendanceSessionID}
+	}
+	if err := repositories.LinkAttendanceSessions(assignment.ID, sessionIDs); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to link attendance sessions"})
+	}
+	createdAssignment, err := repositories.GetAssignmentWithSubItems(assignment.ID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load created assignment"})
+	}
 	logCourseActivity(c, input.CourseID, userID, "create_assignment", "assignment", "assignment", assignment.ID, assignment.Name, fiber.Map{
-		"assignment_type": assignment.AssignmentType,
-		"week_number":     assignment.WeekNumber,
-		"max_score":       assignment.MaxScore,
-		"sub_item_count":  len(subItems),
+		"assignment_type":   assignment.AssignmentType,
+		"week_number":       assignment.WeekNumber,
+		"max_score":         assignment.MaxScore,
+		"sub_item_count":    len(subItems),
+		"attendance_links":  sessionIDs,
+		"attendance_policy": assignment.AttendanceCondition,
 	})
 	realtime.EmitDataUpdate("assignment", "create", assignment.ID, fiber.Map{
 		"courseId":     assignment.CourseID,
@@ -116,7 +137,7 @@ func CreateAssignmentHandler(c fiber.Ctx) error {
 			buildNotifData(input.CourseID, strconv.FormatUint(uint64(assignment.ID), 10), "assignment", ""),
 		)
 	}
-	return c.Status(201).JSON(fiber.Map{"success": true, "data": assignment})
+	return c.Status(201).JSON(fiber.Map{"success": true, "data": createdAssignment})
 }
 
 // PUT /api/assignments/:id
@@ -128,16 +149,24 @@ func UpdateAssignmentHandler(c fiber.Ctx) error {
 	actorID := c.Locals("user_id").(uint)
 
 	var input struct {
-		Name            string     `json:"name"`
-		Description     string     `json:"description"`
-		AssignmentType  string     `json:"assignment_type"`
-		WeekNumber      *int       `json:"week_number"`
-		MaxScore        *float64   `json:"max_score"`
-		DueDate         *time.Time `json:"due_date"`
-		IsScoreVisible  *bool      `json:"is_score_visible"`
-		IsDraft         *bool      `json:"is_draft"`
-		PublishAt       *time.Time `json:"publish_at"`
-		ClearPublishAt  bool       `json:"clear_publish_at"`
+		Name                       string     `json:"name"`
+		Description                string     `json:"description"`
+		AssignmentType             string     `json:"assignment_type"`
+		WeekNumber                 *int       `json:"week_number"`
+		LinkedAttendanceSessionID  *uint      `json:"linked_attendance_session_id"`
+		LinkedAttendanceSessionIDs *[]uint    `json:"linked_attendance_session_ids"`
+		AttendanceCondition        string     `json:"attendance_condition"`
+		MaxScore                   *float64   `json:"max_score"`
+		DueDate                    *time.Time `json:"due_date"`
+		IsScoreVisible             *bool      `json:"is_score_visible"`
+		IsDraft                    *bool      `json:"is_draft"`
+		PublishAt                  *time.Time `json:"publish_at"`
+		ClearPublishAt             bool       `json:"clear_publish_at"`
+		SubItems                   *[]struct {
+			ID       *uint   `json:"id"`
+			Name     string  `json:"name"`
+			MaxScore float64 `json:"max_score"`
+		} `json:"sub_items"`
 		ReplaceSubItems *[]struct {
 			Name     string  `json:"name"`
 			MaxScore float64 `json:"max_score"`
@@ -165,6 +194,9 @@ func UpdateAssignmentHandler(c fiber.Ctx) error {
 	if input.WeekNumber != nil {
 		a.WeekNumber = input.WeekNumber
 	}
+	if input.AttendanceCondition == "and" || input.AttendanceCondition == "or" {
+		a.AttendanceCondition = input.AttendanceCondition
+	}
 	if input.MaxScore != nil {
 		a.MaxScore = *input.MaxScore
 	}
@@ -185,7 +217,14 @@ func UpdateAssignmentHandler(c fiber.Ctx) error {
 	}
 
 	var subItemsPtr *[]models.AssignmentSubItem
-	if input.ReplaceSubItems != nil {
+	switch {
+	case input.SubItems != nil:
+		var items []models.AssignmentSubItem
+		for _, si := range *input.SubItems {
+			items = append(items, models.AssignmentSubItem{Name: si.Name, MaxScore: si.MaxScore})
+		}
+		subItemsPtr = &items
+	case input.ReplaceSubItems != nil:
 		var items []models.AssignmentSubItem
 		for _, si := range *input.ReplaceSubItems {
 			items = append(items, models.AssignmentSubItem{Name: si.Name, MaxScore: si.MaxScore})
@@ -196,11 +235,31 @@ func UpdateAssignmentHandler(c fiber.Ctx) error {
 	if err := repositories.UpdateAssignment(&a, subItemsPtr); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update assignment"})
 	}
+	var sessionIDsToSave []uint
+	shouldUpdateAttendanceLinks := false
+	if input.LinkedAttendanceSessionIDs != nil {
+		sessionIDsToSave = append(sessionIDsToSave, *input.LinkedAttendanceSessionIDs...)
+		shouldUpdateAttendanceLinks = true
+	} else if input.LinkedAttendanceSessionID != nil {
+		sessionIDsToSave = []uint{*input.LinkedAttendanceSessionID}
+		shouldUpdateAttendanceLinks = true
+	}
+	if shouldUpdateAttendanceLinks {
+		if err := repositories.LinkAttendanceSessions(a.ID, sessionIDsToSave); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update attendance links"})
+		}
+	}
+	updatedAssignment, err := repositories.GetAssignmentWithSubItems(a.ID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load updated assignment"})
+	}
 	logCourseActivity(c, a.CourseID, actorID, "update_assignment", "assignment", "assignment", a.ID, a.Name, fiber.Map{
 		"assignment_type":   a.AssignmentType,
 		"week_number":       a.WeekNumber,
 		"max_score":         a.MaxScore,
 		"replace_sub_items": subItemsPtr != nil,
+		"attendance_links":  sessionIDsToSave,
+		"attendance_policy": a.AttendanceCondition,
 	})
 	wasPublished := existingAssignment.IsDraft && !a.IsDraft
 	realtime.EmitDataUpdate("assignment", "update", a.ID, fiber.Map{
@@ -227,7 +286,7 @@ func UpdateAssignmentHandler(c fiber.Ctx) error {
 			buildNotifData(a.CourseID, strconv.FormatUint(uint64(a.ID), 10), "assignment", ""),
 		)
 	}
-	return c.JSON(fiber.Map{"success": true, "data": a})
+	return c.JSON(fiber.Map{"success": true, "data": updatedAssignment})
 }
 
 // DELETE /api/assignments/:id

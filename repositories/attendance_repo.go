@@ -186,6 +186,7 @@ func applyAttendancePinState(tx *gorm.DB, session *models.AttendanceSession, now
 	}
 
 	updates := map[string]interface{}{}
+	isStaticMode := session.PinMode == "static" || (session.PinMode == "" && (session.AutoRotatePin == nil || !*session.AutoRotatePin))
 	if session.Status != change.Status {
 		updates["status"] = change.Status
 		change.StatusChanged = true
@@ -193,19 +194,38 @@ func applyAttendancePinState(tx *gorm.DB, session *models.AttendanceSession, now
 	session.Status = change.Status
 
 	if change.Status != "active" {
-		if session.PinCode != "" || session.PreviousPinCode != "" || session.PinIssuedAt != nil || session.PinGraceUntil != nil || session.PinRotatesAt != nil {
+		if change.Status == "draft" && isStaticMode {
+			if strings.TrimSpace(session.PinCode) == "" {
+				nextPin := generateUniqueAttendancePIN(tx, session.ID, "")
+				updates["pin_code"] = nextPin
+				session.PinCode = nextPin
+			}
+			if session.PinIssuedAt == nil {
+				issuedAt := now
+				updates["pin_issued_at"] = issuedAt
+				session.PinIssuedAt = &issuedAt
+			}
+			if session.PreviousPinCode != "" || session.PinGraceUntil != nil || session.PinRotatesAt != nil {
+				updates["previous_pin_code"] = ""
+				updates["pin_grace_until"] = nil
+				updates["pin_rotates_at"] = nil
+				session.PreviousPinCode = ""
+				session.PinGraceUntil = nil
+				session.PinRotatesAt = nil
+			}
+		} else if session.PinCode != "" || session.PreviousPinCode != "" || session.PinIssuedAt != nil || session.PinGraceUntil != nil || session.PinRotatesAt != nil {
 			updates["pin_code"] = ""
 			updates["previous_pin_code"] = ""
 			updates["pin_issued_at"] = nil
 			updates["pin_grace_until"] = nil
 			updates["pin_rotates_at"] = nil
 			change.Released = true
+			session.PinCode = ""
+			session.PreviousPinCode = ""
+			session.PinIssuedAt = nil
+			session.PinGraceUntil = nil
+			session.PinRotatesAt = nil
 		}
-		session.PinCode = ""
-		session.PreviousPinCode = ""
-		session.PinIssuedAt = nil
-		session.PinGraceUntil = nil
-		session.PinRotatesAt = nil
 	} else {
 		rotationWindow := attendancePinRotationWindow()
 		graceWindow := attendancePinGraceWindow()
@@ -432,9 +452,59 @@ func attendanceStudentEligibleWithDB(db *gorm.DB, courseID string, sectionIDs []
 	return row.Total > 0, nil
 }
 
+func dedupeAttendanceRecordsWithDB(db *gorm.DB, sessionID uint, studentID *uint) error {
+	type duplicateGroup struct {
+		StudentID uint `gorm:"column:student_id"`
+	}
+
+	query := db.Table("attendance_records").
+		Select("student_id").
+		Where("attendance_session_id = ?", sessionID)
+	if studentID != nil {
+		query = query.Where("student_id = ?", *studentID)
+	}
+
+	var groups []duplicateGroup
+	if err := query.Group("student_id").Having("COUNT(*) > 1").Scan(&groups).Error; err != nil {
+		return err
+	}
+
+	for _, group := range groups {
+		var records []models.AttendanceRecord
+		if err := db.Where("attendance_session_id = ? AND student_id = ?", sessionID, group.StudentID).
+			Order(clause.Expr{SQL: "CASE WHEN status <> 'absent' THEN 0 ELSE 1 END"}).
+			Order("check_in_time DESC NULLS LAST").
+			Order("updated_at DESC").
+			Order("id DESC").
+			Find(&records).Error; err != nil {
+			return err
+		}
+		if len(records) <= 1 {
+			continue
+		}
+
+		deleteIDs := make([]uint, 0, len(records)-1)
+		for _, record := range records[1:] {
+			deleteIDs = append(deleteIDs, record.ID)
+		}
+		if len(deleteIDs) == 0 {
+			continue
+		}
+		if err := db.Where("id IN ?", deleteIDs).Delete(&models.AttendanceRecord{}).Error; err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func backfillAttendanceRecordsWithDB(db *gorm.DB, session *models.AttendanceSession, sectionIDs []uint) error {
 	type idRow struct {
 		StudentID uint `gorm:"column:student_id"`
+	}
+
+	if err := dedupeAttendanceRecordsWithDB(db, session.ID, nil); err != nil {
+		return err
 	}
 
 	var targetRows []idRow
@@ -485,7 +555,10 @@ func backfillAttendanceRecordsWithDB(db *gorm.DB, session *models.AttendanceSess
 	if len(newRecords) == 0 {
 		return nil
 	}
-	return db.Create(&newRecords).Error
+	return db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "attendance_session_id"}, {Name: "student_id"}},
+		DoNothing: true,
+	}).Create(&newRecords).Error
 }
 
 func ensureAttendanceRecordInTx(tx *gorm.DB, session *models.AttendanceSession, studentID uint) (*models.AttendanceRecord, error) {
@@ -500,6 +573,10 @@ func ensureAttendanceRecordInTx(tx *gorm.DB, session *models.AttendanceSession, 
 	}
 	if !allowed {
 		return nil, fmt.Errorf("student is not registered in this attendance session")
+	}
+
+	if err := dedupeAttendanceRecordsWithDB(tx, session.ID, &studentID); err != nil {
+		return nil, err
 	}
 
 	var record models.AttendanceRecord
@@ -517,8 +594,16 @@ func ensureAttendanceRecordInTx(tx *gorm.DB, session *models.AttendanceSession, 
 		CreatedAt:           now,
 		UpdatedAt:           now,
 	}
-	if err := tx.Create(&record).Error; err != nil {
+	if err := tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "attendance_session_id"}, {Name: "student_id"}},
+		DoNothing: true,
+	}).Create(&record).Error; err != nil {
 		return nil, err
+	}
+	if record.ID == 0 {
+		if err := tx.Where("attendance_session_id = ? AND student_id = ?", session.ID, studentID).First(&record).Error; err != nil {
+			return nil, err
+		}
 	}
 	return &record, nil
 }
@@ -822,10 +907,22 @@ func GetAttendanceSession(id uint) (*AttendanceSessionDetail, error) {
 
 func CreateAttendanceSession(session *models.AttendanceSession, sectionIDs []uint) error {
 	db := config.DB
-	session.PinMode = ConfiguredAttendancePinMode(session.AutoRotatePin != nil && *session.AutoRotatePin)
-	session.PinCode = ""
+	autoRotate := session.AutoRotatePin != nil && *session.AutoRotatePin
+	session.PinMode = ConfiguredAttendancePinMode(autoRotate)
+	if autoRotate {
+		session.PinCode = ""
+		session.PinIssuedAt = nil
+	} else {
+		session.PinCode = strings.TrimSpace(session.PinCode)
+		if session.PinCode == "" {
+			session.PinCode = GeneratePIN()
+		}
+		if session.PinIssuedAt == nil {
+			now := time.Now()
+			session.PinIssuedAt = &now
+		}
+	}
 	session.PreviousPinCode = ""
-	session.PinIssuedAt = nil
 	session.PinGraceUntil = nil
 	session.PinRotatesAt = nil
 	session.Status = "draft"
@@ -875,7 +972,10 @@ func CreateAttendanceSession(session *models.AttendanceSession, sectionIDs []uin
 				CreatedAt:           time.Now(),
 			}
 		}
-		db.Create(&records)
+		db.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "attendance_session_id"}, {Name: "student_id"}},
+			DoNothing: true,
+		}).Create(&records)
 	}
 	return nil
 }
