@@ -15,6 +15,7 @@ func SetupAttendanceRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	app.Get("/api/attendance/check-in/:sessionId/info", handlers.GetSessionInfoHandler)
 	app.Post("/api/attendance/check-in/:sessionId", middlewares.AttendanceCheckInGuard(), handlers.StudentCheckInHandler)
 	app.Post("/api/attendance/check-in", middlewares.AttendanceCheckInGuard(), handlers.StudentCheckInByPINHandler)
+	app.Post("/api/attendance/verify-pin", handlers.VerifyAttendancePINHandler)
 	app.Post("/api/attendance/verify-student", handlers.VerifyStudentHandler)
 	app.Post("/api/attendance/display/bootstrap", handlers.BootstrapAttendanceDisplayHandler)
 	app.Post("/api/attendance/display/confirm", handlers.ConfirmAttendanceDisplayHandler)

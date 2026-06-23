@@ -352,6 +352,44 @@ func GetSessionInfoHandler(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "data": info})
 }
 
+// POST /api/attendance/verify-pin (public)
+func VerifyAttendancePINHandler(c fiber.Ctx) error {
+	var input struct {
+		PinCode string `json:"pin_code"`
+	}
+	if err := c.Bind().JSON(&input); err != nil || strings.TrimSpace(input.PinCode) == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "pin_code is required"})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	sessionID, err := repositories.LookupAttendanceSessionIDByPIN(ctx, input.PinCode)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "PIN ไม่ถูกต้อง หรือไม่มีการเปิดเช็คชื่อ"})
+	}
+
+	info, err := repositories.GetSessionInfo(sessionID)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Attendance session not found"})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data": fiber.Map{
+			"session_id":      info.ID,
+			"title":           info.Title,
+			"status":          info.Status,
+			"session_type":    info.SessionType,
+			"check_location":  info.CheckLocation,
+			"auto_rotate_pin": info.AutoRotatePin,
+			"pin_mode":        info.PinMode,
+			"course":          info.Course,
+			"section":         info.Section,
+		},
+	})
+}
+
 // POST /api/attendance/check-in/:sessionId  (public)
 func StudentCheckInHandler(c fiber.Ctx) error {
 	idStr := c.Params("sessionId")
