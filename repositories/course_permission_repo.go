@@ -11,6 +11,7 @@ import (
 )
 
 const (
+	PermissionUpdateCourse             = "update_course"
 	PermissionManagePeople             = "manage_people"
 	PermissionManageSections           = "manage_sections"
 	PermissionManageTeams              = "manage_teams"
@@ -61,6 +62,7 @@ const (
 var ErrPrimaryInstructorPermissionsImmutable = errors.New("primary instructor permissions cannot be changed")
 
 type CourseMemberPermissions struct {
+	UpdateCourse             bool `json:"update_course"`
 	ViewPeople               bool `json:"view_people"`
 	AddPeople                bool `json:"add_people"`
 	RemovePeople             bool `json:"remove_people"`
@@ -126,6 +128,7 @@ type CourseMemberPermissionProfile struct {
 
 func DefaultInstructorCoursePermissions() CourseMemberPermissions {
 	return CourseMemberPermissions{
+		UpdateCourse:             true,
 		ViewPeople:               true,
 		AddPeople:                true,
 		RemovePeople:             true,
@@ -169,6 +172,7 @@ func DefaultInstructorCoursePermissions() CourseMemberPermissions {
 
 func DefaultTACoursePermissions() CourseMemberPermissions {
 	return CourseMemberPermissions{
+		UpdateCourse:             false,
 		ViewPeople:               false,
 		AddPeople:                false,
 		RemovePeople:             false,
@@ -327,6 +331,7 @@ func ResolveCourseMemberPermissions(role string, raw string, isPrimary bool) Cou
 	}
 
 	applyBoolOverride[CourseMemberPermissions](payload, "view_people", func(value bool) { base.ViewPeople = value })
+	applyBoolOverride[CourseMemberPermissions](payload, "update_course", func(value bool) { base.UpdateCourse = value })
 	applyBoolOverride[CourseMemberPermissions](payload, "add_people", func(value bool) { base.AddPeople = value })
 	applyBoolOverride[CourseMemberPermissions](payload, "remove_people", func(value bool) { base.RemovePeople = value })
 	applyBoolOverride[CourseMemberPermissions](payload, "edit_member_permissions", func(value bool) { base.EditMemberPermissions = value })
@@ -383,6 +388,8 @@ func (permissions CourseMemberPermissions) Has(permissionKey string) bool {
 	switch permissionKey {
 	case PermissionManagePeople:
 		return permissions.ViewPeople || permissions.AddPeople || permissions.RemovePeople || permissions.EditMemberPermissions
+	case PermissionUpdateCourse:
+		return permissions.UpdateCourse
 	case PermissionViewPeople:
 		return permissions.ViewPeople
 	case PermissionAddPeople:

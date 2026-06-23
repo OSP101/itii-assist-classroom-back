@@ -36,7 +36,7 @@ func SetupCourseRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	protected.Get("/:id/overview", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), handlers.GetCourseOverviewHandler)
 	protected.Get("/:id", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), handlers.GetCourseByIDHandler)
 	protected.Post("/", middlewares.RequireRole("admin", "instructor"), handlers.CreateCourseHandler)
-	protected.Put("/:id", middlewares.RequireRole("admin", "instructor"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor"), handlers.UpdateCourseHandler)
+	protected.Put("/:id", middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionUpdateCourse, "instructor", "ta"), handlers.UpdateCourseHandler)
 	protected.Delete("/:id", middlewares.RequireRole("admin", "instructor"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor"), handlers.DeleteCourseHandler)
 	protected.Patch("/:id/toggle-status", middlewares.RequireRole("admin", "instructor"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("id"), "instructor"), handlers.ToggleCourseStatusHandler)
 

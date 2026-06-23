@@ -37,7 +37,8 @@ type AttendanceStats struct {
 
 type AttendanceRecordWithStudent struct {
 	models.AttendanceRecord
-	Student AttendanceStudentBasic `json:"student"`
+	Student   AttendanceStudentBasic `json:"student"`
+	SectionNo string                 `json:"section_no"`
 }
 
 type AttendanceSectionBasic struct {
@@ -827,6 +828,38 @@ func GetAttendanceSession(id uint) (*AttendanceSessionDetail, error) {
 		ORDER BY ar.check_in_time DESC NULLS LAST, ar.id ASC
 	`, id).Scan(&rows)
 
+	type studentSectionRow struct {
+		StudentID uint   `gorm:"column:student_id"`
+		SectionNo string `gorm:"column:section_no"`
+	}
+
+	var sectionRows []studentSectionRow
+	sectionQuery := db.Raw(`
+		SELECT css.student_id, cs.section_no
+		FROM course_section_students css
+		JOIN course_sections cs ON cs.id = css.course_section_id
+		WHERE cs.course_id = ?
+		ORDER BY cs.section_no ASC, css.student_id ASC
+	`, session.CourseID)
+	if len(sectionIDs) > 0 {
+		sectionQuery = db.Raw(`
+			SELECT css.student_id, cs.section_no
+			FROM course_section_students css
+			JOIN course_sections cs ON cs.id = css.course_section_id
+			WHERE css.course_section_id IN ?
+			ORDER BY cs.section_no ASC, css.student_id ASC
+		`, sectionIDs)
+	}
+	sectionQuery.Scan(&sectionRows)
+
+	studentSections := make(map[uint][]string)
+	for _, row := range sectionRows {
+		if row.StudentID == 0 || row.SectionNo == "" {
+			continue
+		}
+		studentSections[row.StudentID] = append(studentSections[row.StudentID], row.SectionNo)
+	}
+
 	records := make([]AttendanceRecordWithStudent, len(rows))
 	stats := AttendanceSessionDetailStats{TotalStudents: totalStudents}
 	for i, r := range rows {
@@ -867,6 +900,7 @@ func GetAttendanceSession(id uint) (*AttendanceSessionDetail, error) {
 				FullName:  r.StuFullName,
 				Email:     r.StuEmail,
 			},
+			SectionNo: strings.Join(studentSections[r.StudentIDFK], ", "),
 		}
 		switch r.RecordStatus {
 		case "present":

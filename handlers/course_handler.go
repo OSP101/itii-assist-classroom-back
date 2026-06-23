@@ -562,6 +562,9 @@ func UpdateCourseHandler(c fiber.Ctx) error {
 			instructorIDs = append([]uint{actorID}, instructorIDs...)
 		}
 	}
+	if shouldUpdateInstructors && actorRole == "ta" {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "ผู้ช่วยสอนไม่มีสิทธิ์แก้ไขรายชื่ออาจารย์ผู้สอน"})
+	}
 
 	if shouldUpdateInstructors && len(instructorIDs) > 0 {
 		updated.InstructorID = &instructorIDs[0]

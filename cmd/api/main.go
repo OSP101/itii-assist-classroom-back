@@ -99,6 +99,7 @@ func main() {
 		&models.UserNotification{},
 		&models.SystemAnnouncement{},
 		&models.SystemAnnouncementAck{},
+		&models.DatabaseBackupRecord{},
 		// Feedback และ Log
 		&models.Feedback{},
 		&models.SystemLog{},
