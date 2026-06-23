@@ -15,10 +15,10 @@ import (
 )
 
 const (
-	queueOfferTimeoutSeconds      = 20 * time.Second
-	queueOfferPauseDuration       = 3 * time.Minute
+	queueOfferTimeoutSeconds      = 30 * time.Second
+	queueOfferPauseDuration       = 1 * time.Minute
 	queueOfferReassignGraceWindow = 90 * time.Second
-	queueOfferPauseThreshold      = 2
+	queueOfferPauseThreshold      = 3
 )
 
 // ---------- helpers ----------

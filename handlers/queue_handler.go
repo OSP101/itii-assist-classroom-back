@@ -489,6 +489,7 @@ func (h *QueueHandler) CreateBooking(c fiber.Ctx) error {
 	actorID := c.Locals("user_id").(uint)
 	logCourseActivity(c, session.CourseID, actorID, "create_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"queue_session_id": booking.QueueSessionID, "student_id": booking.StudentID, "desk_number": booking.DeskNumber, "booking_type": booking.BookingType})
 	emitQueueBookingChanged(sessionID, "new-booking", booking)
+	dispatchWaitingBookingsToAvailableWorkers(sessionID)
 	reqID, _, ip := services.ExtractMeta(c)
 	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
 		CourseID:    session.CourseID,
@@ -2389,6 +2390,7 @@ func CreateQueueBookingPublicHandler(c fiber.Ctx) error {
 		return queueLegacyError(c, 400, err.Error())
 	}
 	emitQueueBookingChanged(session.ID, "new-booking", booking)
+	dispatchWaitingBookingsToAvailableWorkers(session.ID)
 
 	return c.Status(201).JSON(fiber.Map{
 		"success": true,
@@ -3092,6 +3094,25 @@ func tryAssignNextBookingAndEmit(sessionID string, workerID uint) (*models.Queue
 		realtime.EmitToWorker(workerID, "new-task", fiber.Map{"booking": bookingPayload, "timestamp": time.Now().UnixMilli()})
 	}
 	return nextBooking, nil
+}
+
+func dispatchWaitingBookingsToAvailableWorkers(sessionID string) {
+	workers, err := repositories.GetWorkersBySession(sessionID)
+	if err != nil {
+		return
+	}
+
+	now := time.Now()
+	for _, worker := range workers {
+		if worker.Status != "online" || worker.CurrentBookingID != nil {
+			continue
+		}
+		if worker.OfferPausedUntil != nil && worker.OfferPausedUntil.After(now) {
+			continue
+		}
+
+		_, _ = tryAssignNextBookingAndEmit(sessionID, worker.UserID)
+	}
 }
 
 func buildWorkerBookingPayload(booking *models.QueueBooking) (fiber.Map, error) {
