@@ -886,6 +886,14 @@ func (h *AttendanceHandler) UpdateAttendanceRecordByRecordID(c fiber.Ctx) error 
 	}
 	emitAttendanceRecordUpdated(uint(sessionID), record.StudentID)
 
+	if detail != nil {
+		for _, enrichedRecord := range detail.Records {
+			if enrichedRecord.ID == record.ID {
+				return c.JSON(fiber.Map{"success": true, "data": enrichedRecord})
+			}
+		}
+	}
+
 	return c.JSON(fiber.Map{"success": true, "data": record})
 }
 
@@ -910,6 +918,7 @@ func emitAttendanceRecordUpdated(sessionID uint, studentID uint) {
 				"location_lng":          nullableAttendanceFloatString(record.LocationLng),
 				"distance_meters":       record.DistanceMeters,
 				"note":                  nullableAttendanceString(record.Note),
+				"section_no":            nullableAttendanceString(record.SectionNo),
 				"updated_by":            record.UpdatedBy,
 				"created_at":            record.CreatedAt,
 				"updated_at":            record.UpdatedAt,
