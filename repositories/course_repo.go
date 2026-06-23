@@ -1155,6 +1155,66 @@ func RemoveStudentFromSection(sectionID uint, studentID uint) bool {
 	return result.RowsAffected > 0
 }
 
+func MoveStudentBetweenSections(courseID string, fromSectionID uint, toSectionID uint, studentID uint) (bool, error) {
+	if fromSectionID == toSectionID {
+		return false, nil
+	}
+
+	var moved bool
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
+		var sourceSection models.CourseSection
+		if err := tx.Where("id = ? AND course_id = ?", fromSectionID, courseID).First(&sourceSection).Error; err != nil {
+			return err
+		}
+
+		var targetSection models.CourseSection
+		if err := tx.Where("id = ? AND course_id = ?", toSectionID, courseID).First(&targetSection).Error; err != nil {
+			return err
+		}
+
+		var sourceCount int64
+		if err := tx.Model(&models.CourseSectionStudent{}).
+			Where("course_section_id = ? AND student_id = ?", fromSectionID, studentID).
+			Count(&sourceCount).Error; err != nil {
+			return err
+		}
+		if sourceCount == 0 {
+			return nil
+		}
+
+		var targetCount int64
+		if err := tx.Model(&models.CourseSectionStudent{}).
+			Where("course_section_id = ? AND student_id = ?", toSectionID, studentID).
+			Count(&targetCount).Error; err != nil {
+			return err
+		}
+
+		if targetCount == 0 {
+			if err := tx.Create(&models.CourseSectionStudent{
+				CourseSectionID: toSectionID,
+				StudentID:       studentID,
+				EnrolledAt:      time.Now(),
+			}).Error; err != nil {
+				return err
+			}
+		}
+
+		if err := tx.Where("course_section_id = ? AND student_id = ?", fromSectionID, studentID).
+			Delete(&models.CourseSectionStudent{}).Error; err != nil {
+			return err
+		}
+
+		moved = true
+		return nil
+	})
+
+	if err != nil {
+		return false, err
+	}
+
+	return moved, nil
+}
+
 func ArchiveAndRemoveStudentFromSection(sectionID uint, studentID uint, removedBy uint) (bool, time.Time, error) {
 	var (
 		found        bool

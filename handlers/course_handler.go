@@ -1427,6 +1427,67 @@ func (h *CourseHandler) RemoveStudentFromSection(c fiber.Ctx) error {
 	})
 }
 
+// POST /api/courses/:id/sections/:sectionId/students/:studentId/move
+func (h *CourseHandler) MoveStudentToSection(c fiber.Ctx) error {
+	courseID := c.Params("id")
+	fromSectionID, _ := strconv.ParseUint(c.Params("sectionId"), 10, 64)
+	studentID, _ := strconv.ParseUint(c.Params("studentId"), 10, 64)
+	actorID := c.Locals("user_id").(uint)
+	actorRole := c.Locals("user_role").(string)
+
+	if !hasCourseAccess(courseID, actorID, actorRole) {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์เข้าถึงรายวิชานี้"})
+	}
+
+	var input struct {
+		TargetSectionID uint `json:"target_section_id"`
+	}
+	if err := c.Bind().JSON(&input); err != nil || input.TargetSectionID == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "กรุณาระบุกลุ่มเป้าหมาย"})
+	}
+
+	if input.TargetSectionID == uint(fromSectionID) {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไม่สามารถย้ายไปกลุ่มเดิมได้"})
+	}
+
+	moved, err := repositories.MoveStudentBetweenSections(courseID, uint(fromSectionID), input.TargetSectionID, uint(studentID))
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบกลุ่มเรียนหรือไม่พบนักศึกษาในกลุ่มต้นทาง"})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ย้ายนักศึกษาไม่สำเร็จ"})
+	}
+
+	if !moved {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบนักศึกษาในกลุ่มเรียนต้นทาง"})
+	}
+
+	logCourseActivity(c, courseID, actorID, "move_student", "member", "student", studentID, "", fiber.Map{
+		"from_section_id": fromSectionID,
+		"to_section_id":   input.TargetSectionID,
+	})
+
+	reqID, _, ip := services.ExtractMeta(c)
+	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
+		CourseID:    courseID,
+		ActorUserID: actorID,
+		Action:      "move_student",
+		TargetType:  "student",
+		TargetID:    strconv.FormatUint(studentID, 10),
+		RequestID:   reqID,
+		IPAddress:   ip,
+	})
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "ย้ายนักศึกษาสำเร็จ",
+		"data": fiber.Map{
+			"from_section_id": fromSectionID,
+			"to_section_id":   input.TargetSectionID,
+		},
+	})
+}
+
 // GET /api/courses/:id/students/removed
 func GetRemovedStudentsHandler(c fiber.Ctx) error {
 	courseID := c.Params("id")
