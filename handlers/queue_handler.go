@@ -11,6 +11,7 @@ import (
 	"itii-assist/repositories"
 	"itii-assist/services"
 	"itii-assist/utils"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -636,23 +637,55 @@ func GetQueueSessionReportHandler(c fiber.Ctx) error {
 		}
 	}
 
+	now := time.Now()
+	sort.Slice(bookings, func(i, j int) bool {
+		if bookings[i].CreatedAt.Equal(bookings[j].CreatedAt) {
+			return bookings[i].ID > bookings[j].ID
+		}
+		return bookings[i].CreatedAt.After(bookings[j].CreatedAt)
+	})
+
 	bookingReports := make([]fiber.Map, 0, len(bookings))
 	for _, booking := range bookings {
-		waitDuration := ""
-		serviceDuration := ""
+		queueWaitSeconds := 0
+		if booking.AssignedAt != nil && booking.CreatedAt.Before(*booking.AssignedAt) {
+			queueWaitSeconds = int(booking.AssignedAt.Sub(booking.CreatedAt).Seconds())
+		} else if booking.AssignedAt == nil {
+			queueWaitUntil := booking.CompletedAt
+			if queueWaitUntil == nil {
+				queueWaitUntil = booking.StartedAt
+			}
+			if queueWaitUntil == nil && booking.Status == "waiting" {
+				queueWaitUntil = &now
+			}
+			if queueWaitUntil != nil && booking.CreatedAt.Before(*queueWaitUntil) {
+				queueWaitSeconds = int(queueWaitUntil.Sub(booking.CreatedAt).Seconds())
+			}
+		}
 
-		waitUntil := booking.StartedAt
-		if waitUntil == nil {
-			waitUntil = booking.AssignedAt
+		offerResponseSeconds := 0
+		if booking.AssignedAt != nil {
+			offerResponseUntil := booking.StartedAt
+			if offerResponseUntil == nil {
+				offerResponseUntil = booking.CompletedAt
+			}
+			if offerResponseUntil == nil && (booking.Status == "waiting" || booking.Status == "in_progress") {
+				offerResponseUntil = &now
+			}
+			if offerResponseUntil != nil && booking.AssignedAt.Before(*offerResponseUntil) {
+				offerResponseSeconds = int(offerResponseUntil.Sub(*booking.AssignedAt).Seconds())
+			}
 		}
-		if waitUntil == nil {
-			waitUntil = booking.CompletedAt
-		}
-		if waitUntil != nil && booking.CreatedAt.Before(*waitUntil) {
-			waitDuration = waitUntil.Sub(booking.CreatedAt).String()
-		}
-		if booking.StartedAt != nil && booking.CompletedAt != nil && booking.StartedAt.Before(*booking.CompletedAt) {
-			serviceDuration = booking.CompletedAt.Sub(*booking.StartedAt).String()
+
+		serviceDurationSeconds := 0
+		if booking.StartedAt != nil {
+			serviceDurationUntil := booking.CompletedAt
+			if serviceDurationUntil == nil && booking.Status == "in_progress" {
+				serviceDurationUntil = &now
+			}
+			if serviceDurationUntil != nil && booking.StartedAt.Before(*serviceDurationUntil) {
+				serviceDurationSeconds = int(serviceDurationUntil.Sub(*booking.StartedAt).Seconds())
+			}
 		}
 
 		student := studentMap[booking.StudentID]
@@ -673,27 +706,29 @@ func GetQueueSessionReportHandler(c fiber.Ctx) error {
 				"student_id": student.StudentID,
 				"full_name":  student.FullName,
 			},
-			"desk_id":            booking.DeskID,
-			"desk_number":        booking.DeskNumber,
-			"booking_type":       booking.BookingType,
-			"queue_number":       booking.QueueNumber,
-			"status":             booking.Status,
-			"assigned_worker_id": booking.AssignedWorkerID,
-			"assigned_worker":    workerInfo,
-			"assigned_at":        booking.AssignedAt,
-			"started_at":         booking.StartedAt,
-			"completed_at":       booking.CompletedAt,
-			"created_at":         booking.CreatedAt,
-			"wait_duration":      waitDuration,
-			"service_duration":   serviceDuration,
-			"booking_ip":         booking.BookingIP,
-			"booking_user_agent": booking.BookingUserAgent,
-			"booking_device":     booking.BookingDevice,
-			"timeout_count":      booking.TimeoutCount,
-			"reject_count":       booking.RejectCount,
-			"score":              booking.Score,
-			"score_comment":      booking.ScoreComment,
-			"worker_note":        booking.WorkerNote,
+			"desk_id":                  booking.DeskID,
+			"desk_number":              booking.DeskNumber,
+			"booking_type":             booking.BookingType,
+			"queue_number":             booking.QueueNumber,
+			"status":                   booking.Status,
+			"assigned_worker_id":       booking.AssignedWorkerID,
+			"assigned_worker":          workerInfo,
+			"assigned_at":              booking.AssignedAt,
+			"offer_expires_at":         booking.OfferExpiresAt,
+			"started_at":               booking.StartedAt,
+			"completed_at":             booking.CompletedAt,
+			"created_at":               booking.CreatedAt,
+			"queue_wait_seconds":       queueWaitSeconds,
+			"offer_response_seconds":   offerResponseSeconds,
+			"service_duration_seconds": serviceDurationSeconds,
+			"booking_ip":               booking.BookingIP,
+			"booking_user_agent":       booking.BookingUserAgent,
+			"booking_device":           booking.BookingDevice,
+			"timeout_count":            booking.TimeoutCount,
+			"reject_count":             booking.RejectCount,
+			"score":                    booking.Score,
+			"score_comment":            booking.ScoreComment,
+			"worker_note":              booking.WorkerNote,
 		})
 	}
 
@@ -717,14 +752,20 @@ func GetQueueSessionReportHandler(c fiber.Ctx) error {
 		var lastOpenedAt *time.Time
 		var lastClosedAt *time.Time
 		totalActiveDuration := ""
+		totalActiveSeconds := 0
 		if activity != nil {
 			openedCount = activity.OpenedCount
 			closedCount = activity.ClosedCount
 			firstOpenedAt = activity.FirstOpenedAt
 			lastOpenedAt = activity.LastOpenedAt
 			lastClosedAt = activity.LastClosedAt
-			if activity.TotalActiveDuration > 0 {
-				totalActiveDuration = activity.TotalActiveDuration.String()
+			activeDuration := activity.TotalActiveDuration
+			if activity.CurrentOpenedAt != nil && activity.CurrentOpenedAt.Before(now) {
+				activeDuration += now.Sub(*activity.CurrentOpenedAt)
+			}
+			if activeDuration > 0 {
+				totalActiveDuration = activeDuration.String()
+				totalActiveSeconds = int(activeDuration.Seconds())
 			}
 		}
 		totalOffers := worker.OfferAcceptCount + worker.OfferRejectCount + worker.OfferTimeoutCount
@@ -734,24 +775,31 @@ func GetQueueSessionReportHandler(c fiber.Ctx) error {
 		}
 
 		workerStats = append(workerStats, fiber.Map{
-			"user_id":               worker.UserID,
-			"full_name":             user.FullName,
-			"total_completed":       completed,
-			"grading_completed":     worker.TotalGradingCompleted,
-			"help_completed":        worker.TotalHelpCompleted,
-			"percent":               percent,
-			"opened_count":          openedCount,
-			"closed_count":          closedCount,
-			"first_opened_at":       firstOpenedAt,
-			"last_opened_at":        lastOpenedAt,
-			"last_closed_at":        lastClosedAt,
-			"total_active_duration": totalActiveDuration,
-			"offer_accept_count":    worker.OfferAcceptCount,
-			"offer_reject_count":    worker.OfferRejectCount,
-			"offer_timeout_count":   worker.OfferTimeoutCount,
-			"offer_total_count":     totalOffers,
-			"offer_accept_rate":     offerAcceptRate,
-			"offer_paused_until":    worker.OfferPausedUntil,
+			"user_id":                    worker.UserID,
+			"full_name":                  user.FullName,
+			"total_completed":            completed,
+			"grading_completed":          worker.TotalGradingCompleted,
+			"help_completed":             worker.TotalHelpCompleted,
+			"percent":                    percent,
+			"opened_count":               openedCount,
+			"closed_count":               closedCount,
+			"first_opened_at":            firstOpenedAt,
+			"last_opened_at":             lastOpenedAt,
+			"last_closed_at":             lastClosedAt,
+			"total_active_duration":      totalActiveDuration,
+			"offer_accept_count":         worker.OfferAcceptCount,
+			"offer_reject_count":         worker.OfferRejectCount,
+			"offer_timeout_count":        worker.OfferTimeoutCount,
+			"offer_total_count":          totalOffers,
+			"offer_accept_rate":          offerAcceptRate,
+			"offer_paused_until":         worker.OfferPausedUntil,
+			"status":                     worker.Status,
+			"accept_grading":             worker.AcceptGrading,
+			"accept_help":                worker.AcceptHelp,
+			"current_booking_id":         worker.CurrentBookingID,
+			"consecutive_offer_timeouts": worker.ConsecutiveOfferTimeouts,
+			"last_active_at":             worker.LastActiveAt,
+			"total_active_seconds":       totalActiveSeconds,
 		})
 	}
 
@@ -822,6 +870,7 @@ func GetQueueSessionReportHandler(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data": fiber.Map{
+			"generated_at": now,
 			"session": fiber.Map{
 				"id":    session.ID,
 				"title": session.Title,
