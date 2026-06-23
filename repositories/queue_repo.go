@@ -1078,7 +1078,16 @@ func CompleteBookingWithScores(bookingID uint, workerID uint, score *float64, sc
 						}
 					}
 
-					deskStatusAfterComplete = "completed"
+					var gradedSubItemCount int64
+					if err := tx.Model(&models.Score{}).
+						Where("assignment_id = ? AND student_id = ? AND sub_item_id IS NOT NULL AND status = ?", *session.LinkedAssignmentID, b.StudentID, "graded").
+						Distinct("sub_item_id").
+						Count(&gradedSubItemCount).Error; err != nil {
+						return err
+					}
+					if gradedSubItemCount == int64(len(subItems)) {
+						deskStatusAfterComplete = "completed"
+					}
 				} else {
 					if score == nil {
 						return fmt.Errorf("score is required")
