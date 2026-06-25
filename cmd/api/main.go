@@ -201,7 +201,7 @@ func main() {
 }
 
 func startAttendancePinLifecycleWorker() {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(1 * time.Second)
 
 	go func() {
 		defer ticker.Stop()
