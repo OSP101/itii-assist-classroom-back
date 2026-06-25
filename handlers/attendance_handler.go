@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"itii-assist/config"
 	"itii-assist/models"
@@ -37,6 +38,46 @@ func uniqueUintValues(values []uint) []uint {
 		result = append(result, value)
 	}
 	return result
+}
+
+func attendancePublicErrorResponse(err error, fallbackStatus int, fallbackTitle string, fallbackMessage string) (int, fiber.Map) {
+	var publicErr *repositories.AttendancePublicError
+	if errors.As(err, &publicErr) {
+		return publicErr.HTTPStatus, fiber.Map{
+			"success": false,
+			"code":    publicErr.Code,
+			"title":   publicErr.Title,
+			"message": publicErr.Message,
+		}
+	}
+
+	message := fallbackMessage
+	if trimmed := strings.TrimSpace(err.Error()); trimmed != "" {
+		message = trimmed
+	}
+
+	if strings.Contains(message, "student is not registered in this attendance session") {
+		publicErr = repositories.ErrAttendanceStudentNotEligiblePublic
+	} else if strings.Contains(message, "ไม่ได้ลงทะเบียนในรายวิชานี้") {
+		publicErr = repositories.ErrAttendanceCourseNotRegisteredPublic
+	} else if strings.Contains(message, "ไม่พบข้อมูลนักศึกษา") {
+		publicErr = repositories.ErrAttendanceStudentNotFoundPublic
+	}
+
+	if publicErr != nil {
+		return publicErr.HTTPStatus, fiber.Map{
+			"success": false,
+			"code":    publicErr.Code,
+			"title":   publicErr.Title,
+			"message": publicErr.Message,
+		}
+	}
+
+	return fallbackStatus, fiber.Map{
+		"success": false,
+		"title":   fallbackTitle,
+		"message": message,
+	}
 }
 
 func desiredAttendanceStudentIDs(courseID string, sectionIDs []uint) ([]uint, error) {
@@ -431,16 +472,18 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 		}
 	}
 	if studentID == 0 {
-		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูลนักศึกษาในระบบ กรุณาติดต่อผู้สอน"})
+		return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
+			"success": false,
+			"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
+			"title":   repositories.ErrAttendanceStudentNotFoundPublic.Title,
+			"message": repositories.ErrAttendanceStudentNotFoundPublic.Message,
+		})
 	}
 
 	result, err := repositories.StudentCheckIn(uint(id), studentID, input.PinCode, lat, lng, input.GoogleEmail, input.GoogleID)
 	if err != nil {
-		statusCode := 400
-		if strings.Contains(err.Error(), "ไม่พบ") || strings.Contains(err.Error(), "ไม่ได้ลงทะเบียน") {
-			statusCode = 404
-		}
-		return c.Status(statusCode).JSON(fiber.Map{"success": false, "message": err.Error()})
+		statusCode, payload := attendancePublicErrorResponse(err, 400, "เช็คชื่อไม่สำเร็จ", "ไม่สามารถเช็คชื่อได้ในขณะนี้")
+		return c.Status(statusCode).JSON(payload)
 	}
 
 	student, err := repositories.FindStudentByID(studentID)
@@ -1151,7 +1194,12 @@ func StudentCheckInByPINHandler(c fiber.Ctx) error {
 
 	sessionID, err := repositories.LookupAttendanceSessionIDByPIN(ctx, input.PinCode)
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid or expired PIN"})
+		return c.Status(repositories.ErrAttendanceInvalidPINPublic.HTTPStatus).JSON(fiber.Map{
+			"success": false,
+			"code":    repositories.ErrAttendanceInvalidPINPublic.Code,
+			"title":   repositories.ErrAttendanceInvalidPINPublic.Title,
+			"message": repositories.ErrAttendanceInvalidPINPublic.Message,
+		})
 	}
 
 	studentID := uint(0)
@@ -1160,14 +1208,20 @@ func StudentCheckInByPINHandler(c fiber.Ctx) error {
 	} else {
 		var student models.Student
 		if err := config.DB.Select("id").Where("LOWER(email) = LOWER(?)", input.GoogleEmail).First(&student).Error; err != nil {
-			return c.Status(404).JSON(fiber.Map{"success": false, "message": "Student not found"})
+			return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
+				"success": false,
+				"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
+				"title":   repositories.ErrAttendanceStudentNotFoundPublic.Title,
+				"message": repositories.ErrAttendanceStudentNotFoundPublic.Message,
+			})
 		}
 		studentID = student.ID
 	}
 
 	result, err := repositories.StudentCheckIn(sessionID, studentID, input.PinCode, input.LocationLat, input.LocationLng, input.GoogleEmail, input.GoogleID)
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
+		statusCode, payload := attendancePublicErrorResponse(err, 400, "เช็คชื่อไม่สำเร็จ", "ไม่สามารถเช็คชื่อได้ในขณะนี้")
+		return c.Status(statusCode).JSON(payload)
 	}
 
 	return c.JSON(fiber.Map{"success": true, "data": result})
@@ -1207,7 +1261,12 @@ func VerifyStudentHandler(c fiber.Ctx) error {
 
 	var student models.Student
 	if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?)", input.GoogleEmail).First(&student).Error; err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูลนักศึกษาในระบบ"})
+		return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
+			"success": false,
+			"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
+			"title":   repositories.ErrAttendanceStudentNotFoundPublic.Title,
+			"message": repositories.ErrAttendanceStudentNotFoundPublic.Message,
+		})
 	}
 
 	response := fiber.Map{
@@ -1222,10 +1281,18 @@ func VerifyStudentHandler(c fiber.Ctx) error {
 
 	if input.SessionID != nil {
 		if _, err := repositories.EnsureAttendanceRecordForStudent(*input.SessionID, student.ID); err != nil {
+			statusCode, payload := attendancePublicErrorResponse(err, 403, "ไม่สามารถเช็คชื่อได้", "บัญชีนี้ไม่สามารถเช็คชื่อในรอบนี้ได้")
+			return c.Status(statusCode).JSON(payload)
 			return c.Status(404).JSON(fiber.Map{"success": false, "message": "à¸„à¸¸à¸“à¹„à¸¡à¹ˆà¹„à¸”à¹‰à¸¥à¸‡à¸—à¸°à¹€à¸šà¸µà¸¢à¸™à¹ƒà¸™à¸£à¸²à¸¢à¸§à¸´à¸Šà¸²à¸™à¸µà¹‰"})
 		}
 		var record models.AttendanceRecord
 		if err := config.DB.Where("attendance_session_id = ? AND student_id = ?", *input.SessionID, student.ID).First(&record).Error; err != nil {
+			return c.Status(repositories.ErrAttendanceCourseNotRegisteredPublic.HTTPStatus).JSON(fiber.Map{
+				"success": false,
+				"code":    repositories.ErrAttendanceCourseNotRegisteredPublic.Code,
+				"title":   repositories.ErrAttendanceCourseNotRegisteredPublic.Title,
+				"message": repositories.ErrAttendanceCourseNotRegisteredPublic.Message,
+			})
 			return c.Status(404).JSON(fiber.Map{"success": false, "message": "คุณไม่ได้ลงทะเบียนในรายวิชานี้"})
 		}
 		if record.Status != "absent" {

@@ -16,6 +16,98 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+type AttendancePublicError struct {
+	Code       string
+	Title      string
+	Message    string
+	HTTPStatus int
+}
+
+func (e *AttendancePublicError) Error() string {
+	return e.Message
+}
+
+func newAttendancePublicError(code string, httpStatus int, title string, message string) *AttendancePublicError {
+	return &AttendancePublicError{
+		Code:       code,
+		Title:      title,
+		Message:    message,
+		HTTPStatus: httpStatus,
+	}
+}
+
+var (
+	ErrAttendanceStudentNotEligiblePublic = newAttendancePublicError(
+		"ATTENDANCE_STUDENT_NOT_ELIGIBLE",
+		403,
+		"ไม่สามารถเช็คชื่อได้",
+		"คุณไม่ได้อยู่ในกลุ่มเรียนที่เปิดรับการเช็คชื่อรอบนี้",
+	)
+	ErrAttendanceSessionNotFoundPublic = newAttendancePublicError(
+		"ATTENDANCE_SESSION_NOT_FOUND",
+		404,
+		"ไม่พบรอบการเช็คชื่อ",
+		"ไม่พบรอบการเช็คชื่อนี้ หรือรอบนี้ถูกลบไปแล้ว",
+	)
+	ErrAttendanceSessionNotStartedPublic = newAttendancePublicError(
+		"ATTENDANCE_SESSION_NOT_STARTED",
+		400,
+		"ยังไม่ถึงเวลาเช็คชื่อ",
+		"รอบการเช็คชื่อนี้ยังไม่เปิด กรุณารอให้ถึงเวลาแล้วลองใหม่อีกครั้ง",
+	)
+	ErrAttendanceSessionClosedPublic = newAttendancePublicError(
+		"ATTENDANCE_SESSION_CLOSED",
+		400,
+		"หมดเวลาเช็คชื่อแล้ว",
+		"รอบการเช็คชื่อนี้ปิดรับแล้ว จึงไม่สามารถเช็คชื่อได้",
+	)
+	ErrAttendancePINRequiredPublic = newAttendancePublicError(
+		"ATTENDANCE_PIN_REQUIRED",
+		400,
+		"กรุณากรอกรหัส PIN",
+		"ต้องกรอกรหัส PIN ของรอบเช็คชื่อนี้ก่อนดำเนินการต่อ",
+	)
+	ErrAttendanceInvalidPINPublic = newAttendancePublicError(
+		"ATTENDANCE_INVALID_PIN",
+		400,
+		"รหัส PIN ไม่ถูกต้อง",
+		"รหัส PIN นี้ไม่ตรงกับรอบเช็คชื่อที่เปิดอยู่ กรุณาตรวจสอบแล้วลองใหม่",
+	)
+	ErrAttendanceLocationRequiredPublic = newAttendancePublicError(
+		"ATTENDANCE_LOCATION_REQUIRED",
+		400,
+		"ต้องอนุญาตตำแหน่งก่อน",
+		"รอบนี้ต้องใช้ตำแหน่งในการเช็คชื่อ กรุณาอนุญาตการเข้าถึงตำแหน่งแล้วลองใหม่",
+	)
+	ErrAttendanceSessionLocationNotConfiguredPublic = newAttendancePublicError(
+		"ATTENDANCE_SESSION_LOCATION_NOT_CONFIGURED",
+		400,
+		"รอบเช็คชื่อยังไม่พร้อม",
+		"รอบเช็คชื่อนี้ยังไม่ได้กำหนดตำแหน่งอ้างอิงสำหรับตรวจสอบ",
+	)
+	ErrAttendanceStudentNotFoundPublic = newAttendancePublicError(
+		"ATTENDANCE_STUDENT_NOT_FOUND",
+		404,
+		"ไม่พบข้อมูลนักศึกษา",
+		"ไม่พบบัญชีนักศึกษาที่ใช้เช็คชื่อในระบบ กรุณาติดต่อผู้สอน",
+	)
+	ErrAttendanceCourseNotRegisteredPublic = newAttendancePublicError(
+		"ATTENDANCE_COURSE_NOT_REGISTERED",
+		404,
+		"ไม่พบสิทธิ์เช็คชื่อในรายวิชานี้",
+		"บัญชีของคุณไม่ได้ลงทะเบียนอยู่ในรายวิชานี้ จึงไม่สามารถเช็คชื่อได้",
+	)
+)
+
+func NewAttendanceOutsideAllowedAreaError(distance int) *AttendancePublicError {
+	return newAttendancePublicError(
+		"ATTENDANCE_OUTSIDE_ALLOWED_AREA",
+		400,
+		"อยู่นอกพื้นที่เช็คชื่อ",
+		fmt.Sprintf("คุณอยู่นอกพื้นที่ที่อนุญาตสำหรับเช็คชื่อ โดยอยู่ห่างจากจุดที่กำหนด %d เมตร", distance),
+	)
+}
+
 // ============================================================
 // Attendance Session
 // ============================================================
@@ -573,7 +665,7 @@ func ensureAttendanceRecordInTx(tx *gorm.DB, session *models.AttendanceSession, 
 		return nil, err
 	}
 	if !allowed {
-		return nil, fmt.Errorf("student is not registered in this attendance session")
+		return nil, ErrAttendanceStudentNotEligiblePublic
 	}
 
 	if err := dedupeAttendanceRecordsWithDB(tx, session.ID, &studentID); err != nil {
@@ -1122,7 +1214,7 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 	}
 	if lookupSessionID != sessionID {
 		observability.RecordAttendanceWrongPin(time.Since(startedAt))
-		return nil, ErrAttendanceInvalidPIN
+		return nil, ErrAttendanceInvalidPINPublic
 	}
 
 	db := config.DB
@@ -1130,7 +1222,7 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 	err = db.Transaction(func(tx *gorm.DB) error {
 		var session models.AttendanceSession
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&session, sessionID).Error; err != nil {
-			return fmt.Errorf("ไม่พบ session")
+			return ErrAttendanceSessionNotFoundPublic
 		}
 		sectionIDs, err := attendanceSessionSectionIDsWithDB(tx, &session)
 		if err != nil {
@@ -1141,15 +1233,15 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 		}
 		now := time.Now()
 		if now.Before(session.StartTime) {
-			return fmt.Errorf("ยังไม่ถึงเวลาเช็คชื่อ")
+			return ErrAttendanceSessionNotStartedPublic
 		}
 		if now.After(session.EndTime) || session.Status != "active" {
-			return fmt.Errorf("หมดเวลาเช็คชื่อแล้ว")
+			return ErrAttendanceSessionClosedPublic
 		}
 
 		providedPin := strings.TrimSpace(pin)
 		if providedPin == "" {
-			return fmt.Errorf("กรุณากรอกรหัส PIN")
+			return ErrAttendancePINRequiredPublic
 		}
 		pinHash := attendancePinHash(providedPin)
 		pinAccepted := pinHash == session.CurrentPinHash
@@ -1157,23 +1249,23 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 			pinAccepted = pinHash == session.PreviousPinHash
 		}
 		if !pinAccepted {
-			return fmt.Errorf("รหัส PIN ไม่ถูกต้อง")
+			return ErrAttendanceInvalidPINPublic
 		}
 
 		var distanceMeters *int
 		locationVerified := false
 		if session.CheckLocation {
 			if lat == nil || lng == nil {
-				return fmt.Errorf("กรุณาอนุญาตการเข้าถึงตำแหน่ง")
+				return ErrAttendanceLocationRequiredPublic
 			}
 			if session.LocationLat == nil || session.LocationLng == nil {
-				return fmt.Errorf("session นี้ยังไม่ได้กำหนดตำแหน่งสำหรับเช็คชื่อ")
+				return ErrAttendanceSessionLocationNotConfiguredPublic
 			}
 
 			distance := calculateDistanceMeters(*session.LocationLat, *session.LocationLng, *lat, *lng)
 			distanceMeters = &distance
 			if session.RadiusMeters > 0 && distance > session.RadiusMeters {
-				return fmt.Errorf("คุณอยู่นอกพื้นที่ที่กำหนด (ห่าง %d เมตร)", distance)
+				return NewAttendanceOutsideAllowedAreaError(distance)
 			}
 			locationVerified = true
 		}
@@ -1236,7 +1328,7 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 			Where("id = ?", existing.ID).
 			Updates(updates)
 		if updateResult.RowsAffected == 0 {
-			return fmt.Errorf("คุณไม่ได้ลงทะเบียนในรายวิชานี้")
+			return ErrAttendanceCourseNotRegisteredPublic
 		}
 		if updateResult.Error != nil {
 			return updateResult.Error
