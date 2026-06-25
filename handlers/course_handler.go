@@ -1339,6 +1339,18 @@ func AddStudentToSectionHandler(c fiber.Ctx) error {
 	}
 
 	if repositories.IsStudentInCourse(courseID, input.StudentID) {
+		currentSection, sectionErr := repositories.GetStudentCurrentSectionInCourse(courseID, input.StudentID)
+		if sectionErr == nil && currentSection != nil {
+			return c.Status(400).JSON(fiber.Map{
+				"success": false,
+				"message": "นักศึกษานี้อยู่ในรายวิชานี้แล้ว",
+				"data": fiber.Map{
+					"student_id":         input.StudentID,
+					"current_section_id": currentSection.ID,
+					"current_section_no": currentSection.SectionNo,
+				},
+			})
+		}
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "นักศึกษานี้อยู่ในรายวิชานี้แล้ว"})
 	}
 
@@ -1371,21 +1383,22 @@ func BulkAddStudentsToSectionHandler(c fiber.Ctx) error {
 	}
 
 	var input struct {
-		StudentIDs []uint `json:"student_ids"`
+		StudentIDs       []uint `json:"student_ids"`
+		ResolveConflicts string `json:"resolve_conflicts"`
 	}
 	if err := c.Bind().JSON(&input); err != nil || len(input.StudentIDs) == 0 {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "กรุณาระบุรายชื่อนักศึกษา"})
 	}
 
-	added, skipped, err := repositories.BulkAddStudentsToSection(courseID, uint(sectionID), input.StudentIDs)
+	bulkResult, err := repositories.BulkAddStudentsToSection(courseID, uint(sectionID), input.StudentIDs, input.ResolveConflicts)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "เพิ่มนักศึกษาไม่สำเร็จ"})
 	}
-	logCourseActivity(c, courseID, actorID, "bulk_add_students", "member", "section", sectionID, "", fiber.Map{"added": added, "skipped": skipped})
+	logCourseActivity(c, courseID, actorID, "bulk_add_students", "member", "section", sectionID, "", fiber.Map{"added": bulkResult.Added, "moved": bulkResult.Moved, "skipped": bulkResult.Skipped})
 	return c.Status(201).JSON(fiber.Map{
 		"success": true,
 		"message": "เพิ่มนักศึกษาสำเร็จ",
-		"data":    fiber.Map{"added": added, "skipped": skipped},
+		"data":    bulkResult,
 	})
 }
 

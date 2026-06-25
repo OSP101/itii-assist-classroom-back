@@ -1023,6 +1023,19 @@ type RemovedSectionStudentRow struct {
 	RemainingDays int       `json:"remaining_days"`
 }
 
+type StudentImportConflict struct {
+	StudentID        uint   `json:"student_id"`
+	CurrentSectionID uint   `json:"current_section_id"`
+	CurrentSectionNo string `json:"current_section_no"`
+}
+
+type BulkAddStudentsResult struct {
+	Added     int                     `json:"added"`
+	Moved     int                     `json:"moved"`
+	Skipped   int                     `json:"skipped"`
+	Conflicts []StudentImportConflict `json:"conflicts"`
+}
+
 func GetSectionStudents(sectionID uint) ([]SectionStudentRow, error) {
 	var rows []SectionStudentRow
 	err := config.DB.Raw(`
@@ -1051,6 +1064,25 @@ func IsStudentInCourse(courseID string, studentID uint) bool {
 	return count > 0
 }
 
+func GetStudentCurrentSectionInCourse(courseID string, studentID uint) (*SectionBasic, error) {
+	var row SectionBasic
+	err := config.DB.Raw(`
+		SELECT cs.id, cs.section_no, cs.note
+		FROM course_section_students css
+		JOIN course_sections cs ON cs.id = css.course_section_id
+		WHERE cs.course_id = ? AND css.student_id = ?
+		ORDER BY css.enrolled_at DESC
+		LIMIT 1
+	`, courseID, studentID).Scan(&row).Error
+	if err != nil {
+		return nil, err
+	}
+	if row.ID == 0 {
+		return nil, gorm.ErrRecordNotFound
+	}
+	return &row, nil
+}
+
 func AddStudentToSection(sectionID uint, studentID uint) error {
 	now := time.Now()
 	return config.DB.Transaction(func(tx *gorm.DB) error {
@@ -1072,7 +1104,31 @@ func AddStudentToSection(sectionID uint, studentID uint) error {
 	})
 }
 
-func BulkAddStudentsToSection(courseID string, sectionID uint, studentIDs []uint) (added, skipped int, err error) {
+func BulkAddStudentsToSection(courseID string, sectionID uint, studentIDs []uint, resolveConflicts string) (BulkAddStudentsResult, error) {
+	result := BulkAddStudentsResult{Conflicts: []StudentImportConflict{}}
+
+	if resolveConflicts != "move" {
+		resolveConflicts = "skip"
+	}
+
+	// Deduplicate student IDs from request payload.
+	uniqueStudentIDs := make([]uint, 0, len(studentIDs))
+	seenStudentIDs := make(map[uint]struct{}, len(studentIDs))
+	for _, sid := range studentIDs {
+		if sid == 0 {
+			continue
+		}
+		if _, exists := seenStudentIDs[sid]; exists {
+			continue
+		}
+		seenStudentIDs[sid] = struct{}{}
+		uniqueStudentIDs = append(uniqueStudentIDs, sid)
+	}
+
+	if len(uniqueStudentIDs) == 0 {
+		return result, nil
+	}
+
 	// Collect TA emails in this course for cross-role conflict check
 	var taEmailRows []struct{ Email string }
 	config.DB.Raw(`
@@ -1090,41 +1146,79 @@ func BulkAddStudentsToSection(courseID string, sectionID uint, studentIDs []uint
 
 	// Load student emails for the requested IDs
 	var studentRecords []models.Student
-	config.DB.Select("id, email").Where("id IN ?", studentIDs).Find(&studentRecords)
+	config.DB.Select("id, email").Where("id IN ?", uniqueStudentIDs).Find(&studentRecords)
 	studentEmailMap := make(map[uint]string, len(studentRecords))
 	for _, s := range studentRecords {
 		studentEmailMap[s.ID] = s.Email
 	}
 
-	// Find already enrolled in this section
-	var existing []models.CourseSectionStudent
-	config.DB.Where("course_section_id = ? AND student_id IN ?", sectionID, studentIDs).Find(&existing)
-	existingSet := map[uint]bool{}
-	for _, e := range existing {
-		existingSet[e.StudentID] = true
+	// Find current enrollment in this course for all requested students.
+	type enrollmentRow struct {
+		StudentID uint   `gorm:"column:student_id"`
+		SectionID uint   `gorm:"column:section_id"`
+		SectionNo string `gorm:"column:section_no"`
+	}
+	var enrollments []enrollmentRow
+	config.DB.Raw(`
+		SELECT css.student_id, cs.id AS section_id, cs.section_no
+		FROM course_section_students css
+		JOIN course_sections cs ON cs.id = css.course_section_id
+		WHERE cs.course_id = ? AND css.student_id IN ?
+	`, courseID, uniqueStudentIDs).Scan(&enrollments)
+
+	currentEnrollment := make(map[uint]enrollmentRow, len(enrollments))
+	for _, row := range enrollments {
+		currentEnrollment[row.StudentID] = row
 	}
 
 	var toCreate []models.CourseSectionStudent
-	for _, sid := range studentIDs {
-		if existingSet[sid] {
-			skipped++
-		} else {
-			email := studentEmailMap[sid]
-			if email != "" {
-				if _, conflict := taEmailSet[strings.ToLower(email)]; conflict {
-					skipped++
-					continue
-				}
+	for _, sid := range uniqueStudentIDs {
+		email := studentEmailMap[sid]
+		if email != "" {
+			if _, conflict := taEmailSet[strings.ToLower(email)]; conflict {
+				result.Skipped++
+				continue
 			}
-			toCreate = append(toCreate, models.CourseSectionStudent{
-				CourseSectionID: sectionID,
-				StudentID:       sid,
-				EnrolledAt:      time.Now(),
-			})
 		}
+
+		enrollment, alreadyInCourse := currentEnrollment[sid]
+		if alreadyInCourse {
+			if enrollment.SectionID == sectionID {
+				result.Skipped++
+				continue
+			}
+
+			result.Conflicts = append(result.Conflicts, StudentImportConflict{
+				StudentID:        sid,
+				CurrentSectionID: enrollment.SectionID,
+				CurrentSectionNo: enrollment.SectionNo,
+			})
+
+			if resolveConflicts == "move" {
+				moved, moveErr := MoveStudentBetweenSections(courseID, enrollment.SectionID, sectionID, sid)
+				if moveErr != nil {
+					return result, moveErr
+				}
+				if moved {
+					result.Moved++
+				} else {
+					result.Skipped++
+				}
+			} else {
+				result.Skipped++
+			}
+			continue
+		}
+
+		toCreate = append(toCreate, models.CourseSectionStudent{
+			CourseSectionID: sectionID,
+			StudentID:       sid,
+			EnrolledAt:      time.Now(),
+		})
 	}
+
 	if len(toCreate) > 0 {
-		err = config.DB.Transaction(func(tx *gorm.DB) error {
+		err := config.DB.Transaction(func(tx *gorm.DB) error {
 			now := time.Now()
 			if err := tx.Create(&toCreate).Error; err != nil {
 				return err
@@ -1145,9 +1239,13 @@ func BulkAddStudentsToSection(courseID string, sectionID uint, studentIDs []uint
 
 			return nil
 		})
-		added = len(toCreate)
+		if err != nil {
+			return result, err
+		}
+		result.Added = len(toCreate)
 	}
-	return
+
+	return result, nil
 }
 
 func RemoveStudentFromSection(sectionID uint, studentID uint) bool {
