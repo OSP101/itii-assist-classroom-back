@@ -1383,6 +1383,47 @@ func queueOptionalActorID(c fiber.Ctx) (uint, bool) {
 	return 0, false
 }
 
+func resolveQueueStudentCodeFromAuth(c fiber.Ctx, fallbackStudentCode string) (string, error) {
+	effectiveStudentCode := strings.TrimSpace(fallbackStudentCode)
+	authHeader := strings.TrimSpace(c.Get("Authorization"))
+	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+		return effectiveStudentCode, nil
+	}
+
+	tokenString := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+	if tokenString == "" {
+		return effectiveStudentCode, nil
+	}
+
+	claims, err := utils.ValidateAccessToken(tokenString)
+	if err != nil {
+		return effectiveStudentCode, nil
+	}
+	if claims.Kind != "s" || claims.UserID == 0 {
+		return effectiveStudentCode, nil
+	}
+
+	if claims.JTI != "" {
+		if _, err := repositories.FindRefreshTokenByJTI(claims.JTI); err != nil {
+			return effectiveStudentCode, nil
+		}
+	}
+
+	var student models.Student
+	if err := config.DB.Select("id", "student_id").Where("id = ?", claims.UserID).First(&student).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return effectiveStudentCode, nil
+		}
+		return "", err
+	}
+
+	if strings.TrimSpace(student.StudentID) != "" {
+		return strings.TrimSpace(student.StudentID), nil
+	}
+
+	return effectiveStudentCode, nil
+}
+
 func loadQueueSessionByPIN(pinCode string, statuses ...string) (*models.QueueSession, error) {
 	var session models.QueueSession
 	query := config.DB.Where("pin_code = ?", pinCode)
@@ -2288,7 +2329,12 @@ func ValidateQueueBookingInfoPublicHandler(c fiber.Ctx) error {
 		return queueLegacyError(c, 400, "ปิดรับการจองคิวชั่วคราว กรุณารอสักครู่", fiber.Map{"code": "SESSION_PAUSED"})
 	}
 
-	student, desk, _, validationErrors, warnings, err := validateQueueBookingCompatibility(session, input.StudentCode, int(input.DeskNumber), input.BookingType, queueBookingValidationPreview)
+	effectiveStudentCode, err := resolveQueueStudentCodeFromAuth(c, input.StudentCode)
+	if err != nil {
+		return queueLegacyError(c, 500, err.Error())
+	}
+
+	student, desk, _, validationErrors, warnings, err := validateQueueBookingCompatibility(session, effectiveStudentCode, int(input.DeskNumber), input.BookingType, queueBookingValidationPreview)
 	if err != nil {
 		return queueLegacyError(c, 500, err.Error())
 	}
@@ -2350,7 +2396,15 @@ func CheckExistingQueueBookingPublicHandler(c fiber.Ctx) error {
 		return queueLegacyError(c, 404, "PIN ไม่ถูกต้อง หรือไม่มีการเปิดรับจองคิว")
 	}
 
-	student, err := loadStudentByCode(input.StudentCode)
+	effectiveStudentCode, err := resolveQueueStudentCodeFromAuth(c, input.StudentCode)
+	if err != nil {
+		return queueLegacyError(c, 500, err.Error())
+	}
+	if strings.TrimSpace(effectiveStudentCode) == "" {
+		return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"has_booking": false}})
+	}
+
+	student, err := loadStudentByCode(effectiveStudentCode)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"has_booking": false}})
 	}
@@ -2398,7 +2452,7 @@ func CreateQueueBookingPublicHandler(c fiber.Ctx) error {
 		BookingType string                `json:"booking_type"`
 		Note        string                `json:"note"`
 	}
-	if err := c.Bind().JSON(&input); err != nil || input.PinCode == "" || input.StudentCode == "" || int(input.DeskNumber) == 0 || input.BookingType == "" {
+	if err := c.Bind().JSON(&input); err != nil || input.PinCode == "" || int(input.DeskNumber) == 0 || input.BookingType == "" {
 		return queueLegacyError(c, 400, "ข้อมูลไม่ถูกต้อง")
 	}
 
@@ -2419,7 +2473,15 @@ func CreateQueueBookingPublicHandler(c fiber.Ctx) error {
 		return queueLegacyError(c, 400, "ปิดรับการจองคิวชั่วคราว กรุณารอสักครู่", fiber.Map{"code": "SESSION_PAUSED"})
 	}
 
-	student, desk, existingBooking, validationErrors, _, err := validateQueueBookingCompatibility(session, input.StudentCode, int(input.DeskNumber), input.BookingType, queueBookingValidationCreate)
+	effectiveStudentCode, err := resolveQueueStudentCodeFromAuth(c, input.StudentCode)
+	if err != nil {
+		return queueLegacyError(c, 500, err.Error())
+	}
+	if strings.TrimSpace(effectiveStudentCode) == "" {
+		return queueLegacyError(c, 400, "กรุณากรอกรหัสนักศึกษา")
+	}
+
+	student, desk, existingBooking, validationErrors, _, err := validateQueueBookingCompatibility(session, effectiveStudentCode, int(input.DeskNumber), input.BookingType, queueBookingValidationCreate)
 	if err != nil {
 		return queueLegacyError(c, 500, err.Error())
 	}
