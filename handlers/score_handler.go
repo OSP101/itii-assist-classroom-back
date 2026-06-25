@@ -1370,9 +1370,17 @@ func SubmitGroupScoreHandler(c fiber.Ctx) error {
 	}
 
 	var memberRows []struct {
-		StudentID uint `gorm:"column:student_id"`
+		StudentID   uint   `gorm:"column:student_id"`
+		StudentCode string `gorm:"column:student_code"`
+		FullName    string `gorm:"column:full_name"`
 	}
-	if err := config.DB.Raw(`SELECT student_id FROM student_group_members WHERE group_id = ?`, input.GroupID).Scan(&memberRows).Error; err != nil {
+	if err := config.DB.Raw(`
+		SELECT sgm.student_id, s.student_id AS student_code, s.full_name
+		FROM student_group_members sgm
+		JOIN students s ON s.id = sgm.student_id
+		WHERE sgm.group_id = ?
+		ORDER BY s.student_id ASC
+	`, input.GroupID).Scan(&memberRows).Error; err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load group members"})
 	}
 	if len(memberRows) == 0 {
@@ -1380,9 +1388,11 @@ func SubmitGroupScoreHandler(c fiber.Ctx) error {
 	}
 
 	memberSet := map[uint]bool{}
+	memberInfo := map[uint]fiber.Map{}
 	memberIDs := make([]uint, 0, len(memberRows))
 	for _, row := range memberRows {
 		memberSet[row.StudentID] = true
+		memberInfo[row.StudentID] = fiber.Map{"id": row.StudentID, "student_id": row.StudentCode, "full_name": row.FullName}
 		memberIDs = append(memberIDs, row.StudentID)
 	}
 	targetStudentIDs := memberIDs
@@ -1397,8 +1407,87 @@ func SubmitGroupScoreHandler(c fiber.Ctx) error {
 		targetStudentIDs = uniqueScoreUintValues(filtered)
 	}
 
+	linkedSessions, err := loadAssignmentLinkedSessions(scoreAssignmentRow{
+		ID:                        assignment.ID,
+		LinkedAttendanceSessionID: assignment.LinkedAttendanceSessionID,
+		AttendanceCondition:       assignment.AttendanceCondition,
+	})
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load linked attendance sessions"})
+	}
+
+	attendanceCondition := strings.TrimSpace(assignment.AttendanceCondition)
+	if attendanceCondition == "" {
+		attendanceCondition = "or"
+	}
+
+	skippedStudents := make([]fiber.Map, 0)
+	if len(linkedSessions) > 0 {
+		sessionIDs := make([]uint, 0, len(linkedSessions))
+		for _, session := range linkedSessions {
+			sessionIDs = append(sessionIDs, session.ID)
+		}
+
+		attendanceMap, err := loadAttendanceStatusMap(sessionIDs, targetStudentIDs)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load attendance records"})
+		}
+
+		eligibleStudentIDs := make([]uint, 0, len(targetStudentIDs))
+		for _, studentID := range targetStudentIDs {
+			attendedCount := 0
+			for _, session := range linkedSessions {
+				status := "absent"
+				if attendanceMap[studentID] != nil {
+					if current, ok := attendanceMap[studentID][session.ID]; ok && strings.TrimSpace(current) != "" {
+						status = current
+					}
+				}
+				if status != "absent" {
+					attendedCount++
+				}
+			}
+
+			canScore := false
+			if attendanceCondition == "and" {
+				canScore = attendedCount == len(linkedSessions)
+			} else {
+				canScore = attendedCount > 0
+			}
+
+			if canScore {
+				eligibleStudentIDs = append(eligibleStudentIDs, studentID)
+				continue
+			}
+
+			info, ok := memberInfo[studentID]
+			if !ok {
+				info = fiber.Map{"id": studentID}
+			}
+			info["reason"] = "not_checked_in"
+			skippedStudents = append(skippedStudents, info)
+		}
+
+		targetStudentIDs = eligibleStudentIDs
+	}
+
+	if len(targetStudentIDs) == 0 {
+		logCourseActivity(c, assignment.CourseID, c.Locals("user_id").(uint), "submit_group_score", "score", "assignment", assignment.ID, assignment.Name, fiber.Map{"group_id": input.GroupID, "student_count": 0, "skipped_count": len(skippedStudents), "score": input.Score, "sub_item_id": input.SubItemID})
+		return c.JSON(fiber.Map{
+			"success": true,
+			"message": "No checked-in members were eligible for scoring",
+			"data": fiber.Map{
+				"applied_count":    0,
+				"skipped_count":    len(skippedStudents),
+				"applied_students": []fiber.Map{},
+				"skipped_students": skippedStudents,
+			},
+		})
+	}
+
 	userID := c.Locals("user_id").(uint)
 	groupID := input.GroupID
+	appliedStudents := make([]fiber.Map, 0, len(targetStudentIDs))
 	for _, studentID := range targetStudentIDs {
 		studentIDCopy := studentID
 		score := models.Score{
@@ -1413,11 +1502,25 @@ func SubmitGroupScoreHandler(c fiber.Ctx) error {
 		if err := repositories.SubmitScore(&score); err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to submit group score"})
 		}
+		if info, ok := memberInfo[studentID]; ok {
+			appliedStudents = append(appliedStudents, info)
+		} else {
+			appliedStudents = append(appliedStudents, fiber.Map{"id": studentID})
+		}
 	}
 
-	logCourseActivity(c, assignment.CourseID, userID, "submit_group_score", "score", "assignment", assignment.ID, assignment.Name, fiber.Map{"group_id": input.GroupID, "student_count": len(targetStudentIDs), "score": input.Score, "sub_item_id": input.SubItemID})
+	logCourseActivity(c, assignment.CourseID, userID, "submit_group_score", "score", "assignment", assignment.ID, assignment.Name, fiber.Map{"group_id": input.GroupID, "student_count": len(targetStudentIDs), "skipped_count": len(skippedStudents), "score": input.Score, "sub_item_id": input.SubItemID})
 
-	return c.JSON(fiber.Map{"success": true, "message": fmt.Sprintf("Score submitted for %d group members", len(targetStudentIDs))})
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": fmt.Sprintf("Score submitted for %d group members", len(targetStudentIDs)),
+		"data": fiber.Map{
+			"applied_count":    len(targetStudentIDs),
+			"skipped_count":    len(skippedStudents),
+			"applied_students": appliedStudents,
+			"skipped_students": skippedStudents,
+		},
+	})
 }
 
 // POST /api/scores/edit-request
