@@ -398,11 +398,33 @@ func PauseQueueSession(id string) error {
 
 func CloseQueueSession(id string) error {
 	now := time.Now()
-	return config.DB.Model(&models.QueueSession{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"status":                 "closed",
-		"end_time":               now,
-		"projector_last_seen_at": nil,
-	}).Error
+	return config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.QueueSession{}).Where("id = ?", id).Updates(map[string]interface{}{
+			"status":                 "closed",
+			"end_time":               now,
+			"projector_last_seen_at": nil,
+		}).Error; err != nil {
+			return err
+		}
+
+		return forceWorkersOfflineBySession(tx, id, now)
+	})
+}
+
+func forceWorkersOfflineBySession(tx *gorm.DB, sessionID string, now time.Time) error {
+	if tx == nil {
+		return fmt.Errorf("tx is nil")
+	}
+
+	return tx.Model(&models.QueueWorker{}).
+		Where("queue_session_id = ?", sessionID).
+		Updates(map[string]interface{}{
+			"status":                     "offline",
+			"current_booking_id":         nil,
+			"offer_paused_until":         nil,
+			"consecutive_offer_timeouts": 0,
+			"last_active_at":             now,
+		}).Error
 }
 
 func ResumeQueueSession(id string) error {
@@ -1436,22 +1458,29 @@ func AutoCloseStaleQueueSessions(loc *time.Location) ([]AutoClosedQueueSession, 
 	endTime := now.UTC()
 
 	for _, s := range sessions {
-		// Cancel waiting bookings (not in_progress – those finish naturally)
-		res := config.DB.Model(&models.QueueBooking{}).
-			Where("queue_session_id = ? AND status = 'waiting'", s.ID).
-			Update("status", "cancelled")
-		if res.Error != nil {
-			return results, res.Error
-		}
-		cancelled := int(res.RowsAffected)
+		cancelled := 0
+		err := config.DB.Transaction(func(tx *gorm.DB) error {
+			// Cancel waiting bookings (not in_progress – those finish naturally)
+			res := tx.Model(&models.QueueBooking{}).
+				Where("queue_session_id = ? AND status = 'waiting'", s.ID).
+				Update("status", "cancelled")
+			if res.Error != nil {
+				return res.Error
+			}
+			cancelled = int(res.RowsAffected)
 
-		// Close the session
-		if err := config.DB.Model(&models.QueueSession{}).
-			Where("id = ?", s.ID).
-			Updates(map[string]interface{}{
-				"status":   "closed",
-				"end_time": endTime,
-			}).Error; err != nil {
+			if err := tx.Model(&models.QueueSession{}).
+				Where("id = ?", s.ID).
+				Updates(map[string]interface{}{
+					"status":   "closed",
+					"end_time": endTime,
+				}).Error; err != nil {
+				return err
+			}
+
+			return forceWorkersOfflineBySession(tx, s.ID, endTime)
+		})
+		if err != nil {
 			return results, err
 		}
 
@@ -1488,21 +1517,29 @@ func AutoCloseAbandonedPausedQueueSessions(timeout time.Duration) ([]AutoClosedQ
 	endTime := time.Now().UTC()
 
 	for _, s := range sessions {
-		res := config.DB.Model(&models.QueueBooking{}).
-			Where("queue_session_id = ? AND status = 'waiting'", s.ID).
-			Update("status", "cancelled")
-		if res.Error != nil {
-			return results, res.Error
-		}
-		cancelled := int(res.RowsAffected)
+		cancelled := 0
+		err := config.DB.Transaction(func(tx *gorm.DB) error {
+			res := tx.Model(&models.QueueBooking{}).
+				Where("queue_session_id = ? AND status = 'waiting'", s.ID).
+				Update("status", "cancelled")
+			if res.Error != nil {
+				return res.Error
+			}
+			cancelled = int(res.RowsAffected)
 
-		if err := config.DB.Model(&models.QueueSession{}).
-			Where("id = ? AND status = 'paused'", s.ID).
-			Updates(map[string]interface{}{
-				"status":                 "closed",
-				"end_time":               endTime,
-				"projector_last_seen_at": nil,
-			}).Error; err != nil {
+			if err := tx.Model(&models.QueueSession{}).
+				Where("id = ? AND status = 'paused'", s.ID).
+				Updates(map[string]interface{}{
+					"status":                 "closed",
+					"end_time":               endTime,
+					"projector_last_seen_at": nil,
+				}).Error; err != nil {
+				return err
+			}
+
+			return forceWorkersOfflineBySession(tx, s.ID, endTime)
+		})
+		if err != nil {
 			return results, err
 		}
 

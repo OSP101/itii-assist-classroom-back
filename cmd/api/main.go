@@ -272,6 +272,12 @@ func startQueueMidnightWorker() {
 				"reason":    "auto_midnight",
 				"timestamp": time.Now().UnixMilli(),
 			})
+			realtime.EmitToQueue(s.SessionID, "worker-status-updated", fiber.Map{
+				"scope":     "all",
+				"status":    "offline",
+				"reason":    "session_closed",
+				"timestamp": time.Now().UnixMilli(),
+			})
 		}
 	}
 
@@ -311,6 +317,12 @@ func startQueuePausedSessionLeaseWorker() {
 			realtime.EmitToQueue(s.SessionID, "session-status-changed", fiber.Map{
 				"status":    "closed",
 				"reason":    "auto_paused_timeout",
+				"timestamp": time.Now().UnixMilli(),
+			})
+			realtime.EmitToQueue(s.SessionID, "worker-status-updated", fiber.Map{
+				"scope":     "all",
+				"status":    "offline",
+				"reason":    "session_closed",
 				"timestamp": time.Now().UnixMilli(),
 			})
 		}

@@ -411,6 +411,14 @@ func (h *QueueHandler) CloseQueueSession(c fiber.Ctx) error {
 		"session":   updatedSession,
 		"timestamp": time.Now().UnixMilli(),
 	})
+	if updatedSession.Status == "closed" {
+		realtime.EmitToQueue(updatedSession.ID, "worker-status-updated", fiber.Map{
+			"scope":     "all",
+			"status":    "offline",
+			"reason":    "session_closed",
+			"timestamp": time.Now().UnixMilli(),
+		})
+	}
 	go emitQueueReportSnapshot(updatedSession.ID)
 	return c.JSON(fiber.Map{"success": true, "message": "Session closed", "data": updatedSession})
 }
@@ -3292,6 +3300,14 @@ func UpdateQueueSessionStatusPublicHandler(c fiber.Ctx) error {
 		logCourseActivity(c, updatedSession.CourseID, actorID, "update_queue_session_status", "queue", "queue_session", updatedSession.ID, updatedSession.Title, fiber.Map{"status": updatedSession.Status, "source": "projector"})
 	}
 	realtime.EmitToQueue(updatedSession.ID, "session-status-changed", fiber.Map{"status": updatedSession.Status, "session": updatedSession, "timestamp": time.Now().UnixMilli()})
+	if updatedSession.Status == "closed" {
+		realtime.EmitToQueue(updatedSession.ID, "worker-status-updated", fiber.Map{
+			"scope":     "all",
+			"status":    "offline",
+			"reason":    "session_closed",
+			"timestamp": time.Now().UnixMilli(),
+		})
+	}
 	go emitQueueReportSnapshot(updatedSession.ID)
 
 	return c.JSON(fiber.Map{"success": true, "data": updatedSession})
@@ -3398,6 +3414,14 @@ func UpdateQueueSessionStatusCompatHandler(c fiber.Ctx) error {
 		return queueLegacyError(c, 500, err.Error())
 	}
 	realtime.EmitToQueue(updatedSession.ID, "session-status-changed", fiber.Map{"status": updatedSession.Status, "session": updatedSession, "timestamp": time.Now().UnixMilli()})
+	if updatedSession.Status == "closed" {
+		realtime.EmitToQueue(updatedSession.ID, "worker-status-updated", fiber.Map{
+			"scope":     "all",
+			"status":    "offline",
+			"reason":    "session_closed",
+			"timestamp": time.Now().UnixMilli(),
+		})
+	}
 	go emitQueueReportSnapshot(updatedSession.ID)
 
 	return c.JSON(fiber.Map{"success": true, "data": updatedSession})
