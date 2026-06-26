@@ -40,6 +40,10 @@ func SetupAuthRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	api.Get("/github", handlers.GitHubLoginHandler)
 	api.Get("/github/callback", handlers.GitHubCallbackHandler)
 
+	// KKU SSO
+	api.Get("/kku", handlers.KKULoginHandler)
+	api.Get("/kku/callback", handlers.KKUCallbackHandler)
+
 	// 2FA — public endpoints (login flow)
 	twofa := app.Group("/api/auth/2fa")
 	twofa.Post("/verify-login", handlers.VerifyLoginWith2FAHandler)
