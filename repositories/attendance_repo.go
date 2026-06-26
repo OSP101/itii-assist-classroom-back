@@ -8,6 +8,7 @@ import (
 	"itii-assist/config"
 	"itii-assist/models"
 	"itii-assist/observability"
+	"log"
 	"math"
 	"strings"
 	"time"
@@ -163,6 +164,7 @@ type AttendanceCheckInResult struct {
 	CheckInTime      time.Time `json:"check_in_time"`
 	LocationVerified bool      `json:"location_verified"`
 	DistanceMeters   *int      `json:"distance_meters,omitempty"`
+	IsDuplicate      bool      `json:"is_duplicate"`
 }
 
 type AttendanceSessionInfo struct {
@@ -1200,9 +1202,23 @@ type AttendanceRecordUpdate struct {
 }
 
 // Student check-in (public)
-func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, lng *float64, googleEmail string, googleID string) (*AttendanceCheckInResult, error) {
+func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, lng *float64, googleEmail string, googleID string, clientRequestID string) (*AttendanceCheckInResult, error) {
 	startedAt := time.Now()
 	observability.RecordAttendanceCheckInAttempt()
+	normalizedRequestID := strings.TrimSpace(clientRequestID)
+
+	if normalizedRequestID != "" {
+		cacheCtx, cacheCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		cachedResult, cacheErr := getAttendanceCheckInCachedResult(cacheCtx, sessionID, studentID, normalizedRequestID)
+		cacheCancel()
+		if cacheErr == nil && cachedResult != nil {
+			if !cachedResult.IsDuplicate {
+				cachedResult.IsDuplicate = true
+			}
+			observability.RecordAttendanceCheckInDuplicate(time.Since(startedAt))
+			return cachedResult, nil
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -1221,16 +1237,15 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 	var result AttendanceCheckInResult
 	err = db.Transaction(func(tx *gorm.DB) error {
 		var session models.AttendanceSession
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&session, sessionID).Error; err != nil {
+		if err := tx.First(&session, sessionID).Error; err != nil {
 			return ErrAttendanceSessionNotFoundPublic
 		}
-		sectionIDs, err := attendanceSessionSectionIDsWithDB(tx, &session)
+
+		record, err := ensureAttendanceRecordInTx(tx, &session, studentID)
 		if err != nil {
 			return err
 		}
-		if err := backfillAttendanceRecordsWithDB(tx, &session, sectionIDs); err != nil {
-			return err
-		}
+
 		now := time.Now()
 		if now.Before(session.StartTime) {
 			return ErrAttendanceSessionNotStartedPublic
@@ -1306,28 +1321,37 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 			updates["location_lng"] = *lng
 		}
 
-		var existing models.AttendanceRecord
-		if err := tx.Where("attendance_session_id = ? AND student_id = ?", sessionID, studentID).First(&existing).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return fmt.Errorf("à¸„à¸¸à¸“à¹„à¸¡à¹ˆà¹„à¸”à¹‰à¸¥à¸‡à¸—à¸°à¹€à¸šà¸µà¸¢à¸™à¹ƒà¸™à¸£à¸²à¸¢à¸§à¸´à¸Šà¸²à¸™à¸µà¹‰")
-			}
-			return err
-		}
-		if existing.CheckInTime != nil && existing.Status != "absent" {
+		if record.CheckInTime != nil && record.Status != "absent" {
 			result = AttendanceCheckInResult{
-				Status:           existing.Status,
-				CheckInTime:      *existing.CheckInTime,
-				LocationVerified: existing.LocationVerified,
-				DistanceMeters:   existing.DistanceMeters,
+				Status:           record.Status,
+				CheckInTime:      *record.CheckInTime,
+				LocationVerified: record.LocationVerified,
+				DistanceMeters:   record.DistanceMeters,
+				IsDuplicate:      true,
 			}
 			observability.RecordAttendanceCheckInDuplicate(time.Since(startedAt))
 			return nil
 		}
 
 		updateResult := tx.Model(&models.AttendanceRecord{}).
-			Where("id = ?", existing.ID).
+			Where("id = ? AND (check_in_time IS NULL OR status = 'absent')", record.ID).
 			Updates(updates)
 		if updateResult.RowsAffected == 0 {
+			var latest models.AttendanceRecord
+			if err := tx.Where("id = ?", record.ID).First(&latest).Error; err != nil {
+				return err
+			}
+			if latest.CheckInTime != nil && latest.Status != "absent" {
+				result = AttendanceCheckInResult{
+					Status:           latest.Status,
+					CheckInTime:      *latest.CheckInTime,
+					LocationVerified: latest.LocationVerified,
+					DistanceMeters:   latest.DistanceMeters,
+					IsDuplicate:      true,
+				}
+				observability.RecordAttendanceCheckInDuplicate(time.Since(startedAt))
+				return nil
+			}
 			return ErrAttendanceCourseNotRegisteredPublic
 		}
 		if updateResult.Error != nil {
@@ -1339,12 +1363,21 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 			CheckInTime:      checkInTime,
 			LocationVerified: locationVerified,
 			DistanceMeters:   distanceMeters,
+			IsDuplicate:      false,
 		}
 		return nil
 	})
 	if err != nil {
 		observability.RecordAttendanceCheckInFailure(time.Since(startedAt))
 		return nil, err
+	}
+
+	if normalizedRequestID != "" {
+		cacheCtx, cacheCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		if cacheErr := setAttendanceCheckInCachedResult(cacheCtx, sessionID, studentID, normalizedRequestID, &result); cacheErr != nil && !errors.Is(cacheErr, ErrAttendanceRedisUnavailable) {
+			log.Printf("event=redis_error action=set_attendance_checkin_cache session_id=%d student_id=%d err=%v", sessionID, studentID, cacheErr)
+		}
+		cacheCancel()
 	}
 
 	observability.RecordAttendanceCheckInSuccess(time.Since(startedAt))

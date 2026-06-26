@@ -1,7 +1,11 @@
 package middlewares
 
 import (
+	"context"
+	"errors"
+	"itii-assist/config"
 	"itii-assist/observability"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -9,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/redis/go-redis/v9"
 )
 
 type attendanceRateLimitConfig struct {
@@ -32,13 +37,15 @@ var publicAttendanceLimiter = &attendanceRateLimiter{
 
 func AttendanceCheckInGuard() fiber.Handler {
 	config := loadAttendanceRateLimitConfig()
+	backend := loadAttendanceRateLimitBackend()
 
 	return func(c fiber.Ctx) error {
 		if c.Method() == fiber.MethodOptions {
 			return c.Next()
 		}
 
-		retryAfter, allowed := publicAttendanceLimiter.Allow(attendanceClientKey(c), config)
+		clientKey := attendanceClientKey(c)
+		retryAfter, allowed := allowAttendanceCheckIn(clientKey, config, backend)
 		if allowed {
 			return c.Next()
 		}
@@ -54,6 +61,56 @@ func AttendanceCheckInGuard() fiber.Handler {
 			"message": "ส่งคำขอเช็คชื่อถี่เกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง",
 		})
 	}
+}
+
+func allowAttendanceCheckIn(key string, config attendanceRateLimitConfig, backend string) (int, bool) {
+	if strings.EqualFold(backend, "redis") {
+		if retryAfter, allowed, ok := allowAttendanceCheckInRedis(key, config); ok {
+			return retryAfter, allowed
+		}
+	}
+
+	return publicAttendanceLimiter.Allow(key, config)
+}
+
+func allowAttendanceCheckInRedis(key string, cfg attendanceRateLimitConfig) (int, bool, bool) {
+	if config.Redis == nil {
+		return 0, false, false
+	}
+	if key == "" {
+		key = "unknown"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	redisKey := "attendance:ratelimit:checkin:" + key
+	count, err := config.Redis.Incr(ctx, redisKey).Result()
+	if err != nil {
+		return 0, false, false
+	}
+
+	if count == 1 {
+		if err := config.Redis.Expire(ctx, redisKey, cfg.Window).Err(); err != nil {
+			return 0, false, false
+		}
+	}
+
+	if count <= int64(cfg.Limit) {
+		return 0, true, true
+	}
+
+	ttl, ttlErr := config.Redis.TTL(ctx, redisKey).Result()
+	if ttlErr != nil || errors.Is(ttlErr, redis.Nil) {
+		return 1, false, true
+	}
+
+	retryAfter := int(math.Ceil(ttl.Seconds()))
+	if retryAfter < 1 {
+		retryAfter = 1
+	}
+
+	return retryAfter, false, true
 }
 
 func (limiter *attendanceRateLimiter) Allow(key string, config attendanceRateLimitConfig) (int, bool) {
@@ -111,6 +168,14 @@ func loadAttendanceRateLimitConfig() attendanceRateLimitConfig {
 		Limit:  limit,
 		Window: time.Duration(windowSeconds) * time.Second,
 	}
+}
+
+func loadAttendanceRateLimitBackend() string {
+	backend := strings.TrimSpace(os.Getenv("ATTENDANCE_RATE_LIMITER_BACKEND"))
+	if backend == "" {
+		return "memory"
+	}
+	return strings.ToLower(backend)
 }
 
 func attendanceClientKey(c fiber.Ctx) string {

@@ -442,6 +442,7 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 	var input struct {
 		StudentID   *uint    `json:"student_id"`
 		PinCode     string   `json:"pin_code"`
+		ClientID    string   `json:"client_request_id"`
 		Lat         *float64 `json:"lat"`
 		Lng         *float64 `json:"lng"`
 		LocationLat *float64 `json:"location_lat"`
@@ -480,7 +481,7 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 		})
 	}
 
-	result, err := repositories.StudentCheckIn(uint(id), studentID, input.PinCode, lat, lng, input.GoogleEmail, input.GoogleID)
+	result, err := repositories.StudentCheckIn(uint(id), studentID, input.PinCode, lat, lng, input.GoogleEmail, input.GoogleID, input.ClientID)
 	if err != nil {
 		statusCode, payload := attendancePublicErrorResponse(err, 400, "เช็คชื่อไม่สำเร็จ", "ไม่สามารถเช็คชื่อได้ในขณะนี้")
 		return c.Status(statusCode).JSON(payload)
@@ -530,6 +531,7 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 			"check_in_time":     result.CheckInTime,
 			"location_verified": result.LocationVerified,
 			"distance_meters":   result.DistanceMeters,
+			"is_duplicate":      result.IsDuplicate,
 		},
 	})
 }
@@ -1179,6 +1181,7 @@ func RotateAttendanceSessionPinHandler(c fiber.Ctx) error {
 func StudentCheckInByPINHandler(c fiber.Ctx) error {
 	var input struct {
 		PinCode     string   `json:"pin_code"`
+		ClientID    string   `json:"client_request_id"`
 		GoogleEmail string   `json:"google_email"`
 		GoogleID    string   `json:"google_id"`
 		StudentID   *uint    `json:"student_id"`
@@ -1218,7 +1221,7 @@ func StudentCheckInByPINHandler(c fiber.Ctx) error {
 		studentID = student.ID
 	}
 
-	result, err := repositories.StudentCheckIn(sessionID, studentID, input.PinCode, input.LocationLat, input.LocationLng, input.GoogleEmail, input.GoogleID)
+	result, err := repositories.StudentCheckIn(sessionID, studentID, input.PinCode, input.LocationLat, input.LocationLng, input.GoogleEmail, input.GoogleID, input.ClientID)
 	if err != nil {
 		statusCode, payload := attendancePublicErrorResponse(err, 400, "เช็คชื่อไม่สำเร็จ", "ไม่สามารถเช็คชื่อได้ในขณะนี้")
 		return c.Status(statusCode).JSON(payload)

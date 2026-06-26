@@ -23,6 +23,7 @@ const (
 	attendancePinReservationAttempts = 10
 	attendanceStartIdempotencyTTL    = 5 * time.Minute
 	attendanceStateTTLBuffer         = 2 * time.Minute
+	attendanceCheckInIdempotencyTTL  = 2 * time.Minute
 )
 
 var (
@@ -93,6 +94,57 @@ func attendanceSessionPreviousKey(sessionID uint) string {
 
 func attendanceSessionIdempotencyKey(sessionID uint, idempotencyKey string) string {
 	return fmt.Sprintf("attendance:session:%d:start:%s", sessionID, strings.TrimSpace(idempotencyKey))
+}
+
+func attendanceCheckInIdempotencyKey(sessionID uint, studentID uint, clientRequestID string) string {
+	return fmt.Sprintf("attendance:checkin:%d:%d:%s", sessionID, studentID, attendancePinHash(clientRequestID))
+}
+
+func getAttendanceCheckInCachedResult(ctx context.Context, sessionID uint, studentID uint, clientRequestID string) (*AttendanceCheckInResult, error) {
+	if !attendanceRedisAvailable() {
+		return nil, ErrAttendanceRedisUnavailable
+	}
+	normalizedID := strings.TrimSpace(clientRequestID)
+	if normalizedID == "" {
+		return nil, nil
+	}
+
+	raw, err := config.Redis.Get(ctx, attendanceCheckInIdempotencyKey(sessionID, studentID, normalizedID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		observability.RecordAttendanceRedisFailure()
+		return nil, err
+	}
+
+	var cached AttendanceCheckInResult
+	if err := json.Unmarshal([]byte(raw), &cached); err != nil {
+		return nil, err
+	}
+	return &cached, nil
+}
+
+func setAttendanceCheckInCachedResult(ctx context.Context, sessionID uint, studentID uint, clientRequestID string, result *AttendanceCheckInResult) error {
+	if !attendanceRedisAvailable() {
+		return ErrAttendanceRedisUnavailable
+	}
+	normalizedID := strings.TrimSpace(clientRequestID)
+	if normalizedID == "" || result == nil {
+		return nil
+	}
+
+	payload, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+
+	if err := config.Redis.Set(ctx, attendanceCheckInIdempotencyKey(sessionID, studentID, normalizedID), payload, attendanceCheckInIdempotencyTTL).Err(); err != nil {
+		observability.RecordAttendanceRedisFailure()
+		return err
+	}
+
+	return nil
 }
 
 func attendanceSessionRedisTTL(state AttendanceRuntimeState) time.Duration {
