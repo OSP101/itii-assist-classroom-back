@@ -260,6 +260,14 @@ func UpdateQueueSessionHandler(c fiber.Ctx) error {
 	if input.Title != nil {
 		session.Title = strings.TrimSpace(*input.Title)
 	}
+	if session.Status == "closed" {
+		if err := repositories.UpdateQueueSession(session); err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update session"})
+		}
+		logCourseActivity(c, session.CourseID, actorID, "update_queue_session", "queue", "queue_session", session.ID, session.Title, fiber.Map{"title": session.Title})
+		go createNotificationsForCourseMembers(session.CourseID, actorID, "queue_updated", "แก้ไขคิว: "+session.Title, "มีการแก้ไขคิวในวิชา", "/classroom/"+session.CourseID+"/queue", buildNotifData(session.CourseID, session.ID, "queue_session", ""))
+		return c.JSON(fiber.Map{"success": true, "data": session})
+	}
 	if input.Description != nil {
 		session.Description = *input.Description
 	}
