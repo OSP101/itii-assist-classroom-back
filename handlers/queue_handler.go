@@ -245,6 +245,7 @@ func UpdateQueueSessionHandler(c fiber.Ctx) error {
 	actorID := c.Locals("user_id").(uint)
 
 	var input struct {
+		ClassroomID               *string    `json:"classroom_id"`
 		Title                     *string    `json:"title"`
 		Description               *string    `json:"description"`
 		LinkedAssignmentID        *uint      `json:"linked_assignment_id"`
@@ -270,6 +271,13 @@ func UpdateQueueSessionHandler(c fiber.Ctx) error {
 	}
 	if input.Description != nil {
 		session.Description = *input.Description
+	}
+	if input.ClassroomID != nil {
+		classroomID := strings.TrimSpace(*input.ClassroomID)
+		if classroomID == "" {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "classroom_id is required"})
+		}
+		session.ClassroomID = classroomID
 	}
 	session.LinkedAssignmentID = input.LinkedAssignmentID
 	if input.RequireAttendance != nil {
@@ -298,7 +306,7 @@ func UpdateQueueSessionHandler(c fiber.Ctx) error {
 	if err := repositories.UpdateQueueSession(session); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update session"})
 	}
-	logCourseActivity(c, session.CourseID, actorID, "update_queue_session", "queue", "queue_session", session.ID, session.Title, fiber.Map{"description": session.Description, "linked_assignment_id": session.LinkedAssignmentID, "require_attendance": session.RequireAttendance, "linked_attendance_session_id": session.LinkedAttendanceSessionID})
+	logCourseActivity(c, session.CourseID, actorID, "update_queue_session", "queue", "queue_session", session.ID, session.Title, fiber.Map{"description": session.Description, "classroom_id": session.ClassroomID, "linked_assignment_id": session.LinkedAssignmentID, "require_attendance": session.RequireAttendance, "linked_attendance_session_id": session.LinkedAttendanceSessionID})
 	go createNotificationsForCourseMembers(session.CourseID, actorID, "queue_updated", "แก้ไขคิว: "+session.Title, "มีการแก้ไขคิวในวิชา", "/classroom/"+session.CourseID+"/queue", buildNotifData(session.CourseID, session.ID, "queue_session", ""))
 	return c.JSON(fiber.Map{"success": true, "data": session})
 }
