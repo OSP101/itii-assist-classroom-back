@@ -328,8 +328,9 @@ func buildScoreMatrixHandlerData(courseID string, sectionID string, assignmentTy
 		}
 	}
 
-	// Load permanent student-group mapping for group/permanent_group assignment types
-	isGroupAssignment := strings.Contains(assignmentType, "group") || assignmentType == "group" || assignmentType == "permanent_group"
+	// Load permanent student-group mapping for permanent group views only.
+	// weekly_group is handled by week-specific mapping below.
+	isGroupAssignment := assignmentType == "group" || assignmentType == "permanent_group"
 	type studentGroupInfo struct {
 		GroupID   uint
 		GroupName string
@@ -540,13 +541,14 @@ func buildScoreMatrixHandlerData(courseID string, sectionID string, assignmentTy
 					if editReqs == nil {
 						editReqs = []fiber.Map{}
 					}
-					payload := fiber.Map{"score": nil, "max_score": subItem.MaxScore, "sub_item_name": subItem.Name, "graded_by": nil, "graded_at": nil, "updated_at": nil, "comment": nil, "group_name": nil, "edit_requests": editReqs}
+					payload := fiber.Map{"score": nil, "max_score": subItem.MaxScore, "sub_item_name": subItem.Name, "graded_by": nil, "graded_at": nil, "updated_at": nil, "comment": nil, "group_id": nil, "group_name": nil, "edit_requests": editReqs}
 					if ok {
 						payload["score"] = cell.Score
 						payload["graded_by"] = cell.GradedBy
 						payload["graded_at"] = cell.GradedAt
 						payload["updated_at"] = cell.UpdatedAt
 						payload["comment"] = cell.Comment
+						payload["group_id"] = cell.GroupID
 						payload["group_name"] = cell.GroupName
 						if ers := editRequestsMap[cell.ScoreID]; ers != nil {
 							payload["edit_requests"] = ers
@@ -556,6 +558,7 @@ func buildScoreMatrixHandlerData(courseID string, sectionID string, assignmentTy
 					} else if assignment.AssignmentType == "weekly_group" && assignment.WeekNumber != nil {
 						if weeklyGroups := studentWeeklyGroupMap[student.ID]; weeklyGroups != nil {
 							if info, exists := weeklyGroups[*assignment.WeekNumber]; exists {
+								payload["group_id"] = info.GroupID
 								payload["group_name"] = info.GroupName
 							}
 						}
@@ -574,19 +577,21 @@ func buildScoreMatrixHandlerData(courseID string, sectionID string, assignmentTy
 						editReqs = ers
 					}
 				}
-				payload := fiber.Map{"score": nil, "max_score": assignment.MaxScore, "graded_by": nil, "graded_at": nil, "updated_at": nil, "comment": nil, "group_name": nil, "edit_requests": editReqs}
+				payload := fiber.Map{"score": nil, "max_score": assignment.MaxScore, "graded_by": nil, "graded_at": nil, "updated_at": nil, "comment": nil, "group_id": nil, "group_name": nil, "edit_requests": editReqs}
 				if ok {
 					payload["score"] = cell.Score
 					payload["graded_by"] = cell.GradedBy
 					payload["graded_at"] = cell.GradedAt
 					payload["updated_at"] = cell.UpdatedAt
 					payload["comment"] = cell.Comment
+					payload["group_id"] = cell.GroupID
 					payload["group_name"] = cell.GroupName
 					row["total_score"] = row["total_score"].(float64) + cell.Score
 					row["scored_count"] = row["scored_count"].(int) + 1
 				} else if assignment.AssignmentType == "weekly_group" && assignment.WeekNumber != nil {
 					if weeklyGroups := studentWeeklyGroupMap[student.ID]; weeklyGroups != nil {
 						if info, exists := weeklyGroups[*assignment.WeekNumber]; exists {
+							payload["group_id"] = info.GroupID
 							payload["group_name"] = info.GroupName
 						}
 					}
