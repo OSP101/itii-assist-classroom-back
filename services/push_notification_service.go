@@ -99,8 +99,8 @@ func getFCMLegacyServerKey() string {
 
 func sendLegacyFCMMessage(serverKey, registrationToken, title, body, clickURL string, data map[string]string) (string, string, *time.Time) {
 	requestPayload := map[string]any{
-		"to":         registrationToken,
-		"priority":   "high",
+		"to":       registrationToken,
+		"priority": "high",
 		"notification": map[string]string{
 			"title":        title,
 			"body":         body,
