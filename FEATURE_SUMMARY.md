@@ -653,6 +653,9 @@ TA สามารถส่งคำขอแก้ไขคะแนน ไป�
 ### คำอธิบาย
 ระบบแจ้งเตือนผ่าน Firebase Cloud Messaging (FCM) สำหรับแจ้งสถานะคิวให้นักศึกษาและ Worker
 
+> การส่ง push ของ worker queue ต้องตั้งค่า FCM server key ฝั่ง backend ด้วย `FCM_SERVER_KEY`, `FIREBASE_SERVER_KEY`, หรือ `FCM_LEGACY_SERVER_KEY` อย่างน้อย 1 ค่า
+> ถ้าไม่ตั้งค่า backend จะเก็บ token/log ได้ แต่จะไม่ยิง push ออกจริง
+
 ### ฟังก์ชันหลัก
 
 | ฟังก์ชัน | คำอธิบาย |

@@ -3546,6 +3546,7 @@ func tryAssignNextBookingAndEmit(sessionID string, workerID uint) (*models.Queue
 		realtime.EmitToQueue(sessionID, "booking-assigned", fiber.Map{"booking": bookingPayload, "worker_id": workerID, "timestamp": time.Now().UnixMilli()})
 		realtime.EmitToBooking(nextBooking.ID, "booking-assigned", fiber.Map{"booking": bookingPayload, "timestamp": time.Now().UnixMilli()})
 		realtime.EmitToWorker(workerID, "new-task", fiber.Map{"booking": bookingPayload, "timestamp": time.Now().UnixMilli()})
+		go services.SendQueueWorkerAssignedPush(sessionID, workerID, nextBooking)
 	}
 	return nextBooking, nil
 }
