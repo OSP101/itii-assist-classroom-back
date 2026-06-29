@@ -413,8 +413,6 @@ func buildAttendanceRuntimeState(ctx context.Context, db *gorm.DB, session *mode
 		"started_at":        now,
 		"expires_at":        expiresAt,
 		"closed_at":         nil,
-		"start_time":        now,
-		"end_time":          expiresAt,
 		"auto_rotate_pin":   mode == "rotating",
 	}
 	err = db.Model(&models.AttendanceSession{}).Where("id = ?", session.ID).Updates(updates).Error

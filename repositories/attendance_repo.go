@@ -259,6 +259,30 @@ func ConfiguredAttendancePinMode(autoRotate bool) string {
 	return "static"
 }
 
+func computeAttendanceLateThreshold(startTime time.Time, lateThresholdTime string, lateThresholdMinutes int) time.Time {
+	minutes := lateThresholdMinutes
+	if minutes < 0 {
+		minutes = 0
+	}
+	fallback := startTime.Add(time.Duration(minutes) * time.Minute)
+
+	raw := strings.TrimSpace(lateThresholdTime)
+	if raw == "" {
+		return fallback
+	}
+
+	var parsed time.Time
+	var err error
+	for _, layout := range []string{"15:04:05", "15:04"} {
+		parsed, err = time.ParseInLocation(layout, raw, startTime.Location())
+		if err == nil {
+			return time.Date(startTime.Year(), startTime.Month(), startTime.Day(), parsed.Hour(), parsed.Minute(), parsed.Second(), 0, startTime.Location())
+		}
+	}
+
+	return fallback
+}
+
 func generateUniqueAttendancePIN(tx *gorm.DB, sessionID uint, current string) string {
 	for attempt := 0; attempt < 32; attempt++ {
 		pin := nextDistinctAttendancePIN(current)
@@ -1286,21 +1310,7 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 		}
 
 		status := "present"
-		lateTime := session.StartTime.Add(time.Duration(session.LateThresholdMinutes) * time.Minute)
-		if strings.TrimSpace(session.LateThresholdTime) != "" {
-			parts := strings.Split(session.LateThresholdTime, ":")
-			if len(parts) >= 2 {
-				hours := 0
-				minutes := 0
-				seconds := 0
-				fmt.Sscanf(parts[0], "%d", &hours)
-				fmt.Sscanf(parts[1], "%d", &minutes)
-				if len(parts) > 2 {
-					fmt.Sscanf(parts[2], "%d", &seconds)
-				}
-				lateTime = time.Date(session.StartTime.Year(), session.StartTime.Month(), session.StartTime.Day(), hours, minutes, seconds, 0, session.StartTime.Location())
-			}
-		}
+		lateTime := computeAttendanceLateThreshold(session.StartTime, session.LateThresholdTime, session.LateThresholdMinutes)
 		if now.After(lateTime) {
 			status = "late"
 		}
