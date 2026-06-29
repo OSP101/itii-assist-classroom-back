@@ -41,13 +41,28 @@ type SectionBasic struct {
 
 type CourseWithCounts struct {
 	models.Course
-	Instructor   *UserBasic     `json:"instructor"`
-	Instructors  []UserBasic    `json:"instructors"`
-	Sections     []SectionBasic `json:"sections"`
-	TAs          []UserBasic    `json:"tas"`
-	TaCount      int64          `json:"taCount"`
-	StudentCount int64          `json:"studentCount"`
-	MySectionNo  string         `json:"my_section_no"`
+	Instructor   *UserBasic       `json:"instructor"`
+	Instructors  []UserBasic      `json:"instructors"`
+	Sections     []SectionBasic   `json:"sections"`
+	TAs          []UserBasic      `json:"tas"`
+	TaCount      int64            `json:"taCount"`
+	StudentCount int64            `json:"studentCount"`
+	MySectionNo  string           `json:"my_section_no"`
+	MyGroups     []StudentMyGroup `json:"my_groups"`
+}
+
+type StudentMyGroupMember struct {
+	ID        uint   `json:"id"`
+	StudentID string `json:"student_id"`
+	FullName  string `json:"full_name"`
+}
+
+type StudentMyGroup struct {
+	ID         uint                   `json:"id"`
+	Name       string                 `json:"name"`
+	GroupType  string                 `json:"group_type"`
+	WeekNumber *int                   `json:"week_number"`
+	Members    []StudentMyGroupMember `json:"members"`
 }
 
 type CourseDetail struct {
@@ -1706,6 +1721,7 @@ func GetMyCourses(userID uint, role string, params CourseListParams) (CourseList
 			Sections:     sections,
 			TaCount:      taCountMap2[c.ID],
 			StudentCount: studentCountMap2[c.ID],
+			MyGroups:     []StudentMyGroup{},
 		}
 	}
 
@@ -1728,6 +1744,78 @@ func GetMyCourses(userID uint, role string, params CourseListParams) (CourseList
 		}
 		for i := range result {
 			result[i].MySectionNo = sectionNoMap[result[i].Course.ID]
+		}
+
+		type studentGroupRow struct {
+			CourseID   string `gorm:"column:course_id"`
+			GroupID    uint   `gorm:"column:group_id"`
+			GroupName  string `gorm:"column:group_name"`
+			GroupType  string `gorm:"column:group_type"`
+			WeekNumber *int   `gorm:"column:week_number"`
+		}
+		var studentGroupRows []studentGroupRow
+		db.Raw(`
+			SELECT sg.course_id, sg.id AS group_id, sg.name AS group_name, sg.group_type, sg.week_number
+			FROM student_group_members sgm
+			JOIN student_groups sg ON sg.id = sgm.group_id
+			WHERE sgm.student_id = ? AND sg.course_id IN ?
+			ORDER BY sg.course_id ASC,
+			CASE WHEN sg.group_type = 'permanent' THEN 0 ELSE 1 END,
+			sg.week_number ASC NULLS LAST,
+			sg.id ASC
+		`, resolvedStudentID, courseIDs).Scan(&studentGroupRows)
+
+		type studentGroupMemberRow struct {
+			GroupID   uint   `gorm:"column:group_id"`
+			ID        uint   `gorm:"column:id"`
+			StudentID string `gorm:"column:student_id"`
+			FullName  string `gorm:"column:full_name"`
+		}
+
+		groupIDs := make([]uint, 0, len(studentGroupRows))
+		groupByID := make(map[uint]StudentMyGroup, len(studentGroupRows))
+		for _, row := range studentGroupRows {
+			groupIDs = append(groupIDs, row.GroupID)
+			groupByID[row.GroupID] = StudentMyGroup{
+				ID:         row.GroupID,
+				Name:       row.GroupName,
+				GroupType:  row.GroupType,
+				WeekNumber: row.WeekNumber,
+				Members:    []StudentMyGroupMember{},
+			}
+		}
+
+		membersByGroup := make(map[uint][]StudentMyGroupMember)
+		if len(groupIDs) > 0 {
+			var memberRows []studentGroupMemberRow
+			db.Raw(`
+				SELECT sgm.group_id, s.id, s.student_id, s.full_name
+				FROM student_group_members sgm
+				JOIN students s ON s.id = sgm.student_id
+				WHERE sgm.group_id IN ?
+				ORDER BY sgm.group_id ASC, s.full_name ASC
+			`, groupIDs).Scan(&memberRows)
+
+			for _, member := range memberRows {
+				membersByGroup[member.GroupID] = append(membersByGroup[member.GroupID], StudentMyGroupMember{
+					ID:        member.ID,
+					StudentID: member.StudentID,
+					FullName:  member.FullName,
+				})
+			}
+		}
+
+		groupsByCourse := make(map[string][]StudentMyGroup)
+		for _, row := range studentGroupRows {
+			group := groupByID[row.GroupID]
+			group.Members = membersByGroup[row.GroupID]
+			groupsByCourse[row.CourseID] = append(groupsByCourse[row.CourseID], group)
+		}
+
+		for i := range result {
+			if groups, ok := groupsByCourse[result[i].Course.ID]; ok {
+				result[i].MyGroups = groups
+			}
 		}
 	}
 
