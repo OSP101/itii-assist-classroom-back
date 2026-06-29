@@ -684,6 +684,57 @@ func countEligibleOnlineWorkers(tx *gorm.DB, sessionID, bookingType string, now 
 	return count, nil
 }
 
+func buildEligibleWorkerQuery(tx *gorm.DB, sessionID, bookingType string, now time.Time, excludedWorkerID *uint) *gorm.DB {
+	query := tx.Model(&models.QueueWorker{}).
+		Where("queue_session_id = ? AND status = ? AND current_booking_id IS NULL AND (offer_paused_until IS NULL OR offer_paused_until <= ?)", sessionID, "online", now)
+
+	if bookingType == "grading" {
+		query = query.Where("accept_grading = ?", true)
+	} else {
+		query = query.Where("accept_help = ?", true)
+	}
+
+	if excludedWorkerID != nil {
+		query = query.Where("user_id <> ?", *excludedWorkerID)
+	}
+
+	return query
+}
+
+func selectLeastLoadedEligibleWorker(tx *gorm.DB, booking *models.QueueBooking, now time.Time) (*models.QueueWorker, int64, error) {
+	if booking == nil {
+		return nil, 0, nil
+	}
+
+	var excludedWorkerID *uint
+	if booking.LastOfferWorkerID != nil && booking.LastOfferTimedOutAt != nil && booking.LastOfferTimedOutAt.After(now.Add(-queueOfferReassignGraceWindow)) {
+		excludedWorkerID = booking.LastOfferWorkerID
+	}
+
+	baseQuery := buildEligibleWorkerQuery(tx, booking.QueueSessionID, booking.BookingType, now, excludedWorkerID)
+
+	var eligibleCount int64
+	if err := baseQuery.Count(&eligibleCount).Error; err != nil {
+		return nil, 0, err
+	}
+	if eligibleCount == 0 {
+		return nil, 0, nil
+	}
+
+	var candidate models.QueueWorker
+	if err := buildEligibleWorkerQuery(tx, booking.QueueSessionID, booking.BookingType, now, excludedWorkerID).
+		Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+		Order("(total_grading_completed + total_help_completed) ASC, COALESCE(last_active_at, created_at) ASC, user_id ASC").
+		First(&candidate).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, 0, nil
+		}
+		return nil, 0, err
+	}
+
+	return &candidate, eligibleCount, nil
+}
+
 // ---------- Worker ----------
 
 func WorkerJoin(sessionID string, userID uint, acceptGrading, acceptHelp bool) (*models.QueueWorker, error) {
@@ -957,49 +1008,47 @@ func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.
 			return nil
 		}
 
-		bookingTypes := make([]string, 0, 2)
-		if worker.AcceptGrading {
-			bookingTypes = append(bookingTypes, "grading")
-		}
-		if worker.AcceptHelp {
-			bookingTypes = append(bookingTypes, "help")
-		}
-		if len(bookingTypes) == 0 {
-			return nil
-		}
-
-		var waiting models.QueueBooking
-		waitingErr := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
-			Where("queue_session_id = ? AND status = ? AND assigned_worker_id IS NULL AND booking_type IN ?", sessionID, "waiting", bookingTypes).
-			Where("last_offer_worker_id IS NULL OR last_offer_worker_id <> ? OR last_offer_timed_out_at IS NULL OR last_offer_timed_out_at < ?", workerID, now.Add(-queueOfferReassignGraceWindow)).
+		var waitingBookings []models.QueueBooking
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+			Where("queue_session_id = ? AND status = ? AND assigned_worker_id IS NULL", sessionID, "waiting").
 			Order("queue_number ASC, created_at ASC, id ASC").
-			First(&waiting).Error
-		if errors.Is(waitingErr, gorm.ErrRecordNotFound) {
+			Limit(25).
+			Find(&waitingBookings).Error; err != nil {
+			return err
+		}
+
+		if len(waitingBookings) == 0 {
 			return nil
 		}
-		if waitingErr != nil {
-			return waitingErr
+
+		for i := range waitingBookings {
+			waiting := waitingBookings[i]
+			candidateWorker, eligibleWorkers, selectErr := selectLeastLoadedEligibleWorker(tx, &waiting, now)
+			if selectErr != nil {
+				return selectErr
+			}
+			if candidateWorker == nil {
+				continue
+			}
+
+			var assignErr error
+			if eligibleWorkers == 1 {
+				assignErr = assignBookingDirectToWorker(tx, &waiting, candidateWorker, now)
+			} else {
+				assignErr = assignBookingOfferToWorker(tx, &waiting, candidateWorker, now)
+			}
+			if assignErr != nil {
+				return assignErr
+			}
+
+			if err := tx.First(&bookingResult, waiting.ID).Error; err != nil {
+				return err
+			}
+
+			assignedNow = true
+			return nil
 		}
 
-		eligibleWorkers, err := countEligibleOnlineWorkers(tx, sessionID, waiting.BookingType, now)
-		if err != nil {
-			return err
-		}
-
-		if eligibleWorkers == 1 {
-			err = assignBookingDirectToWorker(tx, &waiting, &worker, now)
-		} else {
-			err = assignBookingOfferToWorker(tx, &waiting, &worker, now)
-		}
-		if err != nil {
-			return err
-		}
-
-		if err := tx.First(&bookingResult, waiting.ID).Error; err != nil {
-			return err
-		}
-
-		assignedNow = true
 		return nil
 	})
 	if err != nil {

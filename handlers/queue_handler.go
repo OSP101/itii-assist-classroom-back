@@ -3539,14 +3539,23 @@ func tryAssignNextBookingAndEmit(sessionID string, workerID uint) (*models.Queue
 		return nil, err
 	}
 	if assignedNow && nextBooking != nil {
+		if nextBooking.AssignedWorkerID == nil {
+			return nil, fmt.Errorf("assigned booking missing worker")
+		}
+
+		assignedWorkerID := *nextBooking.AssignedWorkerID
 		bookingPayload, payloadErr := buildWorkerBookingPayload(nextBooking)
 		if payloadErr != nil {
 			return nil, payloadErr
 		}
-		realtime.EmitToQueue(sessionID, "booking-assigned", fiber.Map{"booking": bookingPayload, "worker_id": workerID, "timestamp": time.Now().UnixMilli()})
+		realtime.EmitToQueue(sessionID, "booking-assigned", fiber.Map{"booking": bookingPayload, "worker_id": assignedWorkerID, "timestamp": time.Now().UnixMilli()})
 		realtime.EmitToBooking(nextBooking.ID, "booking-assigned", fiber.Map{"booking": bookingPayload, "timestamp": time.Now().UnixMilli()})
-		realtime.EmitToWorker(workerID, "new-task", fiber.Map{"booking": bookingPayload, "timestamp": time.Now().UnixMilli()})
-		go services.SendQueueWorkerAssignedPush(sessionID, workerID, nextBooking)
+		realtime.EmitToWorker(assignedWorkerID, "new-task", fiber.Map{"booking": bookingPayload, "timestamp": time.Now().UnixMilli()})
+		go services.SendQueueWorkerAssignedPush(sessionID, assignedWorkerID, nextBooking)
+
+		if assignedWorkerID != workerID {
+			return nil, nil
+		}
 	}
 	return nextBooking, nil
 }
