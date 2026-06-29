@@ -156,6 +156,21 @@ type LookupStudentCourse struct {
 	CoverZoom      float64                      `json:"cover_zoom"`
 	IsActive       bool                         `json:"is_active"`
 	Sections       []LookupStudentCourseSection `json:"sections"`
+	MyGroups       []LookupStudentCourseGroup   `json:"my_groups"`
+}
+
+type LookupStudentGroupMember struct {
+	ID        uint   `json:"id"`
+	StudentID string `json:"student_id"`
+	FullName  string `json:"full_name"`
+}
+
+type LookupStudentCourseGroup struct {
+	ID         uint                       `json:"id"`
+	Name       string                     `json:"name"`
+	GroupType  string                     `json:"group_type"`
+	WeekNumber *int                       `json:"week_number"`
+	Members    []LookupStudentGroupMember `json:"members"`
 }
 
 type LookupStudentGroupInfo struct {
@@ -428,6 +443,7 @@ func lookupStudentScores(studentID string, courseID string) (*LookupStudentResul
 	if err := config.DB.Table("student_group_members AS sgm").
 		Joins("JOIN student_groups AS sg ON sg.id = sgm.group_id").
 		Where("sgm.student_id = ?", student.ID).
+		Order("sg.course_id ASC, CASE WHEN sg.group_type = 'permanent' THEN 0 ELSE 1 END ASC, sg.week_number ASC NULLS LAST, sg.id ASC").
 		Select("sgm.group_id, sg.course_id, sg.name AS group_name, sg.group_type, sg.week_number").
 		Scan(&groupMemberships).Error; err != nil {
 		return nil, err
@@ -436,6 +452,8 @@ func lookupStudentScores(studentID string, courseID string) (*LookupStudentResul
 	groupIDs := make([]uint, 0, len(groupMemberships))
 	groupInfoMap := make(map[uint]*LookupStudentGroupInfo)
 	groupMembershipsByCourse := make(map[string]*studentCourseGroupMembership)
+	courseGroupsByCourse := make(map[string][]LookupStudentCourseGroup)
+	seenCourseGroupIDs := make(map[uint]struct{})
 	for _, membership := range groupMemberships {
 		groupIDs = append(groupIDs, membership.GroupID)
 		groupInfo := &LookupStudentGroupInfo{ID: membership.GroupID, Name: membership.GroupName}
@@ -452,6 +470,54 @@ func lookupStudentScores(studentID string, courseID string) (*LookupStudentResul
 		}
 		if membership.WeekNumber != nil {
 			courseGroups.Weekly[*membership.WeekNumber] = groupInfo
+		}
+
+		if _, exists := seenCourseGroupIDs[membership.GroupID]; !exists {
+			courseGroupsByCourse[membership.CourseID] = append(courseGroupsByCourse[membership.CourseID], LookupStudentCourseGroup{
+				ID:         membership.GroupID,
+				Name:       membership.GroupName,
+				GroupType:  membership.GroupType,
+				WeekNumber: membership.WeekNumber,
+				Members:    []LookupStudentGroupMember{},
+			})
+			seenCourseGroupIDs[membership.GroupID] = struct{}{}
+		}
+	}
+
+	membersByGroup := make(map[uint][]LookupStudentGroupMember)
+	if len(groupIDs) > 0 {
+		type studentLookupGroupMemberRow struct {
+			GroupID   uint   `gorm:"column:group_id"`
+			ID        uint   `gorm:"column:id"`
+			StudentID string `gorm:"column:student_id"`
+			FullName  string `gorm:"column:full_name"`
+		}
+
+		var memberRows []studentLookupGroupMemberRow
+		if err := config.DB.Table("student_group_members AS sgm").
+			Joins("JOIN students AS s ON s.id = sgm.student_id").
+			Where("sgm.group_id IN ?", groupIDs).
+			Order("sgm.group_id ASC, s.full_name ASC").
+			Select("sgm.group_id, s.id, s.student_id, s.full_name").
+			Scan(&memberRows).Error; err != nil {
+			return nil, err
+		}
+
+		for _, row := range memberRows {
+			membersByGroup[row.GroupID] = append(membersByGroup[row.GroupID], LookupStudentGroupMember{
+				ID:        row.ID,
+				StudentID: row.StudentID,
+				FullName:  row.FullName,
+			})
+		}
+	}
+
+	for courseID, groups := range courseGroupsByCourse {
+		for i := range groups {
+			groups[i].Members = membersByGroup[groups[i].ID]
+		}
+		if courseEntry, exists := courseMap[courseID]; exists {
+			courseEntry.Course.MyGroups = groups
 		}
 	}
 
