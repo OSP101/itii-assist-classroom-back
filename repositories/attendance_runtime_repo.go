@@ -319,6 +319,25 @@ func applyAttendanceRuntimeStateToSession(session *models.AttendanceSession, sta
 	session.ClosedAt = state.ClosedAt
 }
 
+// claimAttendancePIN registers a pre-assigned PIN in Redis for the given session.
+// Used for static sessions that already have a PIN from session creation so the
+// pre-announced PIN is never replaced on activation.
+func claimAttendancePIN(ctx context.Context, pin string, sessionID uint, ttl time.Duration) error {
+	if !attendanceRedisAvailable() {
+		return ErrAttendanceRedisUnavailable
+	}
+	// Force-claim: the PIN was pre-assigned to this session at creation time, so
+	// we own it. Use Set (not SetNX) so that a Redis flush or rehydration does not
+	// leave the session without a valid PIN key.
+	if err := config.Redis.Set(ctx, attendancePinKey(pin), sessionID, ttl).Err(); err != nil {
+		observability.RecordAttendanceRedisFailure()
+		log.Printf("event=redis_error action=claim_attendance_pin session_id=%d err=%v", sessionID, err)
+		return err
+	}
+	log.Printf("event=attendance_pin_claimed session_id=%d pin_hash=%s", sessionID, attendancePinHash(pin))
+	return nil
+}
+
 func buildAttendanceRuntimeState(ctx context.Context, db *gorm.DB, session *models.AttendanceSession, reason string) (*AttendanceRuntimeState, error) {
 	if session == nil {
 		return nil, errors.New("attendance session is required")
@@ -339,9 +358,21 @@ func buildAttendanceRuntimeState(ctx context.Context, db *gorm.DB, session *mode
 		expiresAt = now.Add(ttl)
 	}
 
-	currentPIN, err := reserveAttendancePIN(ctx, session.ID, ttl)
-	if err != nil {
-		return nil, err
+	// For static sessions that were pre-created with a PIN, reuse the existing PIN
+	// so the instructor's pre-announced code remains valid on activation.
+	var currentPIN string
+	var err error
+	existingPin := strings.TrimSpace(session.PinCode)
+	if mode == "static" && existingPin != "" {
+		if claimErr := claimAttendancePIN(ctx, existingPin, session.ID, ttl); claimErr != nil {
+			return nil, claimErr
+		}
+		currentPIN = existingPin
+	} else {
+		currentPIN, err = reserveAttendancePIN(ctx, session.ID, ttl)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	state := &AttendanceRuntimeState{

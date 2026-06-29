@@ -218,3 +218,41 @@ func TestLookupAttendancePinAndCloseCleanup(t *testing.T) {
 		t.Fatalf("expected invalid pin after close, got %v", err)
 	}
 }
+
+// TestStartAttendanceSessionStaticPreservesDraftPIN verifies that activating a
+// static session that already has a pre-assigned PIN (announced to students
+// before the session opens) does not replace it with a new PIN.
+func TestStartAttendanceSessionStaticPreservesDraftPIN(t *testing.T) {
+	_, cleanup := setupAttendanceRuntimeTest(t)
+	defer cleanup()
+
+	autoRotate := false
+	now := time.Now()
+	preassignedPIN := "555777"
+	session := models.AttendanceSession{
+		CourseID:             "CP101",
+		Title:                "Pre-announced PIN session",
+		AutoRotatePin:        &autoRotate,
+		PinMode:              "static",
+		PinCode:              preassignedPIN,
+		SessionType:          "lecture",
+		StartTime:            now.Add(5 * time.Minute),
+		EndTime:              now.Add(65 * time.Minute),
+		LateThresholdMinutes: 15,
+		Status:               "draft",
+	}
+	if err := config.DB.Create(&session).Error; err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	result, err := StartAttendanceSession(context.Background(), session.ID, "preassigned-start")
+	if err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if result.CurrentPIN != preassignedPIN {
+		t.Fatalf("expected pre-announced PIN %q to be preserved on activation, got %q", preassignedPIN, result.CurrentPIN)
+	}
+	if result.State.Mode != "static" {
+		t.Fatalf("expected static mode, got %q", result.State.Mode)
+	}
+}
