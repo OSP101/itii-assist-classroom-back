@@ -19,6 +19,15 @@ const (
 	queueOfferPauseDuration       = 1 * time.Minute
 	queueOfferReassignGraceWindow = 90 * time.Second
 	queueOfferPauseThreshold      = 3
+	// Fairness gate for AssignNextWaitingBookingToWorker: if another eligible,
+	// free worker currently has notably less completed work, a higher-load
+	// worker's own request is briefly declined (never redirected) so the
+	// less-loaded worker gets a chance to pick up the same booking on their
+	// next poll. Bounded by queueFairnessGraceWindow so a booking can never
+	// be stuck waiting on a stale/inactive worker - after the grace window it
+	// is assigned to whoever asks, same as before.
+	queueFairnessLoadMargin  = 2
+	queueFairnessGraceWindow = 20 * time.Second
 )
 
 // ---------- helpers ----------
@@ -684,7 +693,10 @@ func countEligibleOnlineWorkers(tx *gorm.DB, sessionID, bookingType string, now 
 	return count, nil
 }
 
-func buildEligibleWorkerQuery(tx *gorm.DB, sessionID, bookingType string, now time.Time, excludedWorkerID *uint) *gorm.DB {
+// minLoadAmongEligibleWorkers returns the lowest completed-task count among workers
+// currently free and eligible for the given booking type. Used only as a fairness
+// signal in AssignNextWaitingBookingToWorker - never to pick who gets assigned.
+func minLoadAmongEligibleWorkers(tx *gorm.DB, sessionID, bookingType string, now time.Time) (int64, error) {
 	query := tx.Model(&models.QueueWorker{}).
 		Where("queue_session_id = ? AND status = ? AND current_booking_id IS NULL AND (offer_paused_until IS NULL OR offer_paused_until <= ?)", sessionID, "online", now)
 
@@ -694,45 +706,11 @@ func buildEligibleWorkerQuery(tx *gorm.DB, sessionID, bookingType string, now ti
 		query = query.Where("accept_help = ?", true)
 	}
 
-	if excludedWorkerID != nil {
-		query = query.Where("user_id <> ?", *excludedWorkerID)
+	var minLoad int64
+	if err := query.Select("COALESCE(MIN(total_grading_completed + total_help_completed), 0)").Scan(&minLoad).Error; err != nil {
+		return 0, err
 	}
-
-	return query
-}
-
-func selectLeastLoadedEligibleWorker(tx *gorm.DB, booking *models.QueueBooking, now time.Time) (*models.QueueWorker, int64, error) {
-	if booking == nil {
-		return nil, 0, nil
-	}
-
-	var excludedWorkerID *uint
-	if booking.LastOfferWorkerID != nil && booking.LastOfferTimedOutAt != nil && booking.LastOfferTimedOutAt.After(now.Add(-queueOfferReassignGraceWindow)) {
-		excludedWorkerID = booking.LastOfferWorkerID
-	}
-
-	baseQuery := buildEligibleWorkerQuery(tx, booking.QueueSessionID, booking.BookingType, now, excludedWorkerID)
-
-	var eligibleCount int64
-	if err := baseQuery.Count(&eligibleCount).Error; err != nil {
-		return nil, 0, err
-	}
-	if eligibleCount == 0 {
-		return nil, 0, nil
-	}
-
-	var candidate models.QueueWorker
-	if err := buildEligibleWorkerQuery(tx, booking.QueueSessionID, booking.BookingType, now, excludedWorkerID).
-		Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
-		Order("(total_grading_completed + total_help_completed) ASC, COALESCE(last_active_at, created_at) ASC, user_id ASC").
-		First(&candidate).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, 0, nil
-		}
-		return nil, 0, err
-	}
-
-	return &candidate, eligibleCount, nil
+	return minLoad, nil
 }
 
 // ---------- Worker ----------
@@ -1008,47 +986,66 @@ func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.
 			return nil
 		}
 
-		var waitingBookings []models.QueueBooking
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
-			Where("queue_session_id = ? AND status = ? AND assigned_worker_id IS NULL", sessionID, "waiting").
+		bookingTypes := make([]string, 0, 2)
+		if worker.AcceptGrading {
+			bookingTypes = append(bookingTypes, "grading")
+		}
+		if worker.AcceptHelp {
+			bookingTypes = append(bookingTypes, "help")
+		}
+		if len(bookingTypes) == 0 {
+			return nil
+		}
+
+		var waiting models.QueueBooking
+		waitingErr := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+			Where("queue_session_id = ? AND status = ? AND assigned_worker_id IS NULL AND booking_type IN ?", sessionID, "waiting", bookingTypes).
+			Where("last_offer_worker_id IS NULL OR last_offer_worker_id <> ? OR last_offer_timed_out_at IS NULL OR last_offer_timed_out_at < ?", workerID, now.Add(-queueOfferReassignGraceWindow)).
 			Order("queue_number ASC, created_at ASC, id ASC").
-			Limit(25).
-			Find(&waitingBookings).Error; err != nil {
+			First(&waiting).Error
+		if errors.Is(waitingErr, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if waitingErr != nil {
+			return waitingErr
+		}
+
+		eligibleWorkers, err := countEligibleOnlineWorkers(tx, sessionID, waiting.BookingType, now)
+		if err != nil {
 			return err
 		}
 
-		if len(waitingBookings) == 0 {
-			return nil
+		// Fairness gate: only within a short grace window after the booking
+		// started waiting, and only when a genuinely less-loaded free worker
+		// exists right now. This never reassigns the booking to anyone else -
+		// it only declines *this* worker's own request so a less-loaded worker
+		// can claim it on their own next poll. After the grace window elapses,
+		// whoever asks gets it, so a booking can never be stuck indefinitely.
+		if eligibleWorkers > 1 && now.Sub(waiting.CreatedAt) < queueFairnessGraceWindow {
+			minLoad, loadErr := minLoadAmongEligibleWorkers(tx, sessionID, waiting.BookingType, now)
+			if loadErr != nil {
+				return loadErr
+			}
+			workerLoad := int64(worker.TotalGradingCompleted + worker.TotalHelpCompleted)
+			if workerLoad-minLoad >= queueFairnessLoadMargin {
+				return nil
+			}
 		}
 
-		for i := range waitingBookings {
-			waiting := waitingBookings[i]
-			candidateWorker, eligibleWorkers, selectErr := selectLeastLoadedEligibleWorker(tx, &waiting, now)
-			if selectErr != nil {
-				return selectErr
-			}
-			if candidateWorker == nil {
-				continue
-			}
-
-			var assignErr error
-			if eligibleWorkers == 1 {
-				assignErr = assignBookingDirectToWorker(tx, &waiting, candidateWorker, now)
-			} else {
-				assignErr = assignBookingOfferToWorker(tx, &waiting, candidateWorker, now)
-			}
-			if assignErr != nil {
-				return assignErr
-			}
-
-			if err := tx.First(&bookingResult, waiting.ID).Error; err != nil {
-				return err
-			}
-
-			assignedNow = true
-			return nil
+		if eligibleWorkers == 1 {
+			err = assignBookingDirectToWorker(tx, &waiting, &worker, now)
+		} else {
+			err = assignBookingOfferToWorker(tx, &waiting, &worker, now)
+		}
+		if err != nil {
+			return err
 		}
 
+		if err := tx.First(&bookingResult, waiting.ID).Error; err != nil {
+			return err
+		}
+
+		assignedNow = true
 		return nil
 	})
 	if err != nil {

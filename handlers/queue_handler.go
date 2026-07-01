@@ -3539,23 +3539,14 @@ func tryAssignNextBookingAndEmit(sessionID string, workerID uint) (*models.Queue
 		return nil, err
 	}
 	if assignedNow && nextBooking != nil {
-		if nextBooking.AssignedWorkerID == nil {
-			return nil, fmt.Errorf("assigned booking missing worker")
-		}
-
-		assignedWorkerID := *nextBooking.AssignedWorkerID
 		bookingPayload, payloadErr := buildWorkerBookingPayload(nextBooking)
 		if payloadErr != nil {
 			return nil, payloadErr
 		}
-		realtime.EmitToQueue(sessionID, "booking-assigned", fiber.Map{"booking": bookingPayload, "worker_id": assignedWorkerID, "timestamp": time.Now().UnixMilli()})
+		realtime.EmitToQueue(sessionID, "booking-assigned", fiber.Map{"booking": bookingPayload, "worker_id": workerID, "timestamp": time.Now().UnixMilli()})
 		realtime.EmitToBooking(nextBooking.ID, "booking-assigned", fiber.Map{"booking": bookingPayload, "timestamp": time.Now().UnixMilli()})
-		realtime.EmitToWorker(assignedWorkerID, "new-task", fiber.Map{"booking": bookingPayload, "timestamp": time.Now().UnixMilli()})
-		go services.SendQueueWorkerAssignedPush(sessionID, assignedWorkerID, nextBooking)
-
-		if assignedWorkerID != workerID {
-			return nil, nil
-		}
+		realtime.EmitToWorker(workerID, "new-task", fiber.Map{"booking": bookingPayload, "timestamp": time.Now().UnixMilli()})
+		go services.SendQueueWorkerAssignedPush(sessionID, workerID, nextBooking)
 	}
 	return nextBooking, nil
 }
@@ -3565,6 +3556,19 @@ func dispatchWaitingBookingsToAvailableWorkers(sessionID string) {
 	if err != nil {
 		return
 	}
+
+	// Give idle workers with the least completed work first crack at newly
+	// waiting bookings when several are free at the same time. This only
+	// changes iteration order here (push path) and never overrides a
+	// worker's own pull-based self-assignment in tryAssignNextBookingAndEmit.
+	sort.Slice(workers, func(i, j int) bool {
+		loadI := workers[i].TotalGradingCompleted + workers[i].TotalHelpCompleted
+		loadJ := workers[j].TotalGradingCompleted + workers[j].TotalHelpCompleted
+		if loadI != loadJ {
+			return loadI < loadJ
+		}
+		return workers[i].UserID < workers[j].UserID
+	})
 
 	now := time.Now()
 	for _, worker := range workers {
