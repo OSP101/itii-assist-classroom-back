@@ -274,7 +274,7 @@ type Assignment struct {
 	MaxScore                  float64    `gorm:"type:decimal(5,2);default:10" json:"max_score"`
 	DueDate                   *time.Time `gorm:"type:timestamptz" json:"due_date,omitempty"`
 	IsActive                  bool       `gorm:"type:boolean;default:true" json:"is_active"`
-	IsScoreVisible            bool       `gorm:"type:boolean;default:true" json:"is_score_visible"`
+	IsScoreVisible            bool       `gorm:"type:boolean" json:"is_score_visible"`
 	IsDraft                   bool       `gorm:"type:boolean;default:false" json:"is_draft"`
 	PublishAt                 *time.Time `gorm:"type:timestamptz" json:"publish_at,omitempty"`
 	CreatedBy                 uint       `gorm:"not null;index" json:"created_by"`
