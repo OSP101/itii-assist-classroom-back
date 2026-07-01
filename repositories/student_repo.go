@@ -466,9 +466,7 @@ func lookupStudentScores(studentID string, courseID string) (*LookupStudentResul
 		}
 		if membership.GroupType == "permanent" {
 			courseGroups.Permanent = groupInfo
-			continue
-		}
-		if membership.WeekNumber != nil {
+		} else if membership.WeekNumber != nil {
 			courseGroups.Weekly[*membership.WeekNumber] = groupInfo
 		}
 

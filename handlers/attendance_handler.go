@@ -10,6 +10,7 @@ import (
 	"itii-assist/realtime"
 	"itii-assist/repositories"
 	"itii-assist/services"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -797,9 +798,18 @@ func UpdateAttendanceSessionHandler(c fiber.Ctx) error {
 	if err := repositories.UpdateAttendanceSession(&session); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update session"})
 	}
+	autoRotateChanged := input.AutoRotatePin != nil
 	if refreshedSession, pinChange, err := repositories.RefreshAttendanceSessionPinState(session.ID); err == nil && refreshedSession != nil {
 		session = *refreshedSession
 		if pinChange.Rotated || pinChange.Released || input.RegeneratePin {
+			emitAttendancePinUpdated(session)
+		}
+	}
+	if autoRotateChanged {
+		autoRotate := session.AutoRotatePin != nil && *session.AutoRotatePin
+		if _, err := repositories.SyncAttendanceRuntimeAutoRotate(c.Context(), session.ID, autoRotate); err != nil {
+			log.Printf("event=attendance_runtime_sync_failed session_id=%d err=%v", session.ID, err)
+		} else {
 			emitAttendancePinUpdated(session)
 		}
 	}

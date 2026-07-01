@@ -780,6 +780,66 @@ func ResolveAttendanceSessionPinState(ctx context.Context, sessionID uint, allow
 	return &session, state, nil
 }
 
+// SyncAttendanceRuntimeAutoRotate reconciles the Redis-cached runtime state's
+// rotation mode with the session's current AutoRotatePin setting. The runtime
+// state is built once (on session start/rehydrate) and cached in Redis; the
+// per-second lifecycle worker (MaintainAttendanceRuntimeSessions) only ever
+// reads that cached Mode/NextRotationAt, so toggling auto_rotate_pin on an
+// active session would otherwise have no effect until the cache naturally
+// expires. Call this right after persisting an AutoRotatePin change.
+func SyncAttendanceRuntimeAutoRotate(ctx context.Context, sessionID uint, autoRotate bool) (*AttendanceRuntimeState, error) {
+	if !attendanceRedisAvailable() {
+		return nil, nil
+	}
+	state, err := readAttendanceRuntimeState(ctx, sessionID)
+	if err != nil || state == nil {
+		return state, err
+	}
+
+	desiredMode := "static"
+	if autoRotate && observability.AttendancePinAutoRotateEnabled() {
+		desiredMode = "rotating"
+	}
+	if state.Mode == desiredMode {
+		return state, nil
+	}
+
+	now := time.Now()
+	if desiredMode == "static" {
+		if state.NextPIN != "" {
+			releaseAttendancePINs(ctx, state.NextPIN)
+		}
+		state.Mode = "static"
+		state.NextPIN = ""
+		state.NextRotationAt = nil
+	} else {
+		ttl := attendanceSessionRedisTTL(*state)
+		nextPIN, reserveErr := reserveAttendancePIN(ctx, sessionID, ttl, state.CurrentPIN)
+		if reserveErr != nil {
+			return nil, reserveErr
+		}
+		rotationAt := now.Add(attendancePinRotationWindow())
+		state.Mode = "rotating"
+		state.NextPIN = nextPIN
+		state.NextRotationAt = &rotationAt
+	}
+
+	if err := config.DB.Model(&models.AttendanceSession{}).Where("id = ?", sessionID).Updates(map[string]interface{}{
+		"pin_mode":        state.Mode,
+		"auto_rotate_pin": desiredMode == "rotating",
+		"pin_rotates_at":  state.NextRotationAt,
+	}).Error; err != nil {
+		return nil, err
+	}
+
+	if err := writeAttendanceRuntimeState(ctx, *state); err != nil {
+		return nil, err
+	}
+
+	log.Printf("event=attendance_runtime_mode_synced session_id=%d mode=%s", sessionID, state.Mode)
+	return state, nil
+}
+
 func MaintainAttendanceRuntimeSessions(ctx context.Context, now time.Time) ([]AttendancePinStateChange, error) {
 	var sessions []models.AttendanceSession
 	if err := config.DB.Where("status = 'active'").Find(&sessions).Error; err != nil {
