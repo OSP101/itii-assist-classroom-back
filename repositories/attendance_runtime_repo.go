@@ -11,7 +11,9 @@ import (
 	"itii-assist/models"
 	"itii-assist/observability"
 	"log"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -24,7 +26,58 @@ const (
 	attendanceStartIdempotencyTTL    = 5 * time.Minute
 	attendanceStateTTLBuffer         = 2 * time.Minute
 	attendanceCheckInIdempotencyTTL  = 2 * time.Minute
+	attendanceRedisBreakerThreshold  = 3
+	attendanceRedisBreakerCooldown   = 5 * time.Second
 )
+
+// attendanceRedisBreaker is a lightweight circuit breaker shared by every
+// check-in-path Redis call (PIN lookup + idempotency cache). When Redis is
+// unhealthy or contended, tripping the breaker lets check-in requests skip
+// straight to the Postgres fallback instead of piling up on Redis timeouts,
+// which is what caused hangs under high concurrent load.
+type attendanceCircuitBreaker struct {
+	mu              sync.Mutex
+	consecutiveFail int
+	openUntil       time.Time
+}
+
+func (b *attendanceCircuitBreaker) Allow() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.openUntil.IsZero() {
+		return true
+	}
+	return time.Now().After(b.openUntil)
+}
+
+func (b *attendanceCircuitBreaker) RecordSuccess() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.consecutiveFail = 0
+	b.openUntil = time.Time{}
+}
+
+func (b *attendanceCircuitBreaker) RecordFailure() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.consecutiveFail++
+	if b.consecutiveFail >= attendanceRedisBreakerThreshold {
+		b.openUntil = time.Now().Add(attendanceRedisBreakerCooldown)
+	}
+}
+
+var attendanceRedisBreaker = &attendanceCircuitBreaker{}
+
+// attendanceCheckInIdempotencyEnabled lets ops kill the Redis idempotency
+// cache instantly via env var without a redeploy if it is ever suspected of
+// causing latency issues again.
+func attendanceCheckInIdempotencyEnabled() bool {
+	raw := strings.TrimSpace(os.Getenv("ATTENDANCE_CHECKIN_IDEMPOTENCY_ENABLED"))
+	if raw == "" {
+		return true
+	}
+	return !strings.EqualFold(raw, "false") && raw != "0"
+}
 
 var (
 	ErrAttendanceRedisUnavailable = errors.New("attendance redis unavailable")
@@ -101,50 +154,71 @@ func attendanceCheckInIdempotencyKey(sessionID uint, studentID uint, clientReque
 }
 
 func getAttendanceCheckInCachedResult(ctx context.Context, sessionID uint, studentID uint, clientRequestID string) (*AttendanceCheckInResult, error) {
-	if !attendanceRedisAvailable() {
-		return nil, ErrAttendanceRedisUnavailable
+	if !attendanceCheckInIdempotencyEnabled() || !attendanceRedisAvailable() {
+		return nil, nil
 	}
 	normalizedID := strings.TrimSpace(clientRequestID)
 	if normalizedID == "" {
 		return nil, nil
 	}
+	if !attendanceRedisBreaker.Allow() {
+		return nil, nil
+	}
 
 	raw, err := config.Redis.Get(ctx, attendanceCheckInIdempotencyKey(sessionID, studentID, normalizedID)).Result()
 	if errors.Is(err, redis.Nil) {
+		attendanceRedisBreaker.RecordSuccess()
 		return nil, nil
 	}
 	if err != nil {
+		attendanceRedisBreaker.RecordFailure()
 		observability.RecordAttendanceRedisFailure()
-		return nil, err
+		// Treat any transient Redis failure as a cache miss rather than
+		// bubbling an error up — the DB path is always correct on its own.
+		return nil, nil
 	}
+	attendanceRedisBreaker.RecordSuccess()
 
 	var cached AttendanceCheckInResult
 	if err := json.Unmarshal([]byte(raw), &cached); err != nil {
-		return nil, err
+		return nil, nil
 	}
 	return &cached, nil
 }
 
-func setAttendanceCheckInCachedResult(ctx context.Context, sessionID uint, studentID uint, clientRequestID string, result *AttendanceCheckInResult) error {
-	if !attendanceRedisAvailable() {
-		return ErrAttendanceRedisUnavailable
+// setAttendanceCheckInCachedResultAsync writes the idempotency cache entry in
+// a detached goroutine so a slow/contended Redis never adds latency to the
+// check-in HTTP response. Safe to call even if Redis is disabled/unhealthy —
+// it's a best-effort cache used only to speed up client retries.
+func setAttendanceCheckInCachedResultAsync(sessionID uint, studentID uint, clientRequestID string, result *AttendanceCheckInResult) {
+	if !attendanceCheckInIdempotencyEnabled() || !attendanceRedisAvailable() {
+		return
 	}
 	normalizedID := strings.TrimSpace(clientRequestID)
 	if normalizedID == "" || result == nil {
-		return nil
+		return
+	}
+	if !attendanceRedisBreaker.Allow() {
+		return
 	}
 
 	payload, err := json.Marshal(result)
 	if err != nil {
-		return err
+		return
 	}
+	key := attendanceCheckInIdempotencyKey(sessionID, studentID, normalizedID)
 
-	if err := config.Redis.Set(ctx, attendanceCheckInIdempotencyKey(sessionID, studentID, normalizedID), payload, attendanceCheckInIdempotencyTTL).Err(); err != nil {
-		observability.RecordAttendanceRedisFailure()
-		return err
-	}
-
-	return nil
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		if err := config.Redis.Set(ctx, key, payload, attendanceCheckInIdempotencyTTL).Err(); err != nil {
+			attendanceRedisBreaker.RecordFailure()
+			observability.RecordAttendanceRedisFailure()
+			log.Printf("event=redis_error action=set_attendance_checkin_cache session_id=%d student_id=%d err=%v", sessionID, studentID, err)
+			return
+		}
+		attendanceRedisBreaker.RecordSuccess()
+	}()
 }
 
 func attendanceSessionRedisTTL(state AttendanceRuntimeState) time.Duration {
@@ -664,14 +738,18 @@ func LookupAttendanceSessionIDByPIN(ctx context.Context, pin string) (uint, erro
 		return 0, ErrAttendanceInvalidPIN
 	}
 
-	if attendanceRedisAvailable() {
+	if attendanceRedisAvailable() && attendanceRedisBreaker.Allow() {
 		raw, err := config.Redis.Get(ctx, attendancePinKey(normalizedPIN)).Result()
 		if err == nil {
+			attendanceRedisBreaker.RecordSuccess()
 			var sessionID uint
 			if _, scanErr := fmt.Sscanf(raw, "%d", &sessionID); scanErr == nil && sessionID > 0 {
 				return sessionID, nil
 			}
-		} else if !errors.Is(err, redis.Nil) {
+		} else if errors.Is(err, redis.Nil) {
+			attendanceRedisBreaker.RecordSuccess()
+		} else {
+			attendanceRedisBreaker.RecordFailure()
 			observability.RecordAttendanceRedisFailure()
 			log.Printf("event=redis_error action=lookup_attendance_pin err=%v", err)
 		}

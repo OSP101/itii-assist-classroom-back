@@ -243,6 +243,10 @@ func MigratePerformanceIndexes() {
 			sql:  `CREATE INDEX IF NOT EXISTS idx_attendance_records_session_student ON attendance_records (attendance_session_id, student_id)`,
 		},
 		{
+			name: "attendance_session_sections_session",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_attendance_session_sections_session ON attendance_session_sections (attendance_session_id)`,
+		},
+		{
 			name: "queue_desk_statuses_session_desk",
 			sql:  `CREATE INDEX IF NOT EXISTS idx_queue_desk_statuses_session_desk ON queue_desk_statuses (queue_session_id, desk_id)`,
 		},
@@ -285,6 +289,14 @@ func MigratePerformanceIndexes() {
 		{
 			name: "attendance_sessions_pin_code_status",
 			sql:  `CREATE INDEX IF NOT EXISTS idx_attendance_sessions_pin_code_status ON attendance_sessions (pin_code, status)`,
+		},
+		{
+			name: "attendance_sessions_current_pin_hash_status",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_attendance_sessions_current_pin_hash_status ON attendance_sessions (current_pin_hash, status)`,
+		},
+		{
+			name: "attendance_sessions_previous_pin_hash_status",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_attendance_sessions_previous_pin_hash_status ON attendance_sessions (previous_pin_hash, status)`,
 		},
 		{
 			name: "queue_sessions_pin_code_status",

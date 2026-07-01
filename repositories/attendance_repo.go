@@ -8,7 +8,6 @@ import (
 	"itii-assist/config"
 	"itii-assist/models"
 	"itii-assist/observability"
-	"log"
 	"math"
 	"strings"
 	"time"
@@ -1232,7 +1231,7 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 	normalizedRequestID := strings.TrimSpace(clientRequestID)
 
 	if normalizedRequestID != "" {
-		cacheCtx, cacheCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		cacheCtx, cacheCancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 		cachedResult, cacheErr := getAttendanceCheckInCachedResult(cacheCtx, sessionID, studentID, normalizedRequestID)
 		cacheCancel()
 		if cacheErr == nil && cachedResult != nil {
@@ -1383,11 +1382,7 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 	}
 
 	if normalizedRequestID != "" {
-		cacheCtx, cacheCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		if cacheErr := setAttendanceCheckInCachedResult(cacheCtx, sessionID, studentID, normalizedRequestID, &result); cacheErr != nil && !errors.Is(cacheErr, ErrAttendanceRedisUnavailable) {
-			log.Printf("event=redis_error action=set_attendance_checkin_cache session_id=%d student_id=%d err=%v", sessionID, studentID, cacheErr)
-		}
-		cacheCancel()
+		setAttendanceCheckInCachedResultAsync(sessionID, studentID, normalizedRequestID, &result)
 	}
 
 	observability.RecordAttendanceCheckInSuccess(time.Since(startedAt))
