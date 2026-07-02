@@ -3,6 +3,7 @@ module itii-assist
 go 1.26.2
 
 require (
+	github.com/SherClockHolmes/webpush-go v1.4.0
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/fasthttp/websocket v1.5.8
 	github.com/glebarez/sqlite v1.11.0

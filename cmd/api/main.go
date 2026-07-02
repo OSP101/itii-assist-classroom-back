@@ -95,6 +95,7 @@ func main() {
 		&models.QueueWorker{},
 		// แจ้งเตือน
 		&models.FcmToken{},
+		&models.PushSubscription{},
 		&models.NotificationLog{},
 		&models.UserNotification{},
 		&models.SystemAnnouncement{},
@@ -177,6 +178,7 @@ func main() {
 	routes.SetupSystemSettingsRoutes(app)
 	routes.SetupQueueRoutes(app, auditLogger)
 	routes.SetupNotificationRoutes(app)
+	routes.SetupPushRoutes(app)
 	routes.SetupOAuthRoutes(app)
 	routes.SetupUserNotificationRoutes(app)
 	routes.SetupSystemLogRoutes(app)

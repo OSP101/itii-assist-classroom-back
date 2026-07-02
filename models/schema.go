@@ -658,6 +658,29 @@ type FcmToken struct {
 	UpdatedAt  time.Time      `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
 }
 
+// PushSubscription stores a browser Web Push subscription (VAPID, no external
+// push provider account required) used to wake up workers (and, in future,
+// students) who have the app in the background or their screen off when a
+// new grading/help task arrives. Mirrors FcmToken's polymorphic shape so both
+// authenticated (worker) and public (student, no JWT) registration flows fit.
+type PushSubscription struct {
+	ID         uint           `gorm:"primaryKey;autoIncrement" json:"id"`
+	Endpoint   string         `gorm:"type:varchar(500);not null;uniqueIndex" json:"endpoint"`
+	P256dhKey  string         `gorm:"type:varchar(255);not null" json:"p256dh_key"`
+	AuthKey    string         `gorm:"type:varchar(255);not null" json:"auth_key"`
+	UserType   string         `gorm:"type:varchar(20);not null" json:"user_type"` // worker, student
+	UserID     *uint          `gorm:"index" json:"user_id,omitempty"`
+	StudentID  string         `gorm:"type:varchar(20)" json:"student_id,omitempty"`
+	BookingID  *uint          `gorm:"index" json:"booking_id,omitempty"`
+	SessionID  string         `gorm:"type:varchar(21)" json:"session_id,omitempty"`
+	DeviceInfo datatypes.JSON `gorm:"type:jsonb" json:"device_info,omitempty"`
+	UserAgent  string         `gorm:"type:varchar(255)" json:"user_agent,omitempty"`
+	IsActive   bool           `gorm:"type:boolean;default:true" json:"is_active"`
+	LastUsedAt *time.Time     `gorm:"type:timestamptz" json:"last_used_at,omitempty"`
+	CreatedAt  time.Time      `gorm:"type:timestamptz" json:"created_at"`
+	UpdatedAt  time.Time      `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+}
+
 // =============================================================================
 // UserNotification — per-user in-app notifications
 // =============================================================================
