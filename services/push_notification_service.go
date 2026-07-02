@@ -59,4 +59,3 @@ func SendQueueWorkerAssignedPush(sessionID string, workerID uint, booking *model
 
 	SendWebPushToUser(workerID, title, body, data, true)
 }
-

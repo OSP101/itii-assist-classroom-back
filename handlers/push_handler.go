@@ -119,4 +119,3 @@ func UnsubscribePushHandler(c fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"deleted": affected > 0}})
 }
-
