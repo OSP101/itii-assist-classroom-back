@@ -19,6 +19,7 @@ func SetupQueueRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	public.Get("/bookings/:bookingId/status", handlers.GetQueueBookingStatusPublicHandler)
 	public.Post("/bookings/:bookingId/cancel", handlers.CancelQueueBookingPublicHandler)
 	public.Get("/sessions/:sessionId/desk-statuses", handlers.GetQueueDeskStatusesPublicHandler)
+	public.Post("/sessions/:sessionId/heartbeat", handlers.HeartbeatQueueProjectorSessionHandler)
 	public.Post("/sessions/:sessionId/status", handlers.UpdateQueueSessionStatusPublicHandler)
 	public.Post("/sessions/:sessionId/cutoff", handlers.UpdateQueueSessionCutoffPublicHandler)
 
