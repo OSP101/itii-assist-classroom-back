@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -30,6 +31,15 @@ var queueRejectReasonOrder = []string{
 	"temporary_unavailable",
 	"other",
 }
+
+var queueAttendanceValidationLogState = struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}{
+	last: map[string]time.Time{},
+}
+
+const queueAttendanceValidationLogCooldown = 30 * time.Second
 
 func normalizeQueueRejectReason(reason string) string {
 	normalized := strings.TrimSpace(strings.ToLower(reason))
@@ -1519,6 +1529,35 @@ func hasQueueAttendanceEligibility(session *models.QueueSession, studentID uint)
 	return count > 0, err
 }
 
+func logQueueAttendanceBlocked(eventName string, sessionID string, linkedAttendanceSessionID *uint, studentCode string, deskNumber int, bookingType string) {
+	normalizedStudentCode := strings.TrimSpace(studentCode)
+	key := fmt.Sprintf("%s|%s|%s|%d|%s", eventName, sessionID, normalizedStudentCode, deskNumber, bookingType)
+	now := time.Now()
+
+	queueAttendanceValidationLogState.mu.Lock()
+	lastSeen, hasLastSeen := queueAttendanceValidationLogState.last[key]
+	if hasLastSeen && now.Sub(lastSeen) < queueAttendanceValidationLogCooldown {
+		queueAttendanceValidationLogState.mu.Unlock()
+		return
+	}
+	queueAttendanceValidationLogState.last[key] = now
+	queueAttendanceValidationLogState.mu.Unlock()
+
+	log.Printf("%s attendance_blocked session=%s linked_attendance_session_id=%v student_code=%s desk_number=%d booking_type=%s cooldown_seconds=%d", eventName, sessionID, linkedAttendanceSessionID, normalizedStudentCode, deskNumber, bookingType, int(queueAttendanceValidationLogCooldown.Seconds()))
+}
+
+func queueValidationContainsAttendanceError(validationErrors []fiber.Map) bool {
+	for _, validationError := range validationErrors {
+		field, _ := validationError["field"].(string)
+		message, _ := validationError["message"].(string)
+		if field == "student_id" && (strings.Contains(message, "เช็คชื่อ") || strings.Contains(strings.ToLower(message), "attendance")) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func loadQueueAssignmentWithSubItems(assignmentID uint) (*models.Assignment, []models.AssignmentSubItem, error) {
 	var assignment models.Assignment
 	if err := config.DB.First(&assignment, assignmentID).Error; err != nil {
@@ -2362,6 +2401,9 @@ func ValidateQueueBookingInfoPublicHandler(c fiber.Ctx) error {
 	if err != nil {
 		return queueLegacyError(c, 500, err.Error())
 	}
+	if queueValidationContainsAttendanceError(validationErrors) {
+		logQueueAttendanceBlocked("queue_validate", session.ID, session.LinkedAttendanceSessionID, effectiveStudentCode, int(input.DeskNumber), input.BookingType)
+	}
 
 	gradingAllowed := true
 	gradingReason := ""
@@ -2508,6 +2550,9 @@ func CreateQueueBookingPublicHandler(c fiber.Ctx) error {
 	student, desk, existingBooking, validationErrors, _, err := validateQueueBookingCompatibility(session, effectiveStudentCode, int(input.DeskNumber), input.BookingType, queueBookingValidationCreate)
 	if err != nil {
 		return queueLegacyError(c, 500, err.Error())
+	}
+	if queueValidationContainsAttendanceError(validationErrors) {
+		logQueueAttendanceBlocked("queue_create", session.ID, session.LinkedAttendanceSessionID, effectiveStudentCode, int(input.DeskNumber), input.BookingType)
 	}
 	if existingBooking != nil {
 		return queueLegacyError(c, 400, "คุณมีคิวที่รออยู่แล้ว กรุณารอให้ TA ดำเนินการเสร็จก่อน")
