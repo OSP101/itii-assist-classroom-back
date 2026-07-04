@@ -739,7 +739,15 @@ func LookupAttendanceSessionIDByPIN(ctx context.Context, pin string) (uint, erro
 	}
 
 	if attendanceRedisAvailable() && attendanceRedisBreaker.Allow() {
-		raw, err := config.Redis.Get(ctx, attendancePinKey(normalizedPIN)).Result()
+		redisCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		if deadline, ok := ctx.Deadline(); ok {
+			if remaining := time.Until(deadline); remaining > 0 && remaining < 300*time.Millisecond {
+				cancel()
+				redisCtx, cancel = context.WithTimeout(context.Background(), remaining)
+			}
+		}
+		raw, err := config.Redis.Get(redisCtx, attendancePinKey(normalizedPIN)).Result()
+		cancel()
 		if err == nil {
 			attendanceRedisBreaker.RecordSuccess()
 			var sessionID uint

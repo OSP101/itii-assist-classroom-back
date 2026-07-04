@@ -465,10 +465,13 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 	}
 
 	studentID := uint(0)
+	var student models.Student
 	if input.StudentID != nil {
 		studentID = *input.StudentID
+		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("id = ?", studentID).First(&student).Error; err == nil {
+			studentID = student.ID
+		}
 	} else if strings.TrimSpace(input.GoogleEmail) != "" {
-		var student models.Student
 		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?)", input.GoogleEmail).First(&student).Error; err == nil {
 			studentID = student.ID
 		}
@@ -487,10 +490,10 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 		statusCode, payload := attendancePublicErrorResponse(err, 400, "เช็คชื่อไม่สำเร็จ", "ไม่สามารถเช็คชื่อได้ในขณะนี้")
 		return c.Status(statusCode).JSON(payload)
 	}
-
-	student, err := repositories.FindStudentByID(studentID)
-	if err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load student after check-in"})
+	if student.ID == 0 {
+		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("id = ?", studentID).First(&student).Error; err != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load student after check-in"})
+		}
 	}
 
 	message := "เช็คชื่อสำเร็จ: มาเรียน"
@@ -1293,25 +1296,15 @@ func VerifyStudentHandler(c fiber.Ctx) error {
 	}
 
 	if input.SessionID != nil {
-		if _, err := repositories.EnsureAttendanceRecordForStudent(*input.SessionID, student.ID); err != nil {
+		status, err := repositories.GetAttendanceStudentSessionStatus(*input.SessionID, student.ID)
+		if err != nil {
 			statusCode, payload := attendancePublicErrorResponse(err, 403, "ไม่สามารถเช็คชื่อได้", "บัญชีนี้ไม่สามารถเช็คชื่อในรอบนี้ได้")
 			return c.Status(statusCode).JSON(payload)
-			return c.Status(404).JSON(fiber.Map{"success": false, "message": "à¸„à¸¸à¸“à¹„à¸¡à¹ˆà¹„à¸”à¹‰à¸¥à¸‡à¸—à¸°à¹€à¸šà¸µà¸¢à¸™à¹ƒà¸™à¸£à¸²à¸¢à¸§à¸´à¸Šà¸²à¸™à¸µà¹‰"})
 		}
-		var record models.AttendanceRecord
-		if err := config.DB.Where("attendance_session_id = ? AND student_id = ?", *input.SessionID, student.ID).First(&record).Error; err != nil {
-			return c.Status(repositories.ErrAttendanceCourseNotRegisteredPublic.HTTPStatus).JSON(fiber.Map{
-				"success": false,
-				"code":    repositories.ErrAttendanceCourseNotRegisteredPublic.Code,
-				"title":   repositories.ErrAttendanceCourseNotRegisteredPublic.Title,
-				"message": repositories.ErrAttendanceCourseNotRegisteredPublic.Message,
-			})
-			return c.Status(404).JSON(fiber.Map{"success": false, "message": "คุณไม่ได้ลงทะเบียนในรายวิชานี้"})
-		}
-		if record.Status != "absent" {
+		if status != nil && status.AlreadyCheckedIn {
 			response["already_checked_in"] = true
-			response["status"] = record.Status
-			response["check_in_time"] = record.CheckInTime
+			response["status"] = status.Status
+			response["check_in_time"] = status.CheckInTime
 		}
 	}
 

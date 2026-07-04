@@ -166,6 +166,12 @@ type AttendanceCheckInResult struct {
 	IsDuplicate      bool      `json:"is_duplicate"`
 }
 
+type AttendanceStudentSessionStatus struct {
+	AlreadyCheckedIn bool
+	Status           string
+	CheckInTime      *time.Time
+}
+
 type AttendanceSessionInfo struct {
 	ID                   uint                    `json:"id"`
 	Title                string                  `json:"title"`
@@ -754,6 +760,48 @@ func EnsureAttendanceRecordForStudent(sessionID uint, studentID uint) (*models.A
 		return nil, err
 	}
 	return record, nil
+}
+
+func GetAttendanceStudentSessionStatus(sessionID uint, studentID uint) (*AttendanceStudentSessionStatus, error) {
+	db := config.DB
+
+	var session models.AttendanceSession
+	if err := db.Select("id", "course_id", "course_section_id").First(&session, sessionID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrAttendanceSessionNotFoundPublic
+		}
+		return nil, err
+	}
+
+	sectionIDs, err := attendanceSessionSectionIDsWithDB(db, &session)
+	if err != nil {
+		return nil, err
+	}
+
+	allowed, err := attendanceStudentEligibleWithDB(db, session.CourseID, sectionIDs, studentID)
+	if err != nil {
+		return nil, err
+	}
+	if !allowed {
+		return nil, ErrAttendanceStudentNotEligiblePublic
+	}
+
+	status := &AttendanceStudentSessionStatus{}
+	var record models.AttendanceRecord
+	if err := db.Select("status", "check_in_time").Where("attendance_session_id = ? AND student_id = ?", sessionID, studentID).First(&record).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return status, nil
+		}
+		return nil, err
+	}
+
+	if record.Status != "absent" && record.CheckInTime != nil {
+		status.AlreadyCheckedIn = true
+		status.Status = record.Status
+		status.CheckInTime = record.CheckInTime
+	}
+
+	return status, nil
 }
 
 func GetAttendanceSessions(courseID string, status string) ([]AttendanceSessionWithStats, error) {

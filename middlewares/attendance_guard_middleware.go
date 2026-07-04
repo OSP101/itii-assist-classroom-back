@@ -2,6 +2,9 @@ package middlewares
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"itii-assist/config"
 	"itii-assist/observability"
@@ -36,11 +39,16 @@ var publicAttendanceLimiter = &attendanceRateLimiter{
 }
 
 func AttendanceCheckInGuard() fiber.Handler {
+	enabled := attendanceRateLimitEnabled()
 	config := loadAttendanceRateLimitConfig()
 	backend := loadAttendanceRateLimitBackend()
 
 	return func(c fiber.Ctx) error {
 		if c.Method() == fiber.MethodOptions {
+			return c.Next()
+		}
+
+		if !enabled {
 			return c.Next()
 		}
 
@@ -60,6 +68,19 @@ func AttendanceCheckInGuard() fiber.Handler {
 			"success": false,
 			"message": "ส่งคำขอเช็คชื่อถี่เกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง",
 		})
+	}
+}
+
+func attendanceRateLimitEnabled() bool {
+	rawValue := strings.TrimSpace(os.Getenv("ATTENDANCE_CHECKIN_RATE_LIMIT_ENABLED"))
+	if rawValue == "" {
+		return false
+	}
+	switch strings.ToLower(rawValue) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -179,11 +200,54 @@ func loadAttendanceRateLimitBackend() string {
 }
 
 func attendanceClientKey(c fiber.Ctx) string {
+	type attendanceCheckInIdentity struct {
+		StudentID       *uint  `json:"student_id"`
+		GoogleEmail     string `json:"google_email"`
+		GoogleID        string `json:"google_id"`
+		ClientRequestID string `json:"client_request_id"`
+		PinCode         string `json:"pin_code"`
+	}
+
+	identity := attendanceCheckInIdentity{}
+	if body := c.Body(); len(body) > 0 {
+		_ = json.Unmarshal(body, &identity)
+	}
+
+	sessionScope := strings.TrimSpace(c.Params("sessionId"))
+	if sessionScope == "" {
+		sessionScope = hashedAttendanceKeyPart(identity.PinCode)
+	}
+	if sessionScope == "" {
+		sessionScope = "session-unknown"
+	}
+
+	principalScope := ""
+	if identity.StudentID != nil && *identity.StudentID > 0 {
+		principalScope = "student:" + strconv.FormatUint(uint64(*identity.StudentID), 10)
+	} else if email := strings.ToLower(strings.TrimSpace(identity.GoogleEmail)); email != "" {
+		principalScope = "email:" + hashedAttendanceKeyPart(email)
+	} else if googleID := strings.TrimSpace(identity.GoogleID); googleID != "" {
+		principalScope = "gid:" + hashedAttendanceKeyPart(googleID)
+	} else if clientRequestID := strings.TrimSpace(identity.ClientRequestID); clientRequestID != "" {
+		principalScope = "req:" + hashedAttendanceKeyPart(clientRequestID)
+	} else {
+		principalScope = "ip:" + strings.TrimSpace(c.IP())
+	}
+
 	parts := []string{
-		strings.TrimSpace(c.IP()),
-		strings.TrimSpace(c.Params("sessionId")),
+		sessionScope,
+		principalScope,
 	}
 	return strings.ToLower(strings.Join(parts, "|"))
+}
+
+func hashedAttendanceKeyPart(value string) string {
+	normalized := strings.TrimSpace(value)
+	if normalized == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(normalized))
+	return hex.EncodeToString(sum[:8])
 }
 
 func readAttendanceIntEnv(key string, fallback int) int {
