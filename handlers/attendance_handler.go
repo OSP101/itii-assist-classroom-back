@@ -179,6 +179,21 @@ func verifyGoogleIDToken(ctx context.Context, idToken string) (*googleTokenInfo,
 	return &info, nil
 }
 
+func authenticatedStudentIDFromContext(c fiber.Ctx) uint {
+	raw := c.Locals("student_id")
+	if raw == nil {
+		return 0
+	}
+	switch v := raw.(type) {
+	case uint:
+		return v
+	case float64:
+		return uint(v)
+	default:
+		return 0
+	}
+}
+
 func desiredAttendanceStudentIDs(courseID string, sectionIDs []uint) ([]uint, error) {
 	type row struct {
 		StudentID uint `gorm:"column:student_id"`
@@ -554,25 +569,6 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
 	}
 
-	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer verifyCancel()
-	tokenInfo, verifyErr := verifyGoogleIDToken(verifyCtx, input.GoogleToken)
-	if verifyErr != nil {
-		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Google identity verification failed"})
-	}
-
-	verifiedEmail := strings.TrimSpace(strings.ToLower(tokenInfo.Email))
-	providedEmail := strings.TrimSpace(strings.ToLower(input.GoogleEmail))
-	if providedEmail != "" && providedEmail != verifiedEmail {
-		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
-	}
-
-	verifiedGoogleID := strings.TrimSpace(tokenInfo.Subject)
-	providedGoogleID := strings.TrimSpace(input.GoogleID)
-	if providedGoogleID != "" && providedGoogleID != verifiedGoogleID {
-		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
-	}
-
 	lat := input.LocationLat
 	if lat == nil {
 		lat = input.Lat
@@ -584,8 +580,43 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 
 	studentID := uint(0)
 	var student models.Student
-	if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?)", verifiedEmail).First(&student).Error; err == nil {
-		studentID = student.ID
+	verifiedEmail := ""
+	verifiedGoogleID := ""
+
+	if authStudentID := authenticatedStudentIDFromContext(c); authStudentID > 0 {
+		studentID = authStudentID
+		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("id = ?", studentID).First(&student).Error; err != nil {
+			return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
+				"success": false,
+				"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
+				"title":   repositories.ErrAttendanceStudentNotFoundPublic.Title,
+				"message": repositories.ErrAttendanceStudentNotFoundPublic.Message,
+			})
+		}
+		verifiedEmail = strings.TrimSpace(strings.ToLower(student.Email))
+	} else {
+		verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer verifyCancel()
+		tokenInfo, verifyErr := verifyGoogleIDToken(verifyCtx, input.GoogleToken)
+		if verifyErr != nil {
+			return c.Status(401).JSON(fiber.Map{"success": false, "message": "Google identity verification failed"})
+		}
+
+		verifiedEmail = strings.TrimSpace(strings.ToLower(tokenInfo.Email))
+		providedEmail := strings.TrimSpace(strings.ToLower(input.GoogleEmail))
+		if providedEmail != "" && providedEmail != verifiedEmail {
+			return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
+		}
+
+		verifiedGoogleID = strings.TrimSpace(tokenInfo.Subject)
+		providedGoogleID := strings.TrimSpace(input.GoogleID)
+		if providedGoogleID != "" && providedGoogleID != verifiedGoogleID {
+			return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
+		}
+
+		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?)", verifiedEmail).First(&student).Error; err == nil {
+			studentID = student.ID
+		}
 	}
 
 	if input.StudentID != nil && studentID != 0 && *input.StudentID != studentID {
@@ -1334,33 +1365,47 @@ func StudentCheckInByPINHandler(c fiber.Ctx) error {
 		})
 	}
 
-	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer verifyCancel()
-	tokenInfo, verifyErr := verifyGoogleIDToken(verifyCtx, input.GoogleToken)
-	if verifyErr != nil {
-		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Google identity verification failed"})
-	}
-
-	verifiedEmail := strings.TrimSpace(strings.ToLower(tokenInfo.Email))
-	providedEmail := strings.TrimSpace(strings.ToLower(input.GoogleEmail))
-	if providedEmail != "" && providedEmail != verifiedEmail {
-		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
-	}
-
-	verifiedGoogleID := strings.TrimSpace(tokenInfo.Subject)
-	providedGoogleID := strings.TrimSpace(input.GoogleID)
-	if providedGoogleID != "" && providedGoogleID != verifiedGoogleID {
-		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
-	}
-
+	verifiedEmail := ""
+	verifiedGoogleID := ""
 	var student models.Student
-	if err := config.DB.Select("id").Where("LOWER(email) = LOWER(?)", verifiedEmail).First(&student).Error; err != nil {
-		return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
-			"success": false,
-			"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
-			"title":   repositories.ErrAttendanceStudentNotFoundPublic.Title,
-			"message": repositories.ErrAttendanceStudentNotFoundPublic.Message,
-		})
+	if authStudentID := authenticatedStudentIDFromContext(c); authStudentID > 0 {
+		if err := config.DB.Select("id", "email").Where("id = ?", authStudentID).First(&student).Error; err != nil {
+			return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
+				"success": false,
+				"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
+				"title":   repositories.ErrAttendanceStudentNotFoundPublic.Title,
+				"message": repositories.ErrAttendanceStudentNotFoundPublic.Message,
+			})
+		}
+		verifiedEmail = strings.TrimSpace(strings.ToLower(student.Email))
+	} else {
+		verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer verifyCancel()
+		tokenInfo, verifyErr := verifyGoogleIDToken(verifyCtx, input.GoogleToken)
+		if verifyErr != nil {
+			return c.Status(401).JSON(fiber.Map{"success": false, "message": "Google identity verification failed"})
+		}
+
+		verifiedEmail = strings.TrimSpace(strings.ToLower(tokenInfo.Email))
+		providedEmail := strings.TrimSpace(strings.ToLower(input.GoogleEmail))
+		if providedEmail != "" && providedEmail != verifiedEmail {
+			return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
+		}
+
+		verifiedGoogleID = strings.TrimSpace(tokenInfo.Subject)
+		providedGoogleID := strings.TrimSpace(input.GoogleID)
+		if providedGoogleID != "" && providedGoogleID != verifiedGoogleID {
+			return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
+		}
+
+		if err := config.DB.Select("id", "email").Where("LOWER(email) = LOWER(?)", verifiedEmail).First(&student).Error; err != nil {
+			return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
+				"success": false,
+				"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
+				"title":   repositories.ErrAttendanceStudentNotFoundPublic.Title,
+				"message": repositories.ErrAttendanceStudentNotFoundPublic.Message,
+			})
+		}
 	}
 
 	if input.StudentID != nil && *input.StudentID != student.ID {
@@ -1409,27 +1454,38 @@ func VerifyStudentHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "session_id is required"})
 	}
 
-	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer verifyCancel()
-	tokenInfo, verifyErr := verifyGoogleIDToken(verifyCtx, input.GoogleToken)
-	if verifyErr != nil {
-		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Google identity verification failed"})
-	}
-
-	verifiedEmail := strings.TrimSpace(strings.ToLower(tokenInfo.Email))
-	providedEmail := strings.TrimSpace(strings.ToLower(input.GoogleEmail))
-	if providedEmail != "" && providedEmail != verifiedEmail {
-		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
-	}
-
 	var student models.Student
-	if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?)", verifiedEmail).First(&student).Error; err != nil {
-		return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
-			"success": false,
-			"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
-			"title":   repositories.ErrAttendanceStudentNotFoundPublic.Title,
-			"message": repositories.ErrAttendanceStudentNotFoundPublic.Message,
-		})
+	if authStudentID := authenticatedStudentIDFromContext(c); authStudentID > 0 {
+		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("id = ?", authStudentID).First(&student).Error; err != nil {
+			return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
+				"success": false,
+				"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
+				"title":   repositories.ErrAttendanceStudentNotFoundPublic.Title,
+				"message": repositories.ErrAttendanceStudentNotFoundPublic.Message,
+			})
+		}
+	} else {
+		verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer verifyCancel()
+		tokenInfo, verifyErr := verifyGoogleIDToken(verifyCtx, input.GoogleToken)
+		if verifyErr != nil {
+			return c.Status(401).JSON(fiber.Map{"success": false, "message": "Google identity verification failed"})
+		}
+
+		verifiedEmail := strings.TrimSpace(strings.ToLower(tokenInfo.Email))
+		providedEmail := strings.TrimSpace(strings.ToLower(input.GoogleEmail))
+		if providedEmail != "" && providedEmail != verifiedEmail {
+			return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
+		}
+
+		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?)", verifiedEmail).First(&student).Error; err != nil {
+			return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
+				"success": false,
+				"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
+				"title":   repositories.ErrAttendanceStudentNotFoundPublic.Title,
+				"message": repositories.ErrAttendanceStudentNotFoundPublic.Message,
+			})
+		}
 	}
 
 	response := fiber.Map{

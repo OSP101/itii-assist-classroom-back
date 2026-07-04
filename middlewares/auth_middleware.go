@@ -96,6 +96,41 @@ func Protected() fiber.Handler {
 	}
 }
 
+func OptionalProtected() fiber.Handler {
+	return func(c fiber.Ctx) error {
+		if c.Method() == fiber.MethodOptions {
+			return c.Next()
+		}
+
+		authHeader := c.Get("Authorization")
+		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+			return c.Next()
+		}
+
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+		claims, err := utils.ValidateAccessToken(tokenString)
+		if err != nil {
+			return c.Next()
+		}
+
+		if claims.JTI != "" {
+			if _, err := repositories.FindRefreshTokenByJTI(claims.JTI); err != nil {
+				return c.Next()
+			}
+		}
+
+		c.Locals("jti", claims.JTI)
+		if claims.Kind == "s" {
+			c.Locals("student_id", claims.UserID)
+		} else {
+			c.Locals("user_id", claims.UserID)
+		}
+		c.Locals("user_role", claims.Role)
+
+		return c.Next()
+	}
+}
+
 func RequireRole(allowedRoles ...string) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		allowedRoleSet := make(map[string]struct{}, len(allowedRoles))
