@@ -2,8 +2,10 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"itii-assist/config"
 	"itii-assist/models"
 	"itii-assist/observability"
@@ -11,6 +13,9 @@ import (
 	"itii-assist/repositories"
 	"itii-assist/services"
 	"log"
+	"net/http"
+	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -79,6 +84,99 @@ func attendancePublicErrorResponse(err error, fallbackStatus int, fallbackTitle 
 		"title":   fallbackTitle,
 		"message": message,
 	}
+}
+
+type googleTokenInfo struct {
+	IssuedTo      string `json:"issued_to"`
+	Audience      string `json:"aud"`
+	UserID        string `json:"user_id"`
+	Scope         string `json:"scope"`
+	ExpiresIn     string `json:"expires_in"`
+	Email         string `json:"email"`
+	EmailVerified string `json:"email_verified"`
+	AccessType    string `json:"access_type"`
+	IssuedAt      string `json:"iat"`
+	ExpiresAt     string `json:"exp"`
+	Issuer        string `json:"iss"`
+	Subject       string `json:"sub"`
+	Error         string `json:"error_description"`
+}
+
+func normalizeGoogleBool(value string) bool {
+	normalized := strings.TrimSpace(strings.ToLower(value))
+	return normalized == "true" || normalized == "1" || normalized == "yes"
+}
+
+func verifyGoogleIDToken(ctx context.Context, idToken string) (*googleTokenInfo, error) {
+	token := strings.TrimSpace(idToken)
+	if token == "" {
+		return nil, errors.New("google_token is required")
+	}
+
+	googleClientID := strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_ID"))
+	if googleClientID == "" {
+		return nil, errors.New("google client id is not configured")
+	}
+
+	endpoint := "https://oauth2.googleapis.com/tokeninfo?id_token=" + url.QueryEscape(token)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+
+	var info googleTokenInfo
+	if err := json.Unmarshal(body, &info); err != nil {
+		return nil, errors.New("failed to parse google token response")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		if strings.TrimSpace(info.Error) != "" {
+			return nil, errors.New(info.Error)
+		}
+		return nil, errors.New("invalid google token")
+	}
+
+	aud := strings.TrimSpace(info.Audience)
+	if aud == "" {
+		aud = strings.TrimSpace(info.IssuedTo)
+	}
+	if aud == "" || aud != googleClientID {
+		return nil, errors.New("google token audience mismatch")
+	}
+
+	iss := strings.TrimSpace(strings.ToLower(info.Issuer))
+	if iss != "accounts.google.com" && iss != "https://accounts.google.com" {
+		return nil, errors.New("google token issuer mismatch")
+	}
+
+	if !normalizeGoogleBool(info.EmailVerified) {
+		return nil, errors.New("google email is not verified")
+	}
+
+	expiresAt, err := strconv.ParseInt(strings.TrimSpace(info.ExpiresAt), 10, 64)
+	if err != nil {
+		return nil, errors.New("google token expiry is invalid")
+	}
+	if time.Unix(expiresAt, 0).Before(time.Now()) {
+		return nil, errors.New("google token has expired")
+	}
+
+	if strings.TrimSpace(info.Email) == "" || strings.TrimSpace(info.Subject) == "" {
+		return nil, errors.New("google token payload is incomplete")
+	}
+
+	return &info, nil
 }
 
 func desiredAttendanceStudentIDs(courseID string, sectionIDs []uint) ([]uint, error) {
@@ -450,9 +548,29 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 		LocationLng *float64 `json:"location_lng"`
 		GoogleEmail string   `json:"google_email"`
 		GoogleID    string   `json:"google_id"`
+		GoogleToken string   `json:"google_token"`
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
+	}
+
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer verifyCancel()
+	tokenInfo, verifyErr := verifyGoogleIDToken(verifyCtx, input.GoogleToken)
+	if verifyErr != nil {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Google identity verification failed"})
+	}
+
+	verifiedEmail := strings.TrimSpace(strings.ToLower(tokenInfo.Email))
+	providedEmail := strings.TrimSpace(strings.ToLower(input.GoogleEmail))
+	if providedEmail != "" && providedEmail != verifiedEmail {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
+	}
+
+	verifiedGoogleID := strings.TrimSpace(tokenInfo.Subject)
+	providedGoogleID := strings.TrimSpace(input.GoogleID)
+	if providedGoogleID != "" && providedGoogleID != verifiedGoogleID {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
 	}
 
 	lat := input.LocationLat
@@ -466,15 +584,12 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 
 	studentID := uint(0)
 	var student models.Student
-	if input.StudentID != nil {
-		studentID = *input.StudentID
-		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("id = ?", studentID).First(&student).Error; err == nil {
-			studentID = student.ID
-		}
-	} else if strings.TrimSpace(input.GoogleEmail) != "" {
-		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?)", input.GoogleEmail).First(&student).Error; err == nil {
-			studentID = student.ID
-		}
+	if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?)", verifiedEmail).First(&student).Error; err == nil {
+		studentID = student.ID
+	}
+
+	if input.StudentID != nil && studentID != 0 && *input.StudentID != studentID {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Student identity mismatch"})
 	}
 	if studentID == 0 {
 		return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
@@ -485,7 +600,7 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 		})
 	}
 
-	result, err := repositories.StudentCheckIn(uint(id), studentID, input.PinCode, lat, lng, input.GoogleEmail, input.GoogleID, input.ClientID)
+	result, err := repositories.StudentCheckIn(uint(id), studentID, input.PinCode, lat, lng, verifiedEmail, verifiedGoogleID, input.ClientID)
 	if err != nil {
 		statusCode, payload := attendancePublicErrorResponse(err, 400, "เช็คชื่อไม่สำเร็จ", "ไม่สามารถเช็คชื่อได้ในขณะนี้")
 		return c.Status(statusCode).JSON(payload)
@@ -1197,6 +1312,7 @@ func StudentCheckInByPINHandler(c fiber.Ctx) error {
 		ClientID    string   `json:"client_request_id"`
 		GoogleEmail string   `json:"google_email"`
 		GoogleID    string   `json:"google_id"`
+		GoogleToken string   `json:"google_token"`
 		StudentID   *uint    `json:"student_id"`
 		LocationLat *float64 `json:"location_lat"`
 		LocationLng *float64 `json:"location_lng"`
@@ -1218,23 +1334,40 @@ func StudentCheckInByPINHandler(c fiber.Ctx) error {
 		})
 	}
 
-	studentID := uint(0)
-	if input.StudentID != nil {
-		studentID = *input.StudentID
-	} else {
-		var student models.Student
-		if err := config.DB.Select("id").Where("LOWER(email) = LOWER(?)", input.GoogleEmail).First(&student).Error; err != nil {
-			return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
-				"success": false,
-				"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
-				"title":   repositories.ErrAttendanceStudentNotFoundPublic.Title,
-				"message": repositories.ErrAttendanceStudentNotFoundPublic.Message,
-			})
-		}
-		studentID = student.ID
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer verifyCancel()
+	tokenInfo, verifyErr := verifyGoogleIDToken(verifyCtx, input.GoogleToken)
+	if verifyErr != nil {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Google identity verification failed"})
 	}
 
-	result, err := repositories.StudentCheckIn(sessionID, studentID, input.PinCode, input.LocationLat, input.LocationLng, input.GoogleEmail, input.GoogleID, input.ClientID)
+	verifiedEmail := strings.TrimSpace(strings.ToLower(tokenInfo.Email))
+	providedEmail := strings.TrimSpace(strings.ToLower(input.GoogleEmail))
+	if providedEmail != "" && providedEmail != verifiedEmail {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
+	}
+
+	verifiedGoogleID := strings.TrimSpace(tokenInfo.Subject)
+	providedGoogleID := strings.TrimSpace(input.GoogleID)
+	if providedGoogleID != "" && providedGoogleID != verifiedGoogleID {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
+	}
+
+	var student models.Student
+	if err := config.DB.Select("id").Where("LOWER(email) = LOWER(?)", verifiedEmail).First(&student).Error; err != nil {
+		return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
+			"success": false,
+			"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
+			"title":   repositories.ErrAttendanceStudentNotFoundPublic.Title,
+			"message": repositories.ErrAttendanceStudentNotFoundPublic.Message,
+		})
+	}
+
+	if input.StudentID != nil && *input.StudentID != student.ID {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Student identity mismatch"})
+	}
+
+	result, err := repositories.StudentCheckIn(sessionID, student.ID, input.PinCode, input.LocationLat, input.LocationLng, verifiedEmail, verifiedGoogleID, input.ClientID)
 	if err != nil {
 		statusCode, payload := attendancePublicErrorResponse(err, 400, "เช็คชื่อไม่สำเร็จ", "ไม่สามารถเช็คชื่อได้ในขณะนี้")
 		return c.Status(statusCode).JSON(payload)
@@ -1270,13 +1403,27 @@ func VerifyStudentHandler(c fiber.Ctx) error {
 	var input struct {
 		GoogleEmail string `json:"google_email"`
 		SessionID   *uint  `json:"session_id"`
+		GoogleToken string `json:"google_token"`
 	}
-	if err := c.Bind().JSON(&input); err != nil || strings.TrimSpace(input.GoogleEmail) == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "google_email is required"})
+	if err := c.Bind().JSON(&input); err != nil || input.SessionID == nil || *input.SessionID == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "session_id is required"})
+	}
+
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer verifyCancel()
+	tokenInfo, verifyErr := verifyGoogleIDToken(verifyCtx, input.GoogleToken)
+	if verifyErr != nil {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Google identity verification failed"})
+	}
+
+	verifiedEmail := strings.TrimSpace(strings.ToLower(tokenInfo.Email))
+	providedEmail := strings.TrimSpace(strings.ToLower(input.GoogleEmail))
+	if providedEmail != "" && providedEmail != verifiedEmail {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
 	}
 
 	var student models.Student
-	if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?)", input.GoogleEmail).First(&student).Error; err != nil {
+	if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?)", verifiedEmail).First(&student).Error; err != nil {
 		return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
 			"success": false,
 			"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
@@ -1295,17 +1442,15 @@ func VerifyStudentHandler(c fiber.Ctx) error {
 		"already_checked_in": false,
 	}
 
-	if input.SessionID != nil {
-		status, err := repositories.GetAttendanceStudentSessionStatus(*input.SessionID, student.ID)
-		if err != nil {
-			statusCode, payload := attendancePublicErrorResponse(err, 403, "ไม่สามารถเช็คชื่อได้", "บัญชีนี้ไม่สามารถเช็คชื่อในรอบนี้ได้")
-			return c.Status(statusCode).JSON(payload)
-		}
-		if status != nil && status.AlreadyCheckedIn {
-			response["already_checked_in"] = true
-			response["status"] = status.Status
-			response["check_in_time"] = status.CheckInTime
-		}
+	status, err := repositories.GetAttendanceStudentSessionStatus(*input.SessionID, student.ID)
+	if err != nil {
+		statusCode, payload := attendancePublicErrorResponse(err, 403, "ไม่สามารถเช็คชื่อได้", "บัญชีนี้ไม่สามารถเช็คชื่อในรอบนี้ได้")
+		return c.Status(statusCode).JSON(payload)
+	}
+	if status != nil && status.AlreadyCheckedIn {
+		response["already_checked_in"] = true
+		response["status"] = status.Status
+		response["check_in_time"] = status.CheckInTime
 	}
 
 	return c.JSON(fiber.Map{"success": true, "data": response})

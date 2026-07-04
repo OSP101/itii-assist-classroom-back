@@ -74,13 +74,15 @@ func AttendanceCheckInGuard() fiber.Handler {
 func attendanceRateLimitEnabled() bool {
 	rawValue := strings.TrimSpace(os.Getenv("ATTENDANCE_CHECKIN_RATE_LIMIT_ENABLED"))
 	if rawValue == "" {
-		return false
+		return true
 	}
 	switch strings.ToLower(rawValue) {
 	case "1", "true", "yes", "on":
 		return true
-	default:
+	case "0", "false", "no", "off":
 		return false
+	default:
+		return true
 	}
 }
 
