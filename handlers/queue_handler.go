@@ -3462,14 +3462,16 @@ func buildQueueDeskStatusesSnapshotData(sessionID string) (fiber.Map, error) {
 
 	return fiber.Map{
 		"session": fiber.Map{
-			"id":                session.ID,
-			"course_id":         session.CourseID,
-			"title":             session.Title,
-			"pin_code":          session.PinCode,
-			"status":            session.Status,
-			"is_cutoff_enabled": session.IsCutoffEnabled,
-			"cutoff_at":         session.CutoffAt,
-			"cutoff_note":       session.CutoffNote,
+			"id":                  session.ID,
+			"course_id":           session.CourseID,
+			"title":               session.Title,
+			"pin_code":            session.PinCode,
+			"status":              session.Status,
+			"is_cutoff_enabled":   session.IsCutoffEnabled,
+			"cutoff_at":           session.CutoffAt,
+			"cutoff_note":         session.CutoffNote,
+			"concurrent_group_id": session.ConcurrentGroupID,
+			"group_pin_code":      session.GroupPinCode,
 		},
 		"classroom": fiber.Map{
 			"id":       classroom.ID,

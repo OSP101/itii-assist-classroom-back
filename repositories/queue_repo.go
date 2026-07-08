@@ -201,8 +201,17 @@ func LinkConcurrentSessions(sessionID1, sessionID2 string) error {
 	if c1.InstructorID == nil || c2.InstructorID == nil || *c1.InstructorID != *c2.InstructorID {
 		return fmt.Errorf("สามารถเชื่อมคิวร่วมได้เฉพาะวิชาที่สอนโดยอาจารย์คนเดียวกันเท่านั้น")
 	}
-	// Already linked together
+	// Already linked together — also generate a group PIN if one was never created
 	if s1.ConcurrentGroupID != nil && s2.ConcurrentGroupID != nil && *s1.ConcurrentGroupID == *s2.ConcurrentGroupID {
+		if s1.GroupPinCode == nil {
+			groupPIN, err := generateUniqueGroupPIN()
+			if err != nil {
+				return err
+			}
+			return config.DB.Model(&models.QueueSession{}).
+				Where("concurrent_group_id = ?", *s1.ConcurrentGroupID).
+				Update("group_pin_code", groupPIN).Error
+		}
 		return nil
 	}
 	// Reject if either already belongs to a different group
