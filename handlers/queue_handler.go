@@ -339,6 +339,126 @@ func DeleteQueueSessionHandler(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "message": "Queue session deleted"})
 }
 
+// GET /api/courses/:courseId/queue/sessions/:sessionId/group
+func GetConcurrentGroupHandler(c fiber.Ctx) error {
+	sessionID := c.Params("sessionId")
+	sessionIDs, err := repositories.GetConcurrentSessionIDs(sessionID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": err.Error()})
+	}
+	type sessionBasic struct {
+		ID           string  `json:"id"`
+		Title        string  `json:"title"`
+		CourseID     string  `json:"course_id"`
+		CourseName   string  `json:"course_name"`
+		Status       string  `json:"status"`
+		GroupPinCode *string `json:"group_pin_code,omitempty"`
+	}
+	var sessions []sessionBasic
+	config.DB.Table("queue_sessions qs").
+		Select("qs.id, qs.title, qs.course_id, c.name AS course_name, qs.status, qs.group_pin_code").
+		Joins("JOIN courses c ON c.id = qs.course_id").
+		Where("qs.id IN ?", sessionIDs).
+		Scan(&sessions)
+	isGrouped := len(sessionIDs) > 1
+	var groupPinCode *string
+	if len(sessions) > 0 {
+		groupPinCode = sessions[0].GroupPinCode
+	}
+	return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"is_grouped": isGrouped, "group_pin_code": groupPinCode, "sessions": sessions}})
+}
+
+// POST /api/courses/:courseId/queue/sessions/:sessionId/group/link
+func LinkConcurrentSessionsHandler(c fiber.Ctx) error {
+	sessionID := c.Params("sessionId")
+	var input struct {
+		PartnerSessionID string `json:"partner_session_id"`
+	}
+	if err := c.Bind().JSON(&input); err != nil || input.PartnerSessionID == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "partner_session_id is required"})
+	}
+	session, err := repositories.GetQueueSessionByID(sessionID)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
+	}
+	if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+		return err
+	}
+	if err := repositories.LinkConcurrentSessions(sessionID, input.PartnerSessionID); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "message": "เชื่อมคิวสำเร็จ"})
+}
+
+// DELETE /api/courses/:courseId/queue/sessions/:sessionId/group/unlink
+func UnlinkConcurrentSessionHandler(c fiber.Ctx) error {
+	sessionID := c.Params("sessionId")
+	session, err := repositories.GetQueueSessionByID(sessionID)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
+	}
+	if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+		return err
+	}
+	if err := repositories.UnlinkConcurrentSession(sessionID); err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "message": "ถอดการเชื่อมคิวสำเร็จ"})
+}
+
+// GET /api/queue/classroom/:classroomId/active-sessions
+// Public endpoint — no auth required. Returns active sessions for student room-discovery.
+func GetClassroomActiveSessionsPublicHandler(c fiber.Ctx) error {
+	classroomID := c.Params("classroomId")
+	if classroomID == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "classroomId is required"})
+	}
+	type activeSessionRow struct {
+		ID                string  `json:"id"`
+		Title             string  `json:"title"`
+		CourseID          string  `json:"course_id"`
+		CourseName        string  `json:"course_name"`
+		Status            string  `json:"status"`
+		ConcurrentGroupID *string `json:"concurrent_group_id,omitempty"`
+	}
+	var rows []activeSessionRow
+	config.DB.Table("queue_sessions qs").
+		Select("qs.id, qs.title, qs.course_id, c.name AS course_name, qs.status, qs.concurrent_group_id").
+		Joins("JOIN courses c ON c.id = qs.course_id").
+		Where("qs.classroom_id = ? AND qs.status IN ?", classroomID, []string{"active", "paused"}).
+		Order("qs.start_time ASC").
+		Scan(&rows)
+	return c.JSON(fiber.Map{"success": true, "data": rows})
+}
+
+// GET /api/queue/sessions/:sessionId/concurrent-sessions
+// Public endpoint — returns all sessions in the same concurrent group (including pin_code).
+// Access is gated on knowing a valid session ID already in the group.
+func GetConcurrentSessionsPublicHandler(c fiber.Ctx) error {
+	sessionID := c.Params("sessionId")
+	groupIDs, err := repositories.GetConcurrentSessionIDs(sessionID)
+	if err != nil || len(groupIDs) == 0 {
+		return c.JSON(fiber.Map{"success": true, "data": []interface{}{}})
+	}
+	type sessionRow struct {
+		ID         string  `json:"id"`
+		Title      string  `json:"title"`
+		CourseID   string  `json:"course_id"`
+		CourseName string  `json:"course_name"`
+		Status     string  `json:"status"`
+		PinCode    string  `json:"pin_code"`
+		ConcurrentGroupID *string `json:"concurrent_group_id,omitempty"`
+	}
+	var rows []sessionRow
+	config.DB.Table("queue_sessions qs").
+		Select("qs.id, qs.title, qs.course_id, c.name AS course_name, qs.status, qs.pin_code, qs.concurrent_group_id").
+		Joins("JOIN courses c ON c.id = qs.course_id").
+		Where("qs.id IN ? AND qs.status IN ?", groupIDs, []string{"active", "paused"}).
+		Order("qs.start_time ASC").
+		Scan(&rows)
+	return c.JSON(fiber.Map{"success": true, "data": rows})
+}
+
 // POST /api/courses/:courseId/queue/sessions/:sessionId/start
 func (h *QueueHandler) StartQueueSession(c fiber.Ctx) error {
 	sessionID := c.Params("sessionId")
@@ -1032,6 +1152,9 @@ func WorkerJoinHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to join as worker"})
 	}
 
+	// Mirror worker registration to all other sessions in the concurrent group.
+	_ = repositories.WorkerJoinMirrorGroup(sessionID, userID, input.AcceptGrading, input.AcceptHelp)
+
 	assignedBooking, assignErr := tryAssignNextBookingAndEmit(sessionID, userID)
 	if assignErr != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to join as worker"})
@@ -1099,6 +1222,9 @@ func WorkerLeaveHandler(c fiber.Ctx) error {
 	logCourseActivity(c, session.CourseID, userID, "leave_queue_worker", "queue", "queue_session", session.ID, session.Title, fiber.Map{"status": newStatus})
 	realtime.EmitToQueue(sessionID, "worker-left", fiber.Map{"worker_id": userID, "status": newStatus, "timestamp": time.Now().UnixMilli()})
 	go emitQueueReportSnapshot(sessionID)
+
+	// Mirror offline/paused status to all sessions in the concurrent group.
+	go repositories.WorkerOfflineMirrorGroup(sessionID, userID, newStatus)
 
 	return c.JSON(fiber.Map{"success": true, "message": message, "data": fiber.Map{"status": newStatus}})
 }
@@ -2299,7 +2425,7 @@ func updateQueueSessionStatusCompat(session *models.QueueSession, targetStatus s
 	switch targetStatus {
 	case "active":
 		// Block start/resume if another session is already active in the same classroom.
-		if err := repositories.CheckActiveQueueSessionForClassroom(session.ClassroomID, session.ID); err != nil {
+		if err := repositories.CheckActiveQueueSessionForClassroom(session.ClassroomID, session.ID, session.CourseID); err != nil {
 			return err
 		}
 		if session.Status == "draft" {
@@ -2329,6 +2455,49 @@ func VerifyQueuePINPublicHandler(c fiber.Ctx) error {
 
 	session, err := loadQueueSessionByPIN(input.PinCode, "active", "paused")
 	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// Try as a group PIN
+		groupSessions, groupErr := repositories.GetSessionsByGroupPIN(input.PinCode)
+		if groupErr == nil && len(groupSessions) > 0 {
+			type groupSessionDetail struct {
+				SessionID         string      `json:"session_id"`
+				Title             string      `json:"title"`
+				CourseID          string      `json:"course_id"`
+				Status            string      `json:"status"`
+				PinCode           string      `json:"pin_code"`
+				RequireAttendance bool        `json:"require_attendance"`
+				IsCutoffEnabled   bool        `json:"is_cutoff_enabled"`
+				CutoffAt          interface{} `json:"cutoff_at"`
+				CutoffNote        string      `json:"cutoff_note"`
+				Course            interface{} `json:"course"`
+				Classroom         interface{} `json:"classroom"`
+			}
+			var details []groupSessionDetail
+			for _, gs := range groupSessions {
+				course, _ := loadQueueCourse(gs.CourseID)
+				classroom, _ := loadQueueClassroom(gs.ClassroomID)
+				details = append(details, groupSessionDetail{
+					SessionID:         gs.ID,
+					Title:             gs.Title,
+					CourseID:          gs.CourseID,
+					Status:            gs.Status,
+					PinCode:           gs.PinCode,
+					RequireAttendance: gs.RequireAttendance,
+					IsCutoffEnabled:   gs.IsCutoffEnabled,
+					CutoffAt:          gs.CutoffAt,
+					CutoffNote:        gs.CutoffNote,
+					Course:            course,
+					Classroom:         classroom,
+				})
+			}
+			return c.JSON(fiber.Map{
+				"success": true,
+				"data": fiber.Map{
+					"is_group":  true,
+					"group_pin": input.PinCode,
+					"sessions":  details,
+				},
+			})
+		}
 		return queueLegacyError(c, 404, "PIN ไม่ถูกต้อง หรือไม่มีการเปิดรับจองคิว")
 	}
 	if err != nil {

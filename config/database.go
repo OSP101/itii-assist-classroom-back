@@ -350,6 +350,14 @@ func MigratePerformanceIndexes() {
 			name: "fcm_tokens_session_type",
 			sql:  `CREATE INDEX IF NOT EXISTS idx_fcm_tokens_session_type ON fcm_tokens (session_id, user_type)`,
 		},
+		{
+			name: "queue_sessions_concurrent_group_id",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_queue_sessions_concurrent_group_id ON queue_sessions (concurrent_group_id) WHERE concurrent_group_id IS NOT NULL`,
+		},
+		{
+			name: "queue_sessions_group_pin_code",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_queue_sessions_group_pin_code ON queue_sessions (group_pin_code) WHERE group_pin_code IS NOT NULL`,
+		},
 	}
 
 	ensuredCount := 0

@@ -572,6 +572,8 @@ type QueueSession struct {
 	EndTime                   *time.Time `gorm:"type:timestamptz" json:"end_time,omitempty"`
 	ProjectorLastSeenAt       *time.Time `gorm:"type:timestamptz;index" json:"projector_last_seen_at,omitempty"`
 	CreatedBy                 *uint      `gorm:"index" json:"created_by,omitempty"`
+	ConcurrentGroupID         *string    `gorm:"type:varchar(21);index" json:"concurrent_group_id,omitempty"`
+	GroupPinCode              *string    `gorm:"type:varchar(10);index" json:"group_pin_code,omitempty"`
 	CreatedAt                 time.Time  `gorm:"type:timestamptz" json:"created_at"`
 	UpdatedAt                 time.Time  `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
 }

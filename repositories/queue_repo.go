@@ -62,6 +62,34 @@ func generateUniqueQueuePIN() (string, error) {
 	return generateQueuePIN()
 }
 
+// generateUniqueGroupPIN generates a PIN that does not collide with any active
+// individual PIN (pin_code) or existing group_pin_code.
+func generateUniqueGroupPIN() (string, error) {
+	for i := 0; i < 20; i++ {
+		pin, err := generateQueuePIN()
+		if err != nil {
+			return "", err
+		}
+		var count int64
+		config.DB.Model(&models.QueueSession{}).
+			Where("(pin_code = ? AND status IN ('active','paused')) OR (group_pin_code = ? AND status IN ('active','paused'))", pin, pin).
+			Count(&count)
+		if count == 0 {
+			return pin, nil
+		}
+	}
+	return "", fmt.Errorf("ไม่สามารถสร้าง group PIN ที่ไม่ซ้ำกันได้")
+}
+
+// GetSessionsByGroupPIN returns all active/paused sessions sharing a given group_pin_code.
+func GetSessionsByGroupPIN(groupPin string) ([]models.QueueSession, error) {
+	var sessions []models.QueueSession
+	err := config.DB.
+		Where("group_pin_code = ? AND status IN ('active','paused')", groupPin).
+		Find(&sessions).Error
+	return sessions, err
+}
+
 // ---------- ClassroomConflictError ----------
 
 // ClassroomConflictError is returned when a classroom already has an active
@@ -82,7 +110,7 @@ func (e *ClassroomConflictError) Error() string {
 // any queue session with status='active' exists for classroomID, excluding
 // the session identified by excludeSessionID (the one being started/resumed).
 // Returns nil when the classroom is free.
-func CheckActiveQueueSessionForClassroom(classroomID, excludeSessionID string) error {
+func CheckActiveQueueSessionForClassroom(classroomID, excludeSessionID, excludeCourseID string) error {
 	if classroomID == "" {
 		return nil
 	}
@@ -102,6 +130,9 @@ func CheckActiveQueueSessionForClassroom(classroomID, excludeSessionID string) e
 	if excludeSessionID != "" {
 		q = q.Where("qs.id != ?", excludeSessionID)
 	}
+	if excludeCourseID != "" {
+		q = q.Where("qs.course_id != ?", excludeCourseID)
+	}
 	err := q.Limit(1).Scan(&row).Error
 	if err != nil {
 		return err
@@ -116,6 +147,102 @@ func CheckActiveQueueSessionForClassroom(classroomID, excludeSessionID string) e
 		CourseName:   row.CourseName,
 		StartedAt:    row.StartedAt,
 	}
+}
+
+// GetConcurrentSessionIDs returns all session IDs sharing the same concurrent_group_id
+// as sessionID (including sessionID itself). Returns just [sessionID] if no group.
+func GetConcurrentSessionIDs(sessionID string) ([]string, error) {
+	var s models.QueueSession
+	if err := config.DB.Select("concurrent_group_id").Where("id = ?", sessionID).First(&s).Error; err != nil {
+		return []string{sessionID}, nil
+	}
+	if s.ConcurrentGroupID == nil || *s.ConcurrentGroupID == "" {
+		return []string{sessionID}, nil
+	}
+	var ids []string
+	if err := config.DB.Model(&models.QueueSession{}).
+		Where("concurrent_group_id = ?", *s.ConcurrentGroupID).
+		Pluck("id", &ids).Error; err != nil {
+		return []string{sessionID}, nil
+	}
+	return ids, nil
+}
+
+// LinkConcurrentSessions links two queue sessions as concurrent (same classroom required).
+// Both sessions must belong to different courses. At most 2 sessions per group.
+func LinkConcurrentSessions(sessionID1, sessionID2 string) error {
+	if sessionID1 == sessionID2 {
+		return fmt.Errorf("ไม่สามารถเชื่อมคิวกับตัวเอง")
+	}
+	var s1, s2 models.QueueSession
+	if err := config.DB.Where("id = ?", sessionID1).First(&s1).Error; err != nil {
+		return fmt.Errorf("ไม่พบ queue session: %s", sessionID1)
+	}
+	if err := config.DB.Where("id = ?", sessionID2).First(&s2).Error; err != nil {
+		return fmt.Errorf("ไม่พบ queue session: %s", sessionID2)
+	}
+	if s1.ClassroomID != s2.ClassroomID {
+		return fmt.Errorf("ต้องเป็นห้องเรียนเดียวกัน")
+	}
+	if s1.CourseID == s2.CourseID {
+		return fmt.Errorf("ต้องเป็นคนละวิชา")
+	}
+	// Validate same instructor
+	var c1, c2 models.Course
+	if err := config.DB.Select("instructor_id").Where("id = ?", s1.CourseID).First(&c1).Error; err != nil {
+		return fmt.Errorf("ไม่พบข้อมูลวิชา")
+	}
+	if err := config.DB.Select("instructor_id").Where("id = ?", s2.CourseID).First(&c2).Error; err != nil {
+		return fmt.Errorf("ไม่พบข้อมูลวิชา")
+	}
+	if c1.InstructorID == nil || c2.InstructorID == nil || *c1.InstructorID != *c2.InstructorID {
+		return fmt.Errorf("สามารถเชื่อมคิวร่วมได้เฉพาะวิชาที่สอนโดยอาจารย์คนเดียวกันเท่านั้น")
+	}
+	// Already linked together
+	if s1.ConcurrentGroupID != nil && s2.ConcurrentGroupID != nil && *s1.ConcurrentGroupID == *s2.ConcurrentGroupID {
+		return nil
+	}
+	// Reject if either already belongs to a different group
+	if s1.ConcurrentGroupID != nil {
+		return fmt.Errorf("session %s อยู่ในกลุ่มคิวอื่นแล้ว ถอดออกก่อน", sessionID1)
+	}
+	if s2.ConcurrentGroupID != nil {
+		return fmt.Errorf("session %s อยู่ในกลุ่มคิวอื่นแล้ว ถอดออกก่อน", sessionID2)
+	}
+	groupID, err := utils.GenerateNanoID(21)
+	if err != nil {
+		return err
+	}
+	groupPIN, err := generateUniqueGroupPIN()
+	if err != nil {
+		return err
+	}
+	return config.DB.Model(&models.QueueSession{}).
+		Where("id IN ?", []string{sessionID1, sessionID2}).
+		Updates(map[string]interface{}{
+			"concurrent_group_id": groupID,
+			"group_pin_code":      groupPIN,
+		}).Error
+}
+
+// UnlinkConcurrentSession removes sessionID from its concurrent group.
+// If the group would be left with only one member, that member is also unlinked.
+func UnlinkConcurrentSession(sessionID string) error {
+	var s models.QueueSession
+	if err := config.DB.Where("id = ?", sessionID).First(&s).Error; err != nil {
+		return err
+	}
+	if s.ConcurrentGroupID == nil {
+		return nil // already not in a group
+	}
+	groupID := *s.ConcurrentGroupID
+	// Clear entire group (max 2 sessions supported)
+	return config.DB.Model(&models.QueueSession{}).
+		Where("concurrent_group_id = ?", groupID).
+		Updates(map[string]interface{}{
+			"concurrent_group_id": nil,
+			"group_pin_code":      nil,
+		}).Error
 }
 
 // ---------- QueueSession ----------
@@ -408,6 +535,15 @@ func PauseQueueSession(id string) error {
 func CloseQueueSession(id string) error {
 	now := time.Now()
 	return config.DB.Transaction(func(tx *gorm.DB) error {
+		// On close, remove from concurrent group so the partner session runs independently.
+		var closing models.QueueSession
+		if err := tx.Select("concurrent_group_id").Where("id = ?", id).First(&closing).Error; err == nil && closing.ConcurrentGroupID != nil {
+			tx.Model(&models.QueueSession{}).Where("concurrent_group_id = ?", *closing.ConcurrentGroupID).Updates(map[string]interface{}{
+				"concurrent_group_id": nil,
+				"group_pin_code":      nil,
+			})
+		}
+
 		if err := tx.Model(&models.QueueSession{}).Where("id = ?", id).Updates(map[string]interface{}{
 			"status":                 "closed",
 			"end_time":               now,
@@ -756,6 +892,66 @@ func WorkerUpdateStatus(sessionID string, userID uint, status string) error {
 		Updates(map[string]interface{}{"status": status, "last_active_at": now}).Error
 }
 
+// WorkerJoinMirrorGroup ensures a QueueWorker row exists for every session in
+// the same concurrent group as sessionID. Call after WorkerJoin.
+func WorkerJoinMirrorGroup(sessionID string, userID uint, acceptGrading, acceptHelp bool) error {
+	groupIDs, err := GetConcurrentSessionIDs(sessionID)
+	if err != nil || len(groupIDs) <= 1 {
+		return nil
+	}
+	now := time.Now()
+	for _, gid := range groupIDs {
+		if gid == sessionID {
+			continue
+		}
+		var w models.QueueWorker
+		err := config.DB.Where("queue_session_id = ? AND user_id = ?", gid, userID).First(&w).Error
+		if err != nil {
+			// Create mirror row
+			mirror := models.QueueWorker{
+				QueueSessionID:   gid,
+				UserID:           userID,
+				AcceptGrading:    acceptGrading,
+				AcceptHelp:       acceptHelp,
+				Status:           "online",
+				OfferPausedUntil: nil,
+				LastActiveAt:     &now,
+			}
+			if createErr := config.DB.Create(&mirror).Error; createErr != nil {
+				return createErr
+			}
+		} else {
+			w.Status = "online"
+			w.AcceptGrading = acceptGrading
+			w.AcceptHelp = acceptHelp
+			w.OfferPausedUntil = nil
+			w.ConsecutiveOfferTimeouts = 0
+			w.LastActiveAt = &now
+			if saveErr := config.DB.Save(&w).Error; saveErr != nil {
+				return saveErr
+			}
+		}
+	}
+	return nil
+}
+
+// WorkerOfflineMirrorGroup sets offline status for a worker across all sessions in the group.
+func WorkerOfflineMirrorGroup(sessionID string, userID uint, newStatus string) {
+	groupIDs, err := GetConcurrentSessionIDs(sessionID)
+	if err != nil || len(groupIDs) <= 1 {
+		return
+	}
+	now := time.Now()
+	for _, gid := range groupIDs {
+		if gid == sessionID {
+			continue
+		}
+		config.DB.Model(&models.QueueWorker{}).
+			Where("queue_session_id = ? AND user_id = ?", gid, userID).
+			Updates(map[string]interface{}{"status": newStatus, "last_active_at": now})
+	}
+}
+
 func assignBookingOfferToWorker(tx *gorm.DB, booking *models.QueueBooking, worker *models.QueueWorker, now time.Time) error {
 	if booking == nil || worker == nil {
 		return fmt.Errorf("invalid booking or worker")
@@ -967,10 +1163,13 @@ func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.
 			worker.OfferPausedUntil = nil
 		}
 
-		// If worker already has an assigned active booking, return it without reassignment.
+		// Collect all session IDs in the concurrent group (may be just [sessionID])
+		groupSessionIDs, _ := GetConcurrentSessionIDs(sessionID)
+
+		// If worker already has an assigned active booking (in any grouped session), return it.
 		var existing models.QueueBooking
 		existingErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("queue_session_id = ? AND assigned_worker_id = ? AND status IN ?", sessionID, workerID, []string{"waiting", "in_progress"}).
+			Where("queue_session_id IN ? AND assigned_worker_id = ? AND status IN ?", groupSessionIDs, workerID, []string{"waiting", "in_progress"}).
 			Order("updated_at DESC, id DESC").
 			First(&existing).Error
 		if existingErr == nil {
@@ -999,7 +1198,7 @@ func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.
 
 		var waiting models.QueueBooking
 		waitingErr := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
-			Where("queue_session_id = ? AND status = ? AND assigned_worker_id IS NULL AND booking_type IN ?", sessionID, "waiting", bookingTypes).
+			Where("queue_session_id IN ? AND status = ? AND assigned_worker_id IS NULL AND booking_type IN ?", groupSessionIDs, "waiting", bookingTypes).
 			Where("last_offer_worker_id IS NULL OR last_offer_worker_id <> ? OR last_offer_timed_out_at IS NULL OR last_offer_timed_out_at < ?", workerID, now.Add(-queueOfferReassignGraceWindow)).
 			Order("queue_number ASC, created_at ASC, id ASC").
 			First(&waiting).Error
@@ -1010,7 +1209,7 @@ func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.
 			return waitingErr
 		}
 
-		eligibleWorkers, err := countEligibleOnlineWorkers(tx, sessionID, waiting.BookingType, now)
+		eligibleWorkers, err := countEligibleOnlineWorkers(tx, waiting.QueueSessionID, waiting.BookingType, now)
 		if err != nil {
 			return err
 		}
@@ -1022,7 +1221,7 @@ func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.
 		// can claim it on their own next poll. After the grace window elapses,
 		// whoever asks gets it, so a booking can never be stuck indefinitely.
 		if eligibleWorkers > 1 && now.Sub(waiting.CreatedAt) < queueFairnessGraceWindow {
-			minLoad, loadErr := minLoadAmongEligibleWorkers(tx, sessionID, waiting.BookingType, now)
+			minLoad, loadErr := minLoadAmongEligibleWorkers(tx, waiting.QueueSessionID, waiting.BookingType, now)
 			if loadErr != nil {
 				return loadErr
 			}
@@ -1032,10 +1231,24 @@ func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.
 			}
 		}
 
+		// If the booking belongs to a different session in the group, use that session's worker row.
+		assignWorker := &worker
+		if waiting.QueueSessionID != sessionID {
+			var groupWorker models.QueueWorker
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("queue_session_id = ? AND user_id = ?", waiting.QueueSessionID, workerID).
+				First(&groupWorker).Error; err != nil {
+				// Mirror worker row does not exist yet (edge case); use original
+				assignWorker = &worker
+			} else {
+				assignWorker = &groupWorker
+			}
+		}
+
 		if eligibleWorkers == 1 {
-			err = assignBookingDirectToWorker(tx, &waiting, &worker, now)
+			err = assignBookingDirectToWorker(tx, &waiting, assignWorker, now)
 		} else {
-			err = assignBookingOfferToWorker(tx, &waiting, &worker, now)
+			err = assignBookingOfferToWorker(tx, &waiting, assignWorker, now)
 		}
 		if err != nil {
 			return err
