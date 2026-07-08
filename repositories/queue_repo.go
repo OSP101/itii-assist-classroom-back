@@ -592,12 +592,41 @@ func StartQueueSession(id string, classroomID string) error {
 	return nil
 }
 
+// EnsureGroupPinCode generates and persists a group_pin_code for all sessions in the group
+// when one is missing. Safe to call on every projector load — no-op when PIN already exists.
+func EnsureGroupPinCode(sessionID string) (*string, error) {
+	var session models.QueueSession
+	if err := config.DB.Select("concurrent_group_id", "group_pin_code").Where("id = ?", sessionID).First(&session).Error; err != nil {
+		return nil, err
+	}
+	if session.ConcurrentGroupID == nil {
+		return nil, nil
+	}
+	if session.GroupPinCode != nil {
+		return session.GroupPinCode, nil
+	}
+	pin, err := generateUniqueGroupPIN()
+	if err != nil {
+		return nil, err
+	}
+	if err := config.DB.Model(&models.QueueSession{}).
+		Where("concurrent_group_id = ?", *session.ConcurrentGroupID).
+		Update("group_pin_code", pin).Error; err != nil {
+		return nil, err
+	}
+	return &pin, nil
+}
+
 func PauseQueueSession(id string) error {
 	now := time.Now()
-	return config.DB.Model(&models.QueueSession{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"status":                 "paused",
-		"projector_last_seen_at": now,
-	}).Error
+	// Pause all sessions in the same concurrent group together.
+	groupIDs, _ := GetConcurrentSessionIDs(id)
+	return config.DB.Model(&models.QueueSession{}).
+		Where("id IN ?", groupIDs).
+		Updates(map[string]interface{}{
+			"status":                 "paused",
+			"projector_last_seen_at": now,
+		}).Error
 }
 
 func CloseQueueSession(id string) error {
@@ -641,16 +670,23 @@ func forceWorkersOfflineBySession(tx *gorm.DB, sessionID string, now time.Time) 
 }
 
 func ResumeQueueSession(id string) error {
-	newPIN, err := generateUniqueQueuePIN()
-	if err != nil {
-		return err
-	}
 	now := time.Now()
-	return config.DB.Model(&models.QueueSession{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"status":                 "active",
-		"pin_code":               newPIN,
-		"projector_last_seen_at": now,
-	}).Error
+	// Resume all sessions in the same concurrent group together.
+	groupIDs, _ := GetConcurrentSessionIDs(id)
+	for _, gid := range groupIDs {
+		newPIN, err := generateUniqueQueuePIN()
+		if err != nil {
+			return err
+		}
+		if err := config.DB.Model(&models.QueueSession{}).Where("id = ?", gid).Updates(map[string]interface{}{
+			"status":                 "active",
+			"pin_code":               newPIN,
+			"projector_last_seen_at": now,
+		}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func TouchQueueSessionProjectorHeartbeat(id string) (*models.QueueSession, error) {

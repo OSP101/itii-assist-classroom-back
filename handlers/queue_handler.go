@@ -3198,18 +3198,27 @@ func GetQueueDeskStatusesPublicHandler(c fiber.Ctx) error {
 		queueStats[fmt.Sprintf("%s_waiting", row.BookingType)] = row.Count
 	}
 
+	// Auto-generate group PIN on first projector load if sessions are linked but PIN was never created
+	if session.ConcurrentGroupID != nil && session.GroupPinCode == nil {
+		if pin, err := repositories.EnsureGroupPinCode(sessionID); err == nil && pin != nil {
+			session.GroupPinCode = pin
+		}
+	}
+
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data": fiber.Map{
 			"session": fiber.Map{
-				"id":                session.ID,
-				"course_id":         session.CourseID,
-				"title":             session.Title,
-				"pin_code":          session.PinCode,
-				"status":            session.Status,
-				"is_cutoff_enabled": session.IsCutoffEnabled,
-				"cutoff_at":         session.CutoffAt,
-				"cutoff_note":       session.CutoffNote,
+				"id":                  session.ID,
+				"course_id":           session.CourseID,
+				"title":               session.Title,
+				"pin_code":            session.PinCode,
+				"status":              session.Status,
+				"is_cutoff_enabled":   session.IsCutoffEnabled,
+				"cutoff_at":           session.CutoffAt,
+				"cutoff_note":         session.CutoffNote,
+				"concurrent_group_id": session.ConcurrentGroupID,
+				"group_pin_code":      session.GroupPinCode,
 			},
 			"classroom": fiber.Map{
 				"id":       classroom.ID,
