@@ -107,10 +107,11 @@ func (e *ClassroomConflictError) Error() string {
 }
 
 // CheckActiveQueueSessionForClassroom returns a *ClassroomConflictError when
-// any queue session with status='active' exists for classroomID, excluding
-// the session identified by excludeSessionID (the one being started/resumed).
-// Returns nil when the classroom is free.
-func CheckActiveQueueSessionForClassroom(classroomID, excludeSessionID, excludeCourseID string) error {
+// any queue session with status='active' exists for classroomID from the SAME course,
+// excluding the session identified by excludeSessionID (the one being started/resumed).
+// Sessions from different courses (concurrent multi-course queue) are allowed to coexist.
+// Returns nil when no same-course conflict exists.
+func CheckActiveQueueSessionForClassroom(classroomID, excludeSessionID, sameCourseID string) error {
 	if classroomID == "" {
 		return nil
 	}
@@ -130,8 +131,10 @@ func CheckActiveQueueSessionForClassroom(classroomID, excludeSessionID, excludeC
 	if excludeSessionID != "" {
 		q = q.Where("qs.id != ?", excludeSessionID)
 	}
-	if excludeCourseID != "" {
-		q = q.Where("qs.course_id != ?", excludeCourseID)
+	if sameCourseID != "" {
+		// Only flag a conflict if the other active session belongs to the SAME course.
+		// Sessions from different courses may run concurrently (concurrent group feature).
+		q = q.Where("qs.course_id = ?", sameCourseID)
 	}
 	err := q.Limit(1).Scan(&row).Error
 	if err != nil {
