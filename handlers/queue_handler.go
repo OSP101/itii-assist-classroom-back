@@ -441,12 +441,12 @@ func GetConcurrentSessionsPublicHandler(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{"success": true, "data": []interface{}{}})
 	}
 	type sessionRow struct {
-		ID         string  `json:"id"`
-		Title      string  `json:"title"`
-		CourseID   string  `json:"course_id"`
-		CourseName string  `json:"course_name"`
-		Status     string  `json:"status"`
-		PinCode    string  `json:"pin_code"`
+		ID                string  `json:"id"`
+		Title             string  `json:"title"`
+		CourseID          string  `json:"course_id"`
+		CourseName        string  `json:"course_name"`
+		Status            string  `json:"status"`
+		PinCode           string  `json:"pin_code"`
 		ConcurrentGroupID *string `json:"concurrent_group_id,omitempty"`
 	}
 	var rows []sessionRow
