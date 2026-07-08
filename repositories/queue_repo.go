@@ -277,13 +277,23 @@ type QueueSessionCreatorBasic struct {
 	FullName string `json:"full_name"`
 }
 
+type QueueSessionConcurrentPartner struct {
+	ID           string  `json:"id"`
+	Title        string  `json:"title"`
+	CourseID     string  `json:"course_id"`
+	CourseName   string  `json:"course_name"`
+	Status       string  `json:"status"`
+	GroupPinCode *string `json:"group_pin_code,omitempty"`
+}
+
 type QueueSessionListItem struct {
-	QueueSession            models.QueueSession          `json:"-"`
-	Classroom               *QueueSessionClassroomBasic  `json:"classroom"`
-	LinkedAssignment        *QueueSessionAssignmentBasic `json:"linkedAssignment"`
-	LinkedAttendanceSession *QueueSessionAttendanceBasic `json:"linkedAttendanceSession"`
-	Creator                 *QueueSessionCreatorBasic    `json:"creator"`
-	Stats                   QueueSessionStats            `json:"stats"`
+	QueueSession            models.QueueSession            `json:"-"`
+	Classroom               *QueueSessionClassroomBasic    `json:"classroom"`
+	LinkedAssignment        *QueueSessionAssignmentBasic   `json:"linkedAssignment"`
+	LinkedAttendanceSession *QueueSessionAttendanceBasic   `json:"linkedAttendanceSession"`
+	Creator                 *QueueSessionCreatorBasic      `json:"creator"`
+	Stats                   QueueSessionStats              `json:"stats"`
+	ConcurrentPartner       *QueueSessionConcurrentPartner `json:"concurrent_partner,omitempty"`
 }
 
 type QueueBookingSubItemScoreInput struct {
@@ -432,6 +442,47 @@ func GetQueueSessions(courseID string, status string) ([]QueueSessionListItem, e
 		statsMap[row.QueueSessionID] = stats
 	}
 
+	// Build concurrent partner map: group_id → partner session info
+	concurrentPartnerMap := map[string]*QueueSessionConcurrentPartner{}
+	type partnerRow struct {
+		ConcurrentGroupID string  `gorm:"column:concurrent_group_id"`
+		ID                string  `gorm:"column:id"`
+		Title             string  `gorm:"column:title"`
+		CourseID          string  `gorm:"column:course_id"`
+		CourseName        string  `gorm:"column:course_name"`
+		Status            string  `gorm:"column:status"`
+		GroupPinCode      *string `gorm:"column:group_pin_code"`
+	}
+	groupIDsMap := map[string]struct{}{}
+	for _, s := range sessions {
+		if s.ConcurrentGroupID != nil {
+			groupIDsMap[*s.ConcurrentGroupID] = struct{}{}
+		}
+	}
+	if len(groupIDsMap) > 0 {
+		groupIDs := make([]string, 0, len(groupIDsMap))
+		for gid := range groupIDsMap {
+			groupIDs = append(groupIDs, gid)
+		}
+		var partnerRows []partnerRow
+		config.DB.Table("queue_sessions qs").
+			Select("qs.concurrent_group_id, qs.id, qs.title, qs.course_id, c.name AS course_name, qs.status, qs.group_pin_code").
+			Joins("JOIN courses c ON c.id = qs.course_id").
+			Where("qs.concurrent_group_id IN ? AND qs.id NOT IN ?", groupIDs, sessionIDs).
+			Scan(&partnerRows)
+		for _, row := range partnerRows {
+			p := row
+			concurrentPartnerMap[p.ConcurrentGroupID] = &QueueSessionConcurrentPartner{
+				ID:           p.ID,
+				Title:        p.Title,
+				CourseID:     p.CourseID,
+				CourseName:   p.CourseName,
+				Status:       p.Status,
+				GroupPinCode: p.GroupPinCode,
+			}
+		}
+	}
+
 	result := make([]QueueSessionListItem, len(sessions))
 	for i, session := range sessions {
 		var linkedAssignment *QueueSessionAssignmentBasic
@@ -446,6 +497,10 @@ func GetQueueSessions(courseID string, status string) ([]QueueSessionListItem, e
 		if session.CreatedBy != nil {
 			creator = creatorMap[*session.CreatedBy]
 		}
+		var concurrentPartner *QueueSessionConcurrentPartner
+		if session.ConcurrentGroupID != nil {
+			concurrentPartner = concurrentPartnerMap[*session.ConcurrentGroupID]
+		}
 		result[i] = QueueSessionListItem{
 			QueueSession:            session,
 			Classroom:               classroomMap[session.ClassroomID],
@@ -453,6 +508,7 @@ func GetQueueSessions(courseID string, status string) ([]QueueSessionListItem, e
 			LinkedAttendanceSession: linkedAttendance,
 			Creator:                 creator,
 			Stats:                   statsMap[session.ID],
+			ConcurrentPartner:       concurrentPartner,
 		}
 	}
 
