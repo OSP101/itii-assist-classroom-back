@@ -46,24 +46,37 @@ func GetVAPIDPublicKey() string {
 	return publicKey
 }
 
+// WebPushDeliveryResult reports how many of a user's subscriptions the push
+// service actually accepted. Callers (e.g. the test-push endpoint) use it to
+// tell the TA "we tried N devices, N-1 succeeded, one is stale" — otherwise
+// TAs have no way to tell that their old subscription is silently 410 Gone.
+type WebPushDeliveryResult struct {
+	Attempted int
+	Delivered int
+	Stale     int
+}
+
 // SendWebPushToUser delivers a Web Push notification (via webpush-go, VAPID —
 // no external push provider account needed) to every active subscription a
 // user has registered, e.g. across multiple devices/browsers.
-func SendWebPushToUser(userID uint, title, body string, data map[string]string, requireInteraction bool) {
+func SendWebPushToUser(userID uint, title, body string, data map[string]string, requireInteraction bool) WebPushDeliveryResult {
+	var result WebPushDeliveryResult
+
 	publicKey, privateKey, subject := getVAPIDKeys()
 	if publicKey == "" || privateKey == "" {
 		slog.Warn("webpush: VAPID keys are not configured; skipping web push", "user_id", userID)
-		return
+		return result
 	}
 
 	subs, err := repositories.GetActivePushSubscriptionsByUserID(userID)
 	if err != nil {
 		slog.Warn("webpush: failed to load push subscriptions", "user_id", userID, "error", err)
-		return
+		return result
 	}
 	if len(subs) == 0 {
-		return
+		return result
 	}
+	result.Attempted = len(subs)
 
 	payload := webPushPayload{
 		Title:              title,
@@ -78,7 +91,7 @@ func SendWebPushToUser(userID uint, title, body string, data map[string]string, 
 	message, err := json.Marshal(payload)
 	if err != nil {
 		slog.Warn("webpush: failed to encode payload", "user_id", userID, "error", err)
-		return
+		return result
 	}
 
 	options := &webpush.Options{
@@ -107,6 +120,7 @@ func SendWebPushToUser(userID uint, title, body string, data map[string]string, 
 			defer resp.Body.Close()
 			if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
 				// Subscription expired or was revoked by the browser/push service.
+				result.Stale++
 				if err := repositories.DeactivatePushSubscriptionByEndpoint(sub.Endpoint); err != nil {
 					slog.Warn("webpush: failed to deactivate stale subscription", "endpoint", sub.Endpoint, "error", err)
 				}
@@ -114,7 +128,10 @@ func SendWebPushToUser(userID uint, title, body string, data map[string]string, 
 			}
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 				slog.Warn("webpush: push service returned error status", "user_id", userID, "endpoint", sub.Endpoint, "status", resp.StatusCode)
+				return
 			}
+			result.Delivered++
 		}()
 	}
+	return result
 }

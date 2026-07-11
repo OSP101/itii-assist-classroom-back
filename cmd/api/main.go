@@ -123,6 +123,7 @@ func main() {
 	// vapid-public-key fetch, no subscription ever created).
 	if strings.TrimSpace(os.Getenv("VAPID_PUBLIC_KEY")) == "" || strings.TrimSpace(os.Getenv("VAPID_PRIVATE_KEY")) == "" {
 		log.Println("⚠️  Warning: VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY not set — Web Push notifications are DISABLED")
+		log.Println("   Generate a key pair with:  go run ./cmd/vapid-gen  then paste the output into .env")
 	} else {
 		log.Println("✅ Web Push (VAPID) keys configured")
 	}

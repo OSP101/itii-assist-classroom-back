@@ -2,6 +2,7 @@ package routes
 
 import (
 	"itii-assist/handlers"
+	"itii-assist/middlewares"
 
 	"github.com/gofiber/fiber/v3"
 )
@@ -17,4 +18,8 @@ func SetupPushRoutes(api *fiber.App) {
 	push.Get("/vapid-public-key", handlers.GetVapidPublicKeyHandler)
 	push.Post("/register", handlers.RegisterPushHandler)
 	push.Post("/unsubscribe", handlers.UnsubscribePushHandler)
+
+	// Diagnostic push — signed-in users can trigger a self-test to verify
+	// their device subscription actually receives background notifications.
+	push.Post("/test", middlewares.Protected(), handlers.SendTestPushHandler)
 }

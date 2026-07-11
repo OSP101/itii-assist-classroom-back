@@ -104,6 +104,41 @@ func RegisterPushHandler(c fiber.Ctx) error {
 }
 
 // =============================================================================
+// POST /api/push/test (authenticated — send a diagnostic push to caller)
+// =============================================================================
+// Lets a signed-in worker verify their push subscription end-to-end before an
+// actual booking arrives. Response includes how many of the user's registered
+// devices the push service accepted so the TA can tell "one browser works,
+// old iPad is stale" without having to guess.
+func SendTestPushHandler(c fiber.Ctx) error {
+	userID, ok := c.Locals("user_id").(uint)
+	if !ok || userID == 0 {
+		return c.Status(401).JSON(fiber.Map{"success": false, "error": fiber.Map{"message": "unauthorized"}})
+	}
+
+	result := services.SendWebPushToUser(userID, "ทดสอบแจ้งเตือน", "หากคุณเห็นข้อความนี้ ระบบพร้อมส่งงานให้คุณแล้ว", map[string]string{
+		"type": "test",
+		"url":  strings.TrimSpace(c.Get("Referer")),
+	}, false)
+
+	if result.Attempted == 0 {
+		return c.Status(404).JSON(fiber.Map{
+			"success": false,
+			"error":   fiber.Map{"message": "ยังไม่มีอุปกรณ์ที่ลงทะเบียนรับการแจ้งเตือน กรุณากดเปิดใช้การแจ้งเตือนก่อน"},
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data": fiber.Map{
+			"attempted": result.Attempted,
+			"delivered": result.Delivered,
+			"stale":     result.Stale,
+		},
+	})
+}
+
+// =============================================================================
 // POST /api/push/unsubscribe (public — a device may unregister itself)
 // =============================================================================
 func UnsubscribePushHandler(c fiber.Ctx) error {
