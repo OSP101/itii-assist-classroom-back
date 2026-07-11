@@ -555,13 +555,13 @@ func (h *QueueHandler) CloseQueueSession(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Session closed but failed to reload session"})
 	}
-	realtime.EmitToQueue(updatedSession.ID, "session-status-changed", fiber.Map{
+	emitToQueueWithGroup(updatedSession.ID, "session-status-changed", fiber.Map{
 		"status":    updatedSession.Status,
 		"session":   updatedSession,
 		"timestamp": time.Now().UnixMilli(),
 	})
 	if updatedSession.Status == "closed" {
-		realtime.EmitToQueue(updatedSession.ID, "worker-status-updated", fiber.Map{
+		emitToQueueWithGroup(updatedSession.ID, "worker-status-updated", fiber.Map{
 			"scope":     "all",
 			"status":    "offline",
 			"reason":    "session_closed",
@@ -1173,7 +1173,7 @@ func WorkerJoinHandler(c fiber.Ctx) error {
 	}
 
 	logCourseActivity(c, session.CourseID, userID, "join_queue_worker", "queue", "queue_session", session.ID, session.Title, fiber.Map{"accept_grading": input.AcceptGrading, "accept_help": input.AcceptHelp})
-	realtime.EmitToQueue(sessionID, "worker-joined", fiber.Map{"worker": worker, "timestamp": time.Now().UnixMilli()})
+	emitToQueueWithGroup(sessionID, "worker-joined", fiber.Map{"worker": worker, "timestamp": time.Now().UnixMilli()})
 	go emitQueueReportSnapshot(sessionID)
 	return c.JSON(fiber.Map{"success": true, "data": worker, "assignedBooking": assignedBookingPayload})
 }
@@ -1223,7 +1223,7 @@ func WorkerLeaveHandler(c fiber.Ctx) error {
 	}
 
 	logCourseActivity(c, session.CourseID, userID, "leave_queue_worker", "queue", "queue_session", session.ID, session.Title, fiber.Map{"status": newStatus})
-	realtime.EmitToQueue(sessionID, "worker-left", fiber.Map{"worker_id": userID, "status": newStatus, "timestamp": time.Now().UnixMilli()})
+	emitToQueueWithGroup(sessionID, "worker-left", fiber.Map{"worker_id": userID, "status": newStatus, "timestamp": time.Now().UnixMilli()})
 	go emitQueueReportSnapshot(sessionID)
 
 	// Mirror offline/paused status to all sessions in the concurrent group.
@@ -1423,10 +1423,11 @@ func CompleteQueueBookingCompatHandler(c fiber.Ctx) error {
 
 	if session, sessionErr := repositories.GetQueueSessionByID(booking.QueueSessionID); sessionErr == nil {
 		logCourseActivity(c, session.CourseID, workerID, "complete_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"booking_type": booking.BookingType, "score": input.Score})
+		logCrossCourseGradingIfApplicable(c, session, booking.ID, workerID, fiber.Map{"booking_type": booking.BookingType, "score": input.Score})
 	}
 	emitQueueBookingChanged(booking.QueueSessionID, "booking-completed", booking)
 	realtime.EmitToBooking(booking.ID, "your-booking-completed", fiber.Map{"booking": booking, "timestamp": time.Now().UnixMilli()})
-	realtime.EmitToQueue(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
+	emitToQueueWithGroup(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
 	nextBooking, assignErr := tryAssignNextBookingAndEmit(booking.QueueSessionID, workerID)
 	if assignErr != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to complete booking"})
@@ -1478,7 +1479,7 @@ func SkipQueueBookingCompatHandler(c fiber.Ctx) error {
 		logCourseActivity(c, session.CourseID, workerID, "skip_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"booking_type": booking.BookingType, "reason": input.Reason})
 	}
 	emitQueueBookingChanged(booking.QueueSessionID, "booking-skipped", booking)
-	realtime.EmitToQueue(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
+	emitToQueueWithGroup(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
 	nextBooking, assignErr := tryAssignNextBookingAndEmit(booking.QueueSessionID, workerID)
 	if assignErr != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to skip booking"})
@@ -2943,7 +2944,7 @@ func CancelQueueBookingPublicHandler(c fiber.Ctx) error {
 	booking.Status = "cancelled"
 	booking.CompletedAt = &now
 	emitQueueBookingChanged(booking.QueueSessionID, "booking-cancelled", booking)
-	realtime.EmitToQueue(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
+	emitToQueueWithGroup(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
 
 	return c.JSON(fiber.Map{
 		"success": true,
@@ -3229,6 +3230,323 @@ func GetQueueDeskStatusesPublicHandler(c fiber.Ctx) error {
 			"queueStats": queueStats,
 		},
 	})
+}
+
+// GetGroupDeskStatusesPublicHandler returns the aggregated projector view for
+// every queue session in a concurrent group. It powers the shared-room
+// projector so both linked courses' desks + bookings render on a single screen.
+// Public endpoint (no auth) — analogous to GetQueueDeskStatusesPublicHandler.
+//
+// Route: GET /api/queue/groups/:groupId/desk-statuses
+func GetGroupDeskStatusesPublicHandler(c fiber.Ctx) error {
+	groupID := strings.TrimSpace(c.Params("groupId"))
+	if groupID == "" {
+		return queueLegacyError(c, 400, "Group ID is required")
+	}
+
+	sessions, err := repositories.GetSessionsByGroupID(groupID)
+	if err != nil {
+		return queueLegacyError(c, 500, err.Error())
+	}
+	if len(sessions) == 0 {
+		return queueLegacyError(c, 404, "ไม่พบกลุ่มคิว")
+	}
+
+	classroomID := sessions[0].ClassroomID
+	classroom, err := loadQueueClassroom(classroomID)
+	if err != nil {
+		return queueLegacyError(c, 500, err.Error())
+	}
+
+	courseIDs := make([]string, 0, len(sessions))
+	seenCourses := map[string]struct{}{}
+	for _, s := range sessions {
+		if _, ok := seenCourses[s.CourseID]; ok {
+			continue
+		}
+		seenCourses[s.CourseID] = struct{}{}
+		courseIDs = append(courseIDs, s.CourseID)
+	}
+
+	var courses []models.Course
+	if err := config.DB.Select("id", "code", "name").Where("id IN ?", courseIDs).Find(&courses).Error; err != nil {
+		return queueLegacyError(c, 500, err.Error())
+	}
+	courseMap := map[string]models.Course{}
+	for _, course := range courses {
+		courseMap[course.ID] = course
+	}
+
+	groupPinCode := ""
+	for _, s := range sessions {
+		if s.GroupPinCode != nil && *s.GroupPinCode != "" {
+			groupPinCode = *s.GroupPinCode
+			break
+		}
+	}
+	if groupPinCode == "" && len(sessions) > 0 {
+		if pin, err := repositories.EnsureGroupPinCode(sessions[0].ID); err == nil && pin != nil {
+			groupPinCode = *pin
+		}
+	}
+
+	sessionViews := make([]fiber.Map, 0, len(sessions))
+	for _, session := range sessions {
+		view, err := buildQueueDeskStatusesSessionView(&session)
+		if err != nil {
+			return queueLegacyError(c, 500, err.Error())
+		}
+		course := courseMap[session.CourseID]
+		view["course"] = fiber.Map{
+			"id":   course.ID,
+			"code": course.Code,
+			"name": course.Name,
+		}
+		sessionViews = append(sessionViews, view)
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data": fiber.Map{
+			"group_id":       groupID,
+			"group_pin_code": groupPinCode,
+			"classroom": fiber.Map{
+				"id":       classroom.ID,
+				"name":     classroom.Name,
+				"building": classroom.Building,
+			},
+			"sessions": sessionViews,
+		},
+	})
+}
+
+// buildQueueDeskStatusesSessionView returns the per-session portion of a
+// projector view (session summary, desks-with-status, queueStats). Shared by
+// GetGroupDeskStatusesPublicHandler which composes one entry per linked session.
+func buildQueueDeskStatusesSessionView(session *models.QueueSession) (fiber.Map, error) {
+	if session == nil {
+		return nil, fmt.Errorf("nil session")
+	}
+	sessionID := session.ID
+
+	var desks []models.Desk
+	if err := config.DB.Where("classroom_id = ? AND (is_enabled = ? OR type = ?)", session.ClassroomID, true, "teacher").Order("number ASC").Find(&desks).Error; err != nil {
+		return nil, err
+	}
+
+	var deskStatuses []models.QueueDeskStatus
+	if err := config.DB.Where("queue_session_id = ?", sessionID).Find(&deskStatuses).Error; err != nil {
+		return nil, err
+	}
+
+	var activeBookings []models.QueueBooking
+	if err := config.DB.Where("queue_session_id = ? AND status IN ? AND desk_id <> ''", sessionID, []string{"waiting", "in_progress"}).Order("created_at DESC").Find(&activeBookings).Error; err != nil {
+		return nil, err
+	}
+
+	var completedGradingBookings []models.QueueBooking
+	if err := config.DB.Where("queue_session_id = ? AND booking_type = ? AND status = ? AND desk_id <> ''", sessionID, "grading", "completed").
+		Order("completed_at DESC NULLS LAST, updated_at DESC, id DESC").
+		Find(&completedGradingBookings).Error; err != nil {
+		return nil, err
+	}
+
+	studentIDs := make([]uint, 0)
+	studentSet := map[uint]struct{}{}
+	appendStudent := func(booking models.QueueBooking) {
+		if _, ok := studentSet[booking.StudentID]; ok {
+			return
+		}
+		studentSet[booking.StudentID] = struct{}{}
+		studentIDs = append(studentIDs, booking.StudentID)
+	}
+	for _, b := range activeBookings {
+		appendStudent(b)
+	}
+	for _, b := range completedGradingBookings {
+		appendStudent(b)
+	}
+	studentMap := map[uint]models.Student{}
+	if len(studentIDs) > 0 {
+		var students []models.Student
+		if err := config.DB.Where("id IN ?", studentIDs).Find(&students).Error; err != nil {
+			return nil, err
+		}
+		for _, student := range students {
+			studentMap[student.ID] = student
+		}
+	}
+
+	workerIDs := make([]uint, 0)
+	workerSet := map[uint]struct{}{}
+	appendWorker := func(booking models.QueueBooking) {
+		if booking.AssignedWorkerID == nil {
+			return
+		}
+		if _, ok := workerSet[*booking.AssignedWorkerID]; ok {
+			return
+		}
+		workerSet[*booking.AssignedWorkerID] = struct{}{}
+		workerIDs = append(workerIDs, *booking.AssignedWorkerID)
+	}
+	for _, b := range activeBookings {
+		appendWorker(b)
+	}
+	for _, b := range completedGradingBookings {
+		appendWorker(b)
+	}
+	workerMap := map[uint]models.User{}
+	if len(workerIDs) > 0 {
+		var workers []models.User
+		if err := config.DB.Select("id", "full_name", "avatar").Where("id IN ?", workerIDs).Find(&workers).Error; err != nil {
+			return nil, err
+		}
+		for _, w := range workers {
+			workerMap[w.ID] = w
+		}
+	}
+
+	selectedDeskBookings := map[string]models.QueueBooking{}
+	helpDeskBookings := map[string]models.QueueBooking{}
+	gradingDeskBookings := map[string]models.QueueBooking{}
+	completedDeskBookings := map[string]models.QueueBooking{}
+	for _, booking := range activeBookings {
+		if current, exists := selectedDeskBookings[booking.DeskID]; !exists || shouldReplaceDeskBooking(current, booking) {
+			selectedDeskBookings[booking.DeskID] = booking
+		}
+		switch booking.BookingType {
+		case "help":
+			if current, exists := helpDeskBookings[booking.DeskID]; !exists || shouldReplaceDeskBooking(current, booking) {
+				helpDeskBookings[booking.DeskID] = booking
+			}
+		case "grading":
+			if current, exists := gradingDeskBookings[booking.DeskID]; !exists || shouldReplaceDeskBooking(current, booking) {
+				gradingDeskBookings[booking.DeskID] = booking
+			}
+		}
+	}
+	for _, booking := range completedGradingBookings {
+		if _, exists := completedDeskBookings[booking.DeskID]; !exists {
+			completedDeskBookings[booking.DeskID] = booking
+		}
+	}
+
+	bookingMap := map[string]fiber.Map{}
+	buildBookingEntry := func(booking models.QueueBooking) fiber.Map {
+		student := studentMap[booking.StudentID]
+		entry := fiber.Map{
+			"id":           booking.ID,
+			"queue_number": booking.QueueNumber,
+			"booking_type": booking.BookingType,
+			"status":       booking.Status,
+			"student_name": student.FullName,
+			"student_code": student.StudentID,
+		}
+		if booking.AssignedWorkerID != nil {
+			if worker, ok := workerMap[*booking.AssignedWorkerID]; ok {
+				entry["assigned_worker"] = fiber.Map{
+					"id":        worker.ID,
+					"full_name": worker.FullName,
+					"avatar":    worker.Avatar,
+				}
+			}
+		}
+		return entry
+	}
+	for deskID, booking := range selectedDeskBookings {
+		bookingMap[deskID] = buildBookingEntry(booking)
+	}
+	for deskID, booking := range completedDeskBookings {
+		if _, exists := bookingMap[deskID]; exists {
+			continue
+		}
+		bookingMap[deskID] = buildBookingEntry(booking)
+	}
+
+	statusMap := map[string]models.QueueDeskStatus{}
+	for _, ds := range deskStatuses {
+		statusMap[ds.DeskID] = ds
+	}
+
+	desksWithStatus := make([]fiber.Map, 0, len(desks))
+	for _, desk := range desks {
+		status := fiber.Map{"grading_status": "not_started", "help_status": "none"}
+		if deskStatus, ok := statusMap[desk.ID]; ok {
+			status = fiber.Map{
+				"id":                 deskStatus.ID,
+				"queue_session_id":   deskStatus.QueueSessionID,
+				"desk_id":            deskStatus.DeskID,
+				"grading_status":     deskStatus.GradingStatus,
+				"grading_booking_id": deskStatus.GradingBookingID,
+				"help_status":        deskStatus.HelpStatus,
+				"help_booking_id":    deskStatus.HelpBookingID,
+				"updated_at":         deskStatus.UpdatedAt,
+			}
+			if deskStatus.GradingStatus == "completed" {
+				if completedBooking, ok := completedDeskBookings[desk.ID]; ok {
+					status["grading_booking_id"] = completedBooking.ID
+				} else {
+					status["grading_status"] = "not_started"
+					status["grading_booking_id"] = nil
+				}
+			}
+		}
+		if helpBooking, ok := helpDeskBookings[desk.ID]; ok {
+			status["help_status"] = helpBooking.Status
+			status["help_booking_id"] = helpBooking.ID
+		}
+		if gradingBooking, ok := gradingDeskBookings[desk.ID]; ok {
+			status["grading_status"] = gradingBooking.Status
+			status["grading_booking_id"] = gradingBooking.ID
+		}
+		desksWithStatus = append(desksWithStatus, fiber.Map{
+			"id":           desk.ID,
+			"classroom_id": desk.ClassroomID,
+			"number":       desk.Number,
+			"x":            desk.X,
+			"y":            desk.Y,
+			"type":         desk.Type,
+			"is_enabled":   desk.IsEnabled,
+			"created_at":   desk.CreatedAt,
+			"updated_at":   desk.UpdatedAt,
+			"status":       status,
+			"booking":      bookingMap[desk.ID],
+		})
+	}
+
+	var queueCounts []struct {
+		BookingType string
+		Count       int64
+	}
+	if err := config.DB.Model(&models.QueueBooking{}).
+		Select("booking_type, COUNT(id) AS count").
+		Where("queue_session_id = ? AND status = ?", sessionID, "waiting").
+		Group("booking_type").
+		Scan(&queueCounts).Error; err != nil {
+		return nil, err
+	}
+
+	queueStats := fiber.Map{"grading_waiting": int64(0), "help_waiting": int64(0)}
+	for _, row := range queueCounts {
+		queueStats[fmt.Sprintf("%s_waiting", row.BookingType)] = row.Count
+	}
+
+	return fiber.Map{
+		"session": fiber.Map{
+			"id":                  session.ID,
+			"course_id":           session.CourseID,
+			"title":               session.Title,
+			"pin_code":            session.PinCode,
+			"status":              session.Status,
+			"is_cutoff_enabled":   session.IsCutoffEnabled,
+			"cutoff_at":           session.CutoffAt,
+			"cutoff_note":         session.CutoffNote,
+			"concurrent_group_id": session.ConcurrentGroupID,
+			"group_pin_code":      session.GroupPinCode,
+		},
+		"desks":      desksWithStatus,
+		"queueStats": queueStats,
+	}, nil
 }
 
 func buildQueueDeskStatusesSnapshotData(sessionID string) (fiber.Map, error) {
@@ -3543,9 +3861,9 @@ func UpdateQueueSessionStatusPublicHandler(c fiber.Ctx) error {
 	if actorID, ok := queueOptionalActorID(c); ok {
 		logCourseActivity(c, updatedSession.CourseID, actorID, "update_queue_session_status", "queue", "queue_session", updatedSession.ID, updatedSession.Title, fiber.Map{"status": updatedSession.Status, "source": "projector"})
 	}
-	realtime.EmitToQueue(updatedSession.ID, "session-status-changed", fiber.Map{"status": updatedSession.Status, "session": updatedSession, "timestamp": time.Now().UnixMilli()})
+	emitToQueueWithGroup(updatedSession.ID, "session-status-changed", fiber.Map{"status": updatedSession.Status, "session": updatedSession, "timestamp": time.Now().UnixMilli()})
 	if updatedSession.Status == "closed" {
-		realtime.EmitToQueue(updatedSession.ID, "worker-status-updated", fiber.Map{
+		emitToQueueWithGroup(updatedSession.ID, "worker-status-updated", fiber.Map{
 			"scope":     "all",
 			"status":    "offline",
 			"reason":    "session_closed",
@@ -3601,7 +3919,7 @@ func UpdateQueueSessionCutoffPublicHandler(c fiber.Ctx) error {
 		return queueLegacyError(c, 500, err.Error())
 	}
 
-	realtime.EmitToQueue(updatedSession.ID, "session-cutoff-changed", fiber.Map{
+	emitToQueueWithGroup(updatedSession.ID, "session-cutoff-changed", fiber.Map{
 		"session_id":        updatedSession.ID,
 		"is_cutoff_enabled": updatedSession.IsCutoffEnabled,
 		"cutoff_at":         updatedSession.CutoffAt,
@@ -3657,9 +3975,9 @@ func UpdateQueueSessionStatusCompatHandler(c fiber.Ctx) error {
 	if err != nil {
 		return queueLegacyError(c, 500, err.Error())
 	}
-	realtime.EmitToQueue(updatedSession.ID, "session-status-changed", fiber.Map{"status": updatedSession.Status, "session": updatedSession, "timestamp": time.Now().UnixMilli()})
+	emitToQueueWithGroup(updatedSession.ID, "session-status-changed", fiber.Map{"status": updatedSession.Status, "session": updatedSession, "timestamp": time.Now().UnixMilli()})
 	if updatedSession.Status == "closed" {
-		realtime.EmitToQueue(updatedSession.ID, "worker-status-updated", fiber.Map{
+		emitToQueueWithGroup(updatedSession.ID, "worker-status-updated", fiber.Map{
 			"scope":     "all",
 			"status":    "offline",
 			"reason":    "session_closed",
@@ -3705,9 +4023,130 @@ func emitQueueBookingChanged(sessionID string, event string, booking *models.Que
 	}
 	payload := fiber.Map{"booking": booking, "booking_id": booking.ID, "timestamp": time.Now().UnixMilli()}
 	realtime.EmitToQueue(sessionID, event, payload)
+	if groupID := lookupQueueGroupID(sessionID); groupID != "" {
+		realtime.EmitToQueueGroup(groupID, event, payload)
+	}
 	realtime.EmitToBooking(booking.ID, event, payload)
 	realtime.EmitDataUpdate("queue", "update", booking.ID, payload)
 	go emitQueueReportSnapshot(sessionID)
+}
+
+// lookupQueueGroupID returns the concurrent_group_id for a queue session, or
+// empty string when the session is stand-alone. Errors are swallowed because
+// this is a realtime broadcast path: missing a group emit degrades the shared
+// projector experience but never blocks the main HTTP flow.
+func lookupQueueGroupID(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	groupID, err := repositories.GetConcurrentGroupIDBySessionID(sessionID)
+	if err != nil {
+		return ""
+	}
+	return groupID
+}
+
+// autoUnlinkQueueGroupsForCourse walks every non-closed queue session belonging
+// to courseID and unlinks it from its concurrent group. Emits `session-unlinked`
+// with reason=course_closed on both the local session's room and the group's
+// room so projectors and worker pages can react and refresh. Intended to run
+// once when a course is deactivated so a shared-room queue never sits half-
+// broken (partner session still expects a live counterpart).
+func autoUnlinkQueueGroupsForCourse(courseID string) {
+	if courseID == "" {
+		return
+	}
+	var sessions []models.QueueSession
+	if err := config.DB.
+		Where("course_id = ? AND concurrent_group_id IS NOT NULL AND status <> ?", courseID, "closed").
+		Find(&sessions).Error; err != nil {
+		return
+	}
+	for _, session := range sessions {
+		groupID := ""
+		if session.ConcurrentGroupID != nil {
+			groupID = *session.ConcurrentGroupID
+		}
+		partnerSessionIDs, _ := repositories.GetConcurrentSessionIDs(session.ID)
+
+		if err := repositories.UnlinkConcurrentSession(session.ID); err != nil {
+			log.Printf("⚠️  autoUnlinkQueueGroupsForCourse: unlink failed session=%s course=%s err=%v", session.ID, courseID, err)
+			continue
+		}
+		log.Printf("🔓 autoUnlinkQueueGroupsForCourse: unlinked session=%s (course=%s) group=%s", session.ID, courseID, groupID)
+
+		payload := fiber.Map{
+			"session_id": session.ID,
+			"course_id":  courseID,
+			"group_id":   groupID,
+			"reason":     "course_closed",
+			"timestamp":  time.Now().UnixMilli(),
+		}
+		realtime.EmitToQueue(session.ID, "session-unlinked", payload)
+		if groupID != "" {
+			realtime.EmitToQueueGroup(groupID, "session-unlinked", payload)
+		}
+		for _, partnerID := range partnerSessionIDs {
+			if partnerID == session.ID {
+				continue
+			}
+			realtime.EmitToQueue(partnerID, "session-unlinked", payload)
+		}
+	}
+}
+
+// logCrossCourseGradingIfApplicable writes an extra course_activity_log entry
+// on the worker's *own* course when they grade a booking whose session
+// belongs to a partner course inside the same concurrent group. The primary
+// log (on the booking session's course) is written unconditionally by the
+// caller; this adds visibility on the other side of a shared-room grading so
+// each course owner can audit who touched their students' scores.
+func logCrossCourseGradingIfApplicable(c fiber.Ctx, sessionOfBooking *models.QueueSession, bookingID uint, workerID uint, detail fiber.Map) {
+	if sessionOfBooking == nil || sessionOfBooking.ConcurrentGroupID == nil || *sessionOfBooking.ConcurrentGroupID == "" {
+		return
+	}
+
+	groupCourseIDs, err := repositories.GetConcurrentGroupCourseIDs(sessionOfBooking.ID)
+	if err != nil {
+		return
+	}
+
+	for _, courseID := range groupCourseIDs {
+		if courseID == sessionOfBooking.CourseID {
+			continue
+		}
+		_, allowed, err := repositories.GetCourseAccessState(courseID, workerID, "instructor", "ta")
+		if err != nil || !allowed {
+			continue
+		}
+
+		crossDetail := fiber.Map{
+			"booking_id":              bookingID,
+			"origin_course_id":        sessionOfBooking.CourseID,
+			"origin_queue_session_id": sessionOfBooking.ID,
+			"origin_session_title":    sessionOfBooking.Title,
+			"note":                    "cross-course grading in shared queue",
+		}
+		if detail != nil {
+			for k, v := range detail {
+				if _, exists := crossDetail[k]; !exists {
+					crossDetail[k] = v
+				}
+			}
+		}
+		logCourseActivity(c, courseID, workerID, "complete_queue_booking_cross_course", "queue", "queue_booking", bookingID, sessionOfBooking.Title, crossDetail)
+	}
+}
+
+// emitToQueueWithGroup emits an event to both the session-scoped room and the
+// concurrent group room (when the session is linked). Use this instead of
+// realtime.EmitToQueue for events that a shared projector or partner worker
+// must see (session/position/cutoff changes, worker status changes).
+func emitToQueueWithGroup(sessionID string, event string, data interface{}) {
+	realtime.EmitToQueue(sessionID, event, data)
+	if groupID := lookupQueueGroupID(sessionID); groupID != "" {
+		realtime.EmitToQueueGroup(groupID, event, data)
+	}
 }
 
 func emitQueueReportSnapshot(sessionID string) {
@@ -3745,13 +4184,13 @@ func emitQueueActionChanged(booking *models.QueueBooking, action string) {
 	case "complete":
 		emitQueueBookingChanged(booking.QueueSessionID, "booking-completed", booking)
 		realtime.EmitToBooking(booking.ID, "your-booking-completed", fiber.Map{"booking": booking, "timestamp": time.Now().UnixMilli()})
-		realtime.EmitToQueue(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
+		emitToQueueWithGroup(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
 	case "no_show":
 		emitQueueBookingChanged(booking.QueueSessionID, "booking-skipped", booking)
-		realtime.EmitToQueue(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
+		emitToQueueWithGroup(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
 	case "reject":
 		emitQueueBookingChanged(booking.QueueSessionID, "booking-requeued", booking)
-		realtime.EmitToQueue(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
+		emitToQueueWithGroup(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
 	default:
 		emitQueueBookingChanged(booking.QueueSessionID, "booking-assigned", booking)
 	}
@@ -3771,7 +4210,7 @@ func tryAssignNextBookingAndEmit(sessionID string, workerID uint) (*models.Queue
 		if payloadErr != nil {
 			return nil, payloadErr
 		}
-		realtime.EmitToQueue(sessionID, "booking-assigned", fiber.Map{"booking": bookingPayload, "worker_id": workerID, "timestamp": time.Now().UnixMilli()})
+		emitToQueueWithGroup(sessionID, "booking-assigned", fiber.Map{"booking": bookingPayload, "worker_id": workerID, "timestamp": time.Now().UnixMilli()})
 		realtime.EmitToBooking(nextBooking.ID, "booking-assigned", fiber.Map{"booking": bookingPayload, "timestamp": time.Now().UnixMilli()})
 		realtime.EmitToWorker(workerID, "new-task", fiber.Map{"booking": bookingPayload, "timestamp": time.Now().UnixMilli()})
 		go services.SendQueueWorkerAssignedPush(sessionID, workerID, nextBooking)
@@ -3821,7 +4260,7 @@ func buildWorkerBookingPayload(booking *models.QueueBooking) (fiber.Map, error) 
 		return nil, err
 	}
 
-	return fiber.Map{
+	payload := fiber.Map{
 		"id":                 booking.ID,
 		"queue_session_id":   booking.QueueSessionID,
 		"student_id":         booking.StudentID,
@@ -3847,7 +4286,38 @@ func buildWorkerBookingPayload(booking *models.QueueBooking) (fiber.Map, error) 
 			"student_id": student.StudentID,
 			"full_name":  student.FullName,
 		},
-	}, nil
+	}
+
+	// Populate the origin-course + linked-assignment context so the worker UI
+	// can badge cross-course bookings (in a shared-room concurrent group a
+	// mirrored TA may accept a booking from a course they are not a member of;
+	// they need to see which course/assignment they are grading).
+	var session models.QueueSession
+	if err := config.DB.Select("id", "course_id", "title", "concurrent_group_id", "linked_assignment_id").
+		Where("id = ?", booking.QueueSessionID).First(&session).Error; err == nil {
+		var course models.Course
+		if err := config.DB.Select("id", "code", "name").Where("id = ?", session.CourseID).First(&course).Error; err == nil {
+			payload["origin_course"] = fiber.Map{
+				"id":   course.ID,
+				"code": course.Code,
+				"name": course.Name,
+			}
+		}
+		payload["origin_session_title"] = session.Title
+		payload["origin_concurrent_group_id"] = session.ConcurrentGroupID
+		if session.LinkedAssignmentID != nil {
+			var assignment models.Assignment
+			if err := config.DB.Select("id", "name", "max_score").First(&assignment, *session.LinkedAssignmentID).Error; err == nil {
+				payload["origin_assignment"] = fiber.Map{
+					"id":        assignment.ID,
+					"name":      assignment.Name,
+					"max_score": assignment.MaxScore,
+				}
+			}
+		}
+	}
+
+	return payload, nil
 }
 
 // GET /api/admin/queue/sessions/active

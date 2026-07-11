@@ -237,6 +237,62 @@ func LinkConcurrentSessions(sessionID1, sessionID2 string) error {
 		}).Error
 }
 
+// GetConcurrentGroupIDBySessionID returns the concurrent_group_id for sessionID,
+// or an empty string if the session is not in a group.
+func GetConcurrentGroupIDBySessionID(sessionID string) (string, error) {
+	var s models.QueueSession
+	if err := config.DB.Select("concurrent_group_id").Where("id = ?", sessionID).First(&s).Error; err != nil {
+		return "", err
+	}
+	if s.ConcurrentGroupID == nil {
+		return "", nil
+	}
+	return *s.ConcurrentGroupID, nil
+}
+
+// GetSessionsByGroupID returns every queue session sharing the given concurrent_group_id.
+func GetSessionsByGroupID(groupID string) ([]models.QueueSession, error) {
+	var sessions []models.QueueSession
+	if err := config.DB.Where("concurrent_group_id = ?", groupID).Find(&sessions).Error; err != nil {
+		return nil, err
+	}
+	return sessions, nil
+}
+
+// GetConcurrentGroupCourseIDs returns the set of course_ids across every session in the
+// same concurrent group as sessionID (including the session's own course).
+func GetConcurrentGroupCourseIDs(sessionID string) ([]string, error) {
+	sessionIDs, err := GetConcurrentSessionIDs(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	var courseIDs []string
+	if err := config.DB.Model(&models.QueueSession{}).
+		Where("id IN ?", sessionIDs).
+		Distinct("course_id").
+		Pluck("course_id", &courseIDs).Error; err != nil {
+		return nil, err
+	}
+	return courseIDs, nil
+}
+
+// IsUserInQueueWorkersOfSession returns true when the user has an existing
+// QueueWorker row for sessionID (regardless of online/offline status). Used by
+// authorization guards to permit mirrored workers to act on partner-session
+// bookings inside a concurrent group.
+func IsUserInQueueWorkersOfSession(sessionID string, userID uint) (bool, error) {
+	if sessionID == "" || userID == 0 {
+		return false, nil
+	}
+	var count int64
+	if err := config.DB.Model(&models.QueueWorker{}).
+		Where("queue_session_id = ? AND user_id = ?", sessionID, userID).
+		Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // UnlinkConcurrentSession removes sessionID from its concurrent group.
 // If the group would be left with only one member, that member is also unlinked.
 func UnlinkConcurrentSession(sessionID string) error {

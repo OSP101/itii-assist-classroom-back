@@ -24,6 +24,7 @@ func SetupQueueRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	public.Post("/sessions/:sessionId/cutoff", handlers.UpdateQueueSessionCutoffPublicHandler)
 	public.Get("/classroom/:classroomId/active-sessions", handlers.GetClassroomActiveSessionsPublicHandler)
 	public.Get("/sessions/:sessionId/concurrent-sessions", handlers.GetConcurrentSessionsPublicHandler)
+	public.Get("/groups/:groupId/desk-statuses", handlers.GetGroupDeskStatusesPublicHandler)
 
 	legacyProtected := app.Group("/api/queue", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"))
 	legacyProtected.Use(middlewares.RequireAdminFeature("menu.queue"))
@@ -64,9 +65,15 @@ func SetupQueueRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	sessionMgmt.Get("/workers/current-booking", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionViewQueue, "instructor", "ta"), handlers.GetWorkerCurrentBookingHandler)
 	sessionMgmt.Get("/bookings", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionViewQueue, "instructor", "ta"), handlers.GetBookingsHandler)
 	sessionMgmt.Get("/report", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionViewQueue, "instructor", "ta"), handlers.GetQueueSessionReportHandler)
-	sessionMgmt.Post("/bookings/:bookingId/complete", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionManageQueueBookings, "instructor", "ta"), handlers.CompleteQueueBookingCompatHandler)
-	sessionMgmt.Post("/bookings/:bookingId/skip", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionManageQueueBookings, "instructor", "ta"), handlers.SkipQueueBookingCompatHandler)
-	sessionMgmt.Put("/bookings/:bookingId/action", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionManageQueueBookings, "instructor", "ta"), handlers.WorkerBookingActionHandler)
+	// Worker actions (complete / skip / action) intentionally sit OUTSIDE sessionMgmt
+	// so they do not inherit the group-level RequireCourseAccess that would 403 a
+	// mirrored TA operating on partner-session bookings in a shared-room concurrent
+	// group. Authorization is handled by RequireQueueWorkerOrCoursePermission which
+	// accepts either a course-role permission match or an existing queue_workers row.
+	workerActions := base.Group("/sessions/:sessionId")
+	workerActions.Post("/bookings/:bookingId/complete", middlewares.RequireQueueWorkerOrCoursePermission("sessionId", repositories.PermissionManageQueueBookings, "instructor", "ta"), handlers.CompleteQueueBookingCompatHandler)
+	workerActions.Post("/bookings/:bookingId/skip", middlewares.RequireQueueWorkerOrCoursePermission("sessionId", repositories.PermissionManageQueueBookings, "instructor", "ta"), handlers.SkipQueueBookingCompatHandler)
+	workerActions.Put("/bookings/:bookingId/action", middlewares.RequireQueueWorkerOrCoursePermission("sessionId", repositories.PermissionManageQueueBookings, "instructor", "ta"), handlers.WorkerBookingActionHandler)
 	sessionMgmt.Get("/group", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionViewQueue, "instructor", "ta"), handlers.GetConcurrentGroupHandler)
 	sessionMgmt.Post("/group/link", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionUpdateQueueSessions, "instructor", "ta"), handlers.LinkConcurrentSessionsHandler)
 	sessionMgmt.Delete("/group/unlink", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionUpdateQueueSessions, "instructor", "ta"), handlers.UnlinkConcurrentSessionHandler)

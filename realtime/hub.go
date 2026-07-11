@@ -233,6 +233,10 @@ func (c *client) handleMessage(message incomingMessage) {
 		c.hub.join(c, "queue-"+rawString(message.Data))
 	case "leave-queue":
 		c.hub.leave(c, "queue-"+rawString(message.Data))
+	case "join-queue-group":
+		c.hub.join(c, "queue-group-"+rawString(message.Data))
+	case "leave-queue-group":
+		c.hub.leave(c, "queue-group-"+rawString(message.Data))
 	case "join-worker":
 		c.hub.join(c, "worker-"+rawString(message.Data))
 	case "leave-worker":
@@ -295,6 +299,17 @@ func EmitToAttendanceDisplay(sessionID interface{}, event string, data interface
 
 func EmitToQueue(sessionID interface{}, event string, data interface{}) {
 	EmitToRoom("queue-"+fmt.Sprint(sessionID), event, data)
+}
+
+// EmitToQueueGroup broadcasts an event to every client subscribed to the
+// concurrent group's shared room. Used so projector/worker clients receive
+// booking/state events from partner sessions in a shared-room setup.
+func EmitToQueueGroup(groupID interface{}, event string, data interface{}) {
+	group := fmt.Sprint(groupID)
+	if group == "" || group == "<nil>" {
+		return
+	}
+	EmitToRoom("queue-group-"+group, event, data)
 }
 
 func EmitToBooking(bookingID interface{}, event string, data interface{}) {

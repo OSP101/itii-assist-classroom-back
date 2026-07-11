@@ -675,6 +675,14 @@ func ToggleCourseStatusHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "เปลี่ยนสถานะไม่สำเร็จ"})
 	}
 
+	// When a course is deactivated, drop it out of any shared-room concurrent
+	// queue groups so its partner session doesn't stay in a half-broken linked
+	// state (the projector, cross-course grading path, and status sync all
+	// assume both sides are still active).
+	if !updated.IsActive {
+		autoUnlinkQueueGroupsForCourse(id)
+	}
+
 	msg := "ปิดใช้งานรายวิชาสำเร็จ"
 	action := "deactivate_course"
 	if updated.IsActive {
@@ -1618,6 +1626,9 @@ func BulkToggleCourseStatusHandler(c fiber.Ctx) error {
 	}
 	for _, course := range toggled {
 		logCourseActivity(c, course.ID, actorID, action, "course", "course", course.ID, course.Name, fiber.Map{"is_active": enable})
+		if !enable {
+			autoUnlinkQueueGroupsForCourse(course.ID)
+		}
 	}
 	logPrivilegedAdminAction(c, actorID, "bulk_toggle_course_status", "warn", "courses", strings.Join(input.CourseIDs, ","), fiber.Map{
 		"target_type":    "course_bulk",
