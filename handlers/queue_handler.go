@@ -1156,7 +1156,12 @@ func WorkerJoinHandler(c fiber.Ctx) error {
 	}
 
 	// Mirror worker registration to all other sessions in the concurrent group.
-	_ = repositories.WorkerJoinMirrorGroup(sessionID, userID, input.AcceptGrading, input.AcceptHelp)
+	// Non-fatal: the worker is joined either way, and lockWorkerRowForBookingSession
+	// heals a missing mirror row at completion time. Log it so a systematic failure
+	// is visible instead of surfacing later as an unfinishable booking.
+	if mirrorErr := repositories.WorkerJoinMirrorGroup(sessionID, userID, input.AcceptGrading, input.AcceptHelp); mirrorErr != nil {
+		log.Printf("⚠️  WorkerJoinMirrorGroup failed session=%s user=%d err=%v", sessionID, userID, mirrorErr)
+	}
 
 	assignedBooking, assignErr := tryAssignNextBookingAndEmit(sessionID, userID)
 	if assignErr != nil {

@@ -229,12 +229,40 @@ func LinkConcurrentSessions(sessionID1, sessionID2 string) error {
 	if err != nil {
 		return err
 	}
-	return config.DB.Model(&models.QueueSession{}).
-		Where("id IN ?", []string{sessionID1, sessionID2}).
-		Updates(map[string]interface{}{
-			"concurrent_group_id": groupID,
-			"group_pin_code":      groupPIN,
-		}).Error
+	return config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.QueueSession{}).
+			Where("id IN ?", []string{sessionID1, sessionID2}).
+			Updates(map[string]interface{}{
+				"concurrent_group_id": groupID,
+				"group_pin_code":      groupPIN,
+			}).Error; err != nil {
+			return err
+		}
+		// WorkerJoinMirrorGroup only runs at join time, so anyone already working
+		// either session holds no row in the new partner. Mirror both ways now, or
+		// partner-session bookings would be assigned to them while the worker row
+		// needed to record the result stays missing.
+		return mirrorWorkersBetweenSessionsTx(tx, sessionID1, sessionID2)
+	})
+}
+
+// mirrorWorkersBetweenSessionsTx ensures every worker of either session also has a
+// row in the other, so both sessions can assign to and record results from the
+// shared worker pool.
+func mirrorWorkersBetweenSessionsTx(tx *gorm.DB, sessionID1, sessionID2 string) error {
+	for _, pair := range [2][2]string{{sessionID1, sessionID2}, {sessionID2, sessionID1}} {
+		source, target := pair[0], pair[1]
+		var workers []models.QueueWorker
+		if err := tx.Where("queue_session_id = ?", source).Find(&workers).Error; err != nil {
+			return err
+		}
+		for _, w := range workers {
+			if err := mirrorWorkerRowTx(tx, target, w); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // GetConcurrentGroupIDBySessionID returns the concurrent_group_id for sessionID,
@@ -1068,16 +1096,14 @@ func WorkerJoinMirrorGroup(sessionID string, userID uint, acceptGrading, acceptH
 		err := config.DB.Where("queue_session_id = ? AND user_id = ?", gid, userID).First(&w).Error
 		if err != nil {
 			// Create mirror row
-			mirror := models.QueueWorker{
-				QueueSessionID:   gid,
-				UserID:           userID,
-				AcceptGrading:    acceptGrading,
-				AcceptHelp:       acceptHelp,
-				Status:           "online",
-				OfferPausedUntil: nil,
-				LastActiveAt:     &now,
+			source := models.QueueWorker{
+				UserID:                   userID,
+				AcceptGrading:            acceptGrading,
+				AcceptHelp:               acceptHelp,
+				PushNotificationsEnabled: true,
+				Status:                   "online",
 			}
-			if createErr := config.DB.Create(&mirror).Error; createErr != nil {
+			if createErr := mirrorWorkerRowTx(config.DB, gid, source); createErr != nil {
 				return createErr
 			}
 		} else {
@@ -1093,6 +1119,111 @@ func WorkerJoinMirrorGroup(sessionID string, userID uint, acceptGrading, acceptH
 		}
 	}
 	return nil
+}
+
+// errWorkerNotRegistered is returned when a user holds no QueueWorker row for a
+// booking's own session and none can be mirrored from its concurrent group.
+var errWorkerNotRegistered = errors.New("worker not registered for this queue session")
+
+// concurrentSessionIDsTx is the transaction-scoped twin of GetConcurrentSessionIDs.
+// It must read through tx so callers holding row locks see a consistent group.
+func concurrentSessionIDsTx(tx *gorm.DB, sessionID string) ([]string, error) {
+	var s models.QueueSession
+	if err := tx.Select("concurrent_group_id").Where("id = ?", sessionID).First(&s).Error; err != nil {
+		return nil, err
+	}
+	if s.ConcurrentGroupID == nil || *s.ConcurrentGroupID == "" {
+		return []string{sessionID}, nil
+	}
+	var ids []string
+	if err := tx.Model(&models.QueueSession{}).
+		Where("concurrent_group_id = ?", *s.ConcurrentGroupID).
+		Pluck("id", &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// mirrorWorkerRowTx copies a worker row into targetSessionID. The unique index
+// uq_queue_workers_session_user makes the insert idempotent under concurrency.
+//
+// It inserts from a map, not a struct: the accept_* and push_* columns are declared
+// `default:true`, and on a struct create GORM substitutes the declared default for
+// any zero value — so a TA who opted out of help would have it re-enabled in the
+// mirror. Map values are written verbatim. Columns left out (the counters) still
+// take their defaults.
+func mirrorWorkerRowTx(tx *gorm.DB, targetSessionID string, source models.QueueWorker) error {
+	now := time.Now()
+	return tx.Model(&models.QueueWorker{}).
+		Clauses(clause.OnConflict{DoNothing: true}).
+		Create(map[string]interface{}{
+			"queue_session_id":           targetSessionID,
+			"user_id":                    source.UserID,
+			"accept_grading":             source.AcceptGrading,
+			"accept_help":                source.AcceptHelp,
+			"push_notifications_enabled": source.PushNotificationsEnabled,
+			"status":                     source.Status,
+			"last_active_at":             &now,
+			"created_at":                 now,
+			"updated_at":                 now,
+		}).Error
+}
+
+// lockWorkerRowForBookingSession locks the QueueWorker row for a booking's own
+// session, healing a missing mirror row first.
+//
+// In a shared-room concurrent group the assignment path deliberately tolerates a
+// missing mirror row: assignNextBooking falls back to the worker's origin-session
+// row and hands them the partner-session booking anyway. Completion therefore has
+// to tolerate it too — otherwise a TA is offered a booking they can never finish,
+// which is exactly what happens when a group is linked after they already joined.
+//
+// This is not an authorization check. The caller still enforces that the booking
+// is assigned to this worker, and the row is only healed when the user already
+// holds a worker row elsewhere in the same group; a stranger is still rejected.
+func lockWorkerRowForBookingSession(tx *gorm.DB, sessionID string, userID uint) (*models.QueueWorker, error) {
+	var worker models.QueueWorker
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("queue_session_id = ? AND user_id = ?", sessionID, userID).
+		First(&worker).Error
+	if err == nil {
+		return &worker, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	groupIDs, err := concurrentSessionIDsTx(tx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if len(groupIDs) <= 1 {
+		return nil, errWorkerNotRegistered
+	}
+
+	// Not locked: the origin row is only read to seed the mirror, and locking it
+	// would widen the lock ordering between sibling sessions into a deadlock risk.
+	var origin models.QueueWorker
+	if err := tx.Where("queue_session_id IN ? AND user_id = ?", groupIDs, userID).
+		First(&origin).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errWorkerNotRegistered
+		}
+		return nil, err
+	}
+
+	if err := mirrorWorkerRowTx(tx, sessionID, origin); err != nil {
+		return nil, err
+	}
+
+	// Re-select under lock: with DoNothing a concurrent healer may have won, which
+	// leaves the local struct unpopulated.
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("queue_session_id = ? AND user_id = ?", sessionID, userID).
+		First(&worker).Error; err != nil {
+		return nil, err
+	}
+	return &worker, nil
 }
 
 // WorkerOfflineMirrorGroup sets offline status for a worker across all sessions in the group.
@@ -1441,10 +1572,11 @@ func CompleteBookingWithScores(bookingID uint, workerID uint, score *float64, sc
 			return err
 		}
 
-		var worker models.QueueWorker
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("queue_session_id = ? AND user_id = ?", b.QueueSessionID, workerID).First(&worker).Error; err != nil {
-			return fmt.Errorf("worker not registered for this queue session")
+		workerRow, err := lockWorkerRowForBookingSession(tx, b.QueueSessionID, workerID)
+		if err != nil {
+			return err
 		}
+		worker := *workerRow
 		if b.Status != "in_progress" {
 			return fmt.Errorf("booking is not in progress")
 		}
@@ -1633,10 +1765,11 @@ func WorkerUpdateBooking(bookingID uint, workerID uint, action string, score *fl
 			return err
 		}
 
-		var worker models.QueueWorker
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("queue_session_id = ? AND user_id = ?", b.QueueSessionID, workerID).First(&worker).Error; err != nil {
-			return fmt.Errorf("worker not registered for this queue session")
+		workerRow, err := lockWorkerRowForBookingSession(tx, b.QueueSessionID, workerID)
+		if err != nil {
+			return err
 		}
+		worker := *workerRow
 
 		now := time.Now()
 		needsHelpDeskSync := false
