@@ -186,6 +186,56 @@ func TestCompleteBookingWithScores_RejectsUserWithNoWorkerRowInGroup(t *testing.
 	}
 }
 
+// A worker who opts out of one booking type must be stored that way. The
+// assignment query filters purely on accept_grading / accept_help, so a wrong
+// value here is indistinguishable from "accept everything" and the worker keeps
+// being offered work they declined.
+func TestWorkerJoin_PreservesOptOutOnFirstJoin(t *testing.T) {
+	cleanup, sessionA, _ := setupConcurrentGroupTestDB(t)
+	defer cleanup()
+
+	const taUserID = uint(303)
+	if _, err := WorkerJoin(sessionA.ID, taUserID, true, false); err != nil {
+		t.Fatalf("worker join: %v", err)
+	}
+
+	var stored models.QueueWorker
+	if err := config.DB.Where("queue_session_id = ? AND user_id = ?", sessionA.ID, taUserID).First(&stored).Error; err != nil {
+		t.Fatalf("load worker: %v", err)
+	}
+	if !stored.AcceptGrading {
+		t.Error("expected accept_grading to stay true")
+	}
+	if stored.AcceptHelp {
+		t.Error("grading-only worker was stored with accept_help=true; they will still be offered help bookings")
+	}
+}
+
+// Rejoining goes through Save rather than Create, so cover it separately.
+func TestWorkerJoin_PreservesOptOutOnRejoin(t *testing.T) {
+	cleanup, sessionA, _ := setupConcurrentGroupTestDB(t)
+	defer cleanup()
+
+	const taUserID = uint(304)
+	if _, err := WorkerJoin(sessionA.ID, taUserID, true, true); err != nil {
+		t.Fatalf("first join: %v", err)
+	}
+	if _, err := WorkerJoin(sessionA.ID, taUserID, false, true); err != nil {
+		t.Fatalf("rejoin: %v", err)
+	}
+
+	var stored models.QueueWorker
+	if err := config.DB.Where("queue_session_id = ? AND user_id = ?", sessionA.ID, taUserID).First(&stored).Error; err != nil {
+		t.Fatalf("load worker: %v", err)
+	}
+	if stored.AcceptGrading {
+		t.Error("help-only worker was stored with accept_grading=true after rejoin")
+	}
+	if !stored.AcceptHelp {
+		t.Error("expected accept_help to stay true")
+	}
+}
+
 // Linking two sessions must mirror workers who joined beforehand, since
 // WorkerJoinMirrorGroup only ever runs at join time.
 func TestLinkConcurrentSessions_MirrorsPreexistingWorkers(t *testing.T) {

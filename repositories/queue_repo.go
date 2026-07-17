@@ -257,7 +257,7 @@ func mirrorWorkersBetweenSessionsTx(tx *gorm.DB, sessionID1, sessionID2 string) 
 			return err
 		}
 		for _, w := range workers {
-			if err := mirrorWorkerRowTx(tx, target, w); err != nil {
+			if err := insertWorkerRowTx(tx, target, w); err != nil {
 				return err
 			}
 		}
@@ -1044,17 +1044,21 @@ func WorkerJoin(sessionID string, userID uint, acceptGrading, acceptHelp bool) (
 	err := config.DB.Where("queue_session_id = ? AND user_id = ?", sessionID, userID).First(&w).Error
 	now := time.Now()
 	if err != nil {
-		// Create new
-		w = models.QueueWorker{
-			QueueSessionID:   sessionID,
-			UserID:           userID,
-			AcceptGrading:    acceptGrading,
-			AcceptHelp:       acceptHelp,
-			Status:           "online",
-			OfferPausedUntil: nil,
-			LastActiveAt:     &now,
+		// Create through insertWorkerRowTx so an opted-out accept_* survives the
+		// insert (see its comment) and so two concurrent joins cannot both insert.
+		if createErr := insertWorkerRowTx(config.DB, sessionID, models.QueueWorker{
+			UserID:                   userID,
+			AcceptGrading:            acceptGrading,
+			AcceptHelp:               acceptHelp,
+			PushNotificationsEnabled: true,
+			Status:                   "online",
+		}); createErr != nil {
+			return nil, createErr
 		}
-		return &w, config.DB.Create(&w).Error
+		if loadErr := config.DB.Where("queue_session_id = ? AND user_id = ?", sessionID, userID).First(&w).Error; loadErr != nil {
+			return nil, loadErr
+		}
+		return &w, nil
 	}
 	w.Status = "online"
 	w.AcceptGrading = acceptGrading
@@ -1103,7 +1107,7 @@ func WorkerJoinMirrorGroup(sessionID string, userID uint, acceptGrading, acceptH
 				PushNotificationsEnabled: true,
 				Status:                   "online",
 			}
-			if createErr := mirrorWorkerRowTx(config.DB, gid, source); createErr != nil {
+			if createErr := insertWorkerRowTx(config.DB, gid, source); createErr != nil {
 				return createErr
 			}
 		} else {
@@ -1144,15 +1148,17 @@ func concurrentSessionIDsTx(tx *gorm.DB, sessionID string) ([]string, error) {
 	return ids, nil
 }
 
-// mirrorWorkerRowTx copies a worker row into targetSessionID. The unique index
-// uq_queue_workers_session_user makes the insert idempotent under concurrency.
+// insertWorkerRowTx inserts a worker row for targetSessionID, doing nothing if one
+// already exists — the unique index uq_queue_workers_session_user makes it
+// idempotent under concurrency.
 //
-// It inserts from a map, not a struct: the accept_* and push_* columns are declared
-// `default:true`, and on a struct create GORM substitutes the declared default for
-// any zero value — so a TA who opted out of help would have it re-enabled in the
-// mirror. Map values are written verbatim. Columns left out (the counters) still
-// take their defaults.
-func mirrorWorkerRowTx(tx *gorm.DB, targetSessionID string, source models.QueueWorker) error {
+// It inserts from a map, not a struct, and this is load-bearing: the accept_* and
+// push_* columns are declared `default:true`, and on a struct create GORM
+// substitutes the declared default for any zero value. A worker who opted out of
+// help would be written as accepting it, and since assignment filters purely on
+// these columns, they would keep being offered work they declined. Map values are
+// written verbatim. Columns left out (the counters) still take their defaults.
+func insertWorkerRowTx(tx *gorm.DB, targetSessionID string, source models.QueueWorker) error {
 	now := time.Now()
 	return tx.Model(&models.QueueWorker{}).
 		Clauses(clause.OnConflict{DoNothing: true}).
@@ -1212,7 +1218,7 @@ func lockWorkerRowForBookingSession(tx *gorm.DB, sessionID string, userID uint) 
 		return nil, err
 	}
 
-	if err := mirrorWorkerRowTx(tx, sessionID, origin); err != nil {
+	if err := insertWorkerRowTx(tx, sessionID, origin); err != nil {
 		return nil, err
 	}
 
