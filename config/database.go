@@ -343,6 +343,18 @@ func MigratePerformanceIndexes() {
 			sql:  `CREATE INDEX IF NOT EXISTS idx_scores_assignment_student ON scores (assignment_id, student_id)`,
 		},
 		{
+			// SubmitScore upserts by finding then writing in application code, with no
+			// ON CONFLICT, so two graders submitting at once can both miss and both
+			// insert. This is the only thing that actually stops the duplicate.
+			//
+			// Creation fails while duplicate rows still exist — run
+			// cmd/repair-orphan-scores first. A failure here only logs and continues.
+			name: "scores_assignment_student_subitem_unique",
+			sql: `CREATE UNIQUE INDEX IF NOT EXISTS uq_scores_assignment_student_subitem
+			      ON scores (assignment_id, student_id, sub_item_id)
+			      WHERE student_id IS NOT NULL AND sub_item_id IS NOT NULL`,
+		},
+		{
 			name: "user_notifications_user_is_read",
 			sql:  `CREATE INDEX IF NOT EXISTS idx_user_notifications_user_is_read ON user_notifications (user_id, is_read) WHERE is_read = false`,
 		},

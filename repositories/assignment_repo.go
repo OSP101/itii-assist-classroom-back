@@ -1,9 +1,14 @@
 package repositories
 
 import (
+	"fmt"
+	"sort"
+	"time"
+
 	"itii-assist/config"
 	"itii-assist/models"
-	"time"
+
+	"gorm.io/gorm"
 )
 
 // ============================================================
@@ -136,24 +141,162 @@ func CreateAssignment(a *models.Assignment, subItems []models.AssignmentSubItem)
 	return nil
 }
 
-func UpdateAssignment(a *models.Assignment, subItems *[]models.AssignmentSubItem) error {
-	db := config.DB
-	if err := db.Save(a).Error; err != nil {
+// SubItemWithScores names a sub-item that is about to be removed together with
+// the number of scores that would be destroyed with it.
+type SubItemWithScores struct {
+	ID    uint   `json:"id"`
+	Name  string `json:"name"`
+	Count int64  `json:"score_count"`
+}
+
+// ErrSubItemsHaveScores reports an update that would drop sub-items students have
+// already been graded on. Callers may retry with confirmDeleteScores set.
+type ErrSubItemsHaveScores struct {
+	Items []SubItemWithScores
+}
+
+func (e *ErrSubItemsHaveScores) Error() string {
+	return fmt.Sprintf("%d sub-item(s) marked for removal still have scores", len(e.Items))
+}
+
+func (e *ErrSubItemsHaveScores) TotalScores() int64 {
+	var total int64
+	for _, item := range e.Items {
+		total += item.Count
+	}
+	return total
+}
+
+// UpdateAssignment saves the assignment and, when subItems is non-nil, reconciles
+// its sub-items against the payload.
+//
+// Sub-items carrying an ID that belongs to this assignment are updated in place.
+// That is the whole point: scores reference assignment_sub_items.id and there is
+// no foreign key, so re-creating a sub-item under a fresh ID silently detaches
+// every score attached to it. Sub-items absent from the payload are removed, but
+// only after their scores are accounted for — either there are none, or the
+// caller has explicitly confirmed the deletion.
+func UpdateAssignment(a *models.Assignment, subItems *[]models.AssignmentSubItem, confirmDeleteScores bool) error {
+	return config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(a).Error; err != nil {
+			return err
+		}
+		if subItems == nil {
+			return nil
+		}
+		return syncAssignmentSubItemsTx(tx, a.ID, *subItems, confirmDeleteScores)
+	})
+}
+
+func syncAssignmentSubItemsTx(tx *gorm.DB, assignmentID uint, payload []models.AssignmentSubItem, confirmDeleteScores bool) error {
+	var existing []models.AssignmentSubItem
+	if err := tx.Where("assignment_id = ?", assignmentID).Find(&existing).Error; err != nil {
 		return err
 	}
+	existingByID := make(map[uint]models.AssignmentSubItem, len(existing))
+	for _, item := range existing {
+		existingByID[item.ID] = item
+	}
 
-	if subItems != nil {
-		// Replace sub-items
-		db.Where("assignment_id = ?", a.ID).Delete(&models.AssignmentSubItem{})
-		if len(*subItems) > 0 {
-			for i := range *subItems {
-				(*subItems)[i].AssignmentID = a.ID
-				(*subItems)[i].OrderIndex = i + 1
+	// An ID is honored only when it already belongs to this assignment, so a stale
+	// or hostile client cannot graft another assignment's sub-item onto this one.
+	// A repeated ID is honored once; the duplicate falls through to insert.
+	keep := make(map[uint]bool, len(payload))
+	for i := range payload {
+		id := payload[i].ID
+		if id == 0 || keep[id] {
+			continue
+		}
+		if _, ok := existingByID[id]; ok {
+			keep[id] = true
+		}
+	}
+
+	removedIDs := make([]uint, 0, len(existing))
+	for _, item := range existing {
+		if !keep[item.ID] {
+			removedIDs = append(removedIDs, item.ID)
+		}
+	}
+
+	if len(removedIDs) > 0 {
+		blocking, err := subItemsWithScoresTx(tx, removedIDs, existingByID)
+		if err != nil {
+			return err
+		}
+		if len(blocking) > 0 && !confirmDeleteScores {
+			return &ErrSubItemsHaveScores{Items: blocking}
+		}
+		// Scores go first: a sub-item must never outlive its scores, which is the
+		// orphaning this whole function exists to prevent.
+		if err := tx.Where("sub_item_id IN ?", removedIDs).Delete(&models.Score{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("id IN ?", removedIDs).Delete(&models.AssignmentSubItem{}).Error; err != nil {
+			return err
+		}
+	}
+
+	now := time.Now()
+	applied := make(map[uint]bool, len(payload))
+	for i := range payload {
+		item := &payload[i]
+		item.AssignmentID = assignmentID
+		item.OrderIndex = i + 1
+
+		if item.ID != 0 && keep[item.ID] && !applied[item.ID] {
+			applied[item.ID] = true
+			if err := tx.Model(&models.AssignmentSubItem{}).Where("id = ?", item.ID).Updates(map[string]interface{}{
+				"name":        item.Name,
+				"max_score":   item.MaxScore,
+				"order_index": item.OrderIndex,
+				"updated_at":  now,
+			}).Error; err != nil {
+				return err
 			}
-			db.Create(subItems)
+			continue
+		}
+
+		// Insert through a map: max_score is `default:10`, and GORM substitutes the
+		// default for a zero value on a struct create.
+		item.ID = 0
+		if err := tx.Model(&models.AssignmentSubItem{}).Create(map[string]interface{}{
+			"assignment_id": assignmentID,
+			"name":          item.Name,
+			"max_score":     item.MaxScore,
+			"order_index":   item.OrderIndex,
+			"created_at":    now,
+			"updated_at":    now,
+		}).Error; err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func subItemsWithScoresTx(tx *gorm.DB, subItemIDs []uint, existingByID map[uint]models.AssignmentSubItem) ([]SubItemWithScores, error) {
+	var rows []struct {
+		SubItemID uint  `gorm:"column:sub_item_id"`
+		Total     int64 `gorm:"column:total"`
+	}
+	if err := tx.Model(&models.Score{}).
+		Select("sub_item_id, COUNT(*) AS total").
+		Where("sub_item_id IN ?", subItemIDs).
+		Group("sub_item_id").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	result := make([]SubItemWithScores, 0, len(rows))
+	for _, row := range rows {
+		result = append(result, SubItemWithScores{
+			ID:    row.SubItemID,
+			Name:  existingByID[row.SubItemID].Name,
+			Count: row.Total,
+		})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result, nil
 }
 
 func SoftDeleteAssignment(id uint) error {

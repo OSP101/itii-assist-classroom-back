@@ -1657,10 +1657,15 @@ func CompleteBookingWithScores(bookingID uint, workerID uint, score *float64, sc
 						}
 					}
 
+					// Join the sub-items so scores left pointing at a deleted sub-item cannot
+					// make up the count — otherwise a student whose assignment was edited
+					// reaches len(subItems) on orphans alone and the desk reports itself
+					// completed with nothing graded on the current sub-items.
 					var gradedSubItemCount int64
 					if err := tx.Model(&models.Score{}).
-						Where("assignment_id = ? AND student_id = ? AND sub_item_id IS NOT NULL AND status = ?", *session.LinkedAssignmentID, b.StudentID, "graded").
-						Distinct("sub_item_id").
+						Joins("JOIN assignment_sub_items si ON si.id = scores.sub_item_id AND si.assignment_id = scores.assignment_id").
+						Where("scores.assignment_id = ? AND scores.student_id = ? AND scores.status = ?", *session.LinkedAssignmentID, b.StudentID, "graded").
+						Distinct("scores.sub_item_id").
 						Count(&gradedSubItemCount).Error; err != nil {
 						return err
 					}

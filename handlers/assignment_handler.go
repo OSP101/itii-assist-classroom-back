@@ -1,11 +1,13 @@
 package handlers
 
 import (
+	"errors"
+	"strconv"
+	"time"
+
 	"itii-assist/models"
 	"itii-assist/realtime"
 	"itii-assist/repositories"
-	"strconv"
-	"time"
 
 	"github.com/gofiber/fiber/v3"
 )
@@ -140,6 +142,48 @@ func CreateAssignmentHandler(c fiber.Ctx) error {
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": createdAssignment})
 }
 
+type assignmentSubItemInput struct {
+	ID       *uint   `json:"id"`
+	Name     string  `json:"name"`
+	MaxScore float64 `json:"max_score"`
+}
+
+type assignmentReplaceSubItemInput struct {
+	Name     string  `json:"name"`
+	MaxScore float64 `json:"max_score"`
+}
+
+// buildUpdateSubItems maps an update payload onto sub-item models.
+//
+// Carrying si.ID through is what keeps scores attached: scores reference
+// assignment_sub_items.id and no foreign key repairs the link, so an ID dropped
+// here re-creates the sub-item under a fresh ID and silently orphans every score
+// on the assignment. The client sends the IDs for exactly this reason.
+//
+// replace_sub_items has no IDs by contract — it means "discard and rebuild" — so
+// it is mapped without them and relies on the repository's deletion guard.
+func buildUpdateSubItems(subItems *[]assignmentSubItemInput, replaceSubItems *[]assignmentReplaceSubItemInput) *[]models.AssignmentSubItem {
+	switch {
+	case subItems != nil:
+		items := make([]models.AssignmentSubItem, 0, len(*subItems))
+		for _, si := range *subItems {
+			item := models.AssignmentSubItem{Name: si.Name, MaxScore: si.MaxScore}
+			if si.ID != nil {
+				item.ID = *si.ID
+			}
+			items = append(items, item)
+		}
+		return &items
+	case replaceSubItems != nil:
+		items := make([]models.AssignmentSubItem, 0, len(*replaceSubItems))
+		for _, si := range *replaceSubItems {
+			items = append(items, models.AssignmentSubItem{Name: si.Name, MaxScore: si.MaxScore})
+		}
+		return &items
+	}
+	return nil
+}
+
 // PUT /api/assignments/:id
 func UpdateAssignmentHandler(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
@@ -162,15 +206,9 @@ func UpdateAssignmentHandler(c fiber.Ctx) error {
 		IsDraft                    *bool      `json:"is_draft"`
 		PublishAt                  *time.Time `json:"publish_at"`
 		ClearPublishAt             bool       `json:"clear_publish_at"`
-		SubItems                   *[]struct {
-			ID       *uint   `json:"id"`
-			Name     string  `json:"name"`
-			MaxScore float64 `json:"max_score"`
-		} `json:"sub_items"`
-		ReplaceSubItems *[]struct {
-			Name     string  `json:"name"`
-			MaxScore float64 `json:"max_score"`
-		} `json:"replace_sub_items"`
+		ConfirmDeleteScores        bool       `json:"confirm_delete_scores"`
+		SubItems                   *[]assignmentSubItemInput        `json:"sub_items"`
+		ReplaceSubItems            *[]assignmentReplaceSubItemInput `json:"replace_sub_items"`
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
@@ -216,23 +254,21 @@ func UpdateAssignmentHandler(c fiber.Ctx) error {
 		a.PublishAt = nil
 	}
 
-	var subItemsPtr *[]models.AssignmentSubItem
-	switch {
-	case input.SubItems != nil:
-		var items []models.AssignmentSubItem
-		for _, si := range *input.SubItems {
-			items = append(items, models.AssignmentSubItem{Name: si.Name, MaxScore: si.MaxScore})
-		}
-		subItemsPtr = &items
-	case input.ReplaceSubItems != nil:
-		var items []models.AssignmentSubItem
-		for _, si := range *input.ReplaceSubItems {
-			items = append(items, models.AssignmentSubItem{Name: si.Name, MaxScore: si.MaxScore})
-		}
-		subItemsPtr = &items
-	}
+	subItemsPtr := buildUpdateSubItems(input.SubItems, input.ReplaceSubItems)
 
-	if err := repositories.UpdateAssignment(&a, subItemsPtr); err != nil {
+	if err := repositories.UpdateAssignment(&a, subItemsPtr, input.ConfirmDeleteScores); err != nil {
+		var scoresErr *repositories.ErrSubItemsHaveScores
+		if errors.As(err, &scoresErr) {
+			return c.Status(409).JSON(fiber.Map{
+				"success": false,
+				"code":    "sub_items_have_scores",
+				"message": "Removing these sub-items would delete existing scores",
+				"data": fiber.Map{
+					"sub_items":    scoresErr.Items,
+					"total_scores": scoresErr.TotalScores(),
+				},
+			})
+		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update assignment"})
 	}
 	var sessionIDsToSave []uint

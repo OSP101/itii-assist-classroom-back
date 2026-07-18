@@ -1145,7 +1145,7 @@ func GetUngradedSummaryHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "course_id required"})
 	}
 
-	assignments, _, err := loadScoreAssignments(courseID, "")
+	assignments, subItemsByAssignment, err := loadScoreAssignments(courseID, "")
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load assignments"})
 	}
@@ -1172,40 +1172,64 @@ func GetUngradedSummaryHandler(c fiber.Ctx) error {
 		studentLookup[student.ID] = fiber.Map{"student_id": student.StudentID, "full_name": student.FullName}
 	}
 
+	// Joining assignment_sub_items is what keeps this honest: a score still pointing
+	// at a deleted sub-item is invisible in the grid, so it must not count as graded
+	// here either. Counting distinct live sub-items also lets a partially graded
+	// student be reported as ungraded, matching the gaps the instructor can see.
 	var scoredRows []struct {
-		AssignmentID uint `gorm:"column:assignment_id"`
-		StudentID    uint `gorm:"column:student_id"`
+		AssignmentID   uint `gorm:"column:assignment_id"`
+		StudentID      uint `gorm:"column:student_id"`
+		GradedSubItems int  `gorm:"column:graded_sub_items"`
+		HasMainScore   bool `gorm:"column:has_main_score"`
 	}
 	if err := config.DB.Raw(`
-		SELECT DISTINCT assignment_id, student_id
-		FROM scores
-		WHERE assignment_id IN ? AND student_id IN ?
+		SELECT s.assignment_id,
+		       s.student_id,
+		       COUNT(DISTINCT si.id) AS graded_sub_items,
+		       BOOL_OR(s.sub_item_id IS NULL) AS has_main_score
+		FROM scores s
+		LEFT JOIN assignment_sub_items si ON si.id = s.sub_item_id
+		WHERE s.assignment_id IN ? AND s.student_id IN ?
+		GROUP BY s.assignment_id, s.student_id
 	`, assignmentIDs, studentIDs).Scan(&scoredRows).Error; err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to inspect graded scores"})
 	}
 
-	scoredMap := map[uint]map[uint]bool{}
+	type gradedState struct {
+		liveSubItems int
+		hasMainScore bool
+	}
+	scoredMap := map[uint]map[uint]gradedState{}
 	for _, row := range scoredRows {
 		if scoredMap[row.AssignmentID] == nil {
-			scoredMap[row.AssignmentID] = map[uint]bool{}
+			scoredMap[row.AssignmentID] = map[uint]gradedState{}
 		}
-		scoredMap[row.AssignmentID][row.StudentID] = true
+		scoredMap[row.AssignmentID][row.StudentID] = gradedState{
+			liveSubItems: row.GradedSubItems,
+			hasMainScore: row.HasMainScore,
+		}
 	}
 
 	summary := fiber.Map{}
 	for _, assignment := range assignments {
+		requiredSubItems := len(subItemsByAssignment[assignment.ID])
 		scoredStudents := scoredMap[assignment.ID]
-		if scoredStudents == nil {
-			scoredStudents = map[uint]bool{}
-		}
 		ungradedStudents := make([]fiber.Map, 0)
+		gradedCount := 0
 		for _, student := range students {
-			if !scoredStudents[student.ID] {
+			state := scoredStudents[student.ID]
+			isGraded := state.hasMainScore
+			if requiredSubItems > 0 {
+				isGraded = state.liveSubItems >= requiredSubItems
+			}
+			if isGraded {
+				gradedCount++
+			} else {
 				ungradedStudents = append(ungradedStudents, studentLookup[student.ID])
 			}
 		}
 		key := strconv.FormatUint(uint64(assignment.ID), 10)
-		summary[key] = fiber.Map{"ungraded_count": len(ungradedStudents), "total_students": len(students), "graded_count": len(scoredStudents), "students": ungradedStudents[:min(3, len(ungradedStudents))]}
+		summary[key] = fiber.Map{"ungraded_count": len(ungradedStudents), "total_students": len(students), "graded_count": gradedCount, "students": ungradedStudents[:min(3, len(ungradedStudents))]}
 	}
 
 	return c.JSON(fiber.Map{"success": true, "data": summary})
