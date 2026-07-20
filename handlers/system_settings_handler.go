@@ -288,7 +288,7 @@ func UploadAnnouncementImageHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ไม่สามารถบันทึกรูปประกาศได้"})
 	}
 
-	publicPath := filepath.ToSlash(filepath.Join("/uploads", "system-announcements", fileName))
+	publicPath := filepath.ToSlash(filepath.Join("/api/uploads", "system-announcements", fileName))
 	return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"url": publicPath}})
 }
 

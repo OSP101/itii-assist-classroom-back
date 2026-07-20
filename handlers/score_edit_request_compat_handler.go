@@ -192,7 +192,7 @@ func saveScoreEditRequestImages(c fiber.Ctx) ([]string, error) {
 		if err := c.SaveFile(file, destination); err != nil {
 			return nil, err
 		}
-		paths = append(paths, filepath.ToSlash(filepath.Join("uploads", "score-edit-requests", filename)))
+		paths = append(paths, filepath.ToSlash(filepath.Join("api/uploads", "score-edit-requests", filename)))
 	}
 
 	return paths, nil

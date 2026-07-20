@@ -229,6 +229,40 @@ func MigrateQueueSessionCounterCompatibility() {
 	log.Println("✅ Synchronized queue_sessions.next_queue_number")
 }
 
+// MigrateUploadPathsToApiPrefix ย้าย path รูปที่เก็บใน DB จาก /uploads/... ไปเป็น /api/uploads/...
+// ให้ตรงกับ static mount ใหม่ (app.Use("/api/uploads", ...)) เพื่อให้รูปเก่าที่อัปโหลดไว้ก่อนหน้ายังแสดงได้
+// statement ทุกตัวเป็น idempotent (รันซ้ำได้ ไม่เพิ่ม prefix ซ้ำ) เพราะรันทุกครั้งที่ boot
+func MigrateUploadPathsToApiPrefix() {
+	if DB == nil {
+		return
+	}
+
+	statements := []string{
+		// ประกาศระบบ: image_url เป็น text ค่าเดียว เช่น "/uploads/system-announcements/xxx.png"
+		`UPDATE system_announcements
+		 SET image_url = '/api' || image_url
+		 WHERE image_url LIKE '/uploads/%'`,
+		// คำขอแก้คะแนน: images เป็น jsonb array ของ path เช่น "uploads/score-edit-requests/xxx.jpg"
+		// anchor ด้วยเครื่องหมาย " หน้า path เพื่อไม่ให้ replace ซ้ำ (หลังแก้แล้ว pattern เดิมจะหายไป)
+		`UPDATE score_edit_requests
+		 SET images = REPLACE(images::text, '"uploads/score-edit-requests/', '"api/uploads/score-edit-requests/')::jsonb
+		 WHERE images::text LIKE '%"uploads/score-edit-requests/%'`,
+		// เผื่อ row เก่าที่บาง path มี leading slash ("/uploads/score-edit-requests/...")
+		`UPDATE score_edit_requests
+		 SET images = REPLACE(images::text, '"/uploads/score-edit-requests/', '"/api/uploads/score-edit-requests/')::jsonb
+		 WHERE images::text LIKE '%"/uploads/score-edit-requests/%'`,
+	}
+
+	for _, statement := range statements {
+		if err := DB.Exec(statement).Error; err != nil {
+			log.Printf("⚠️  Failed to migrate upload paths to /api/uploads prefix: %v", err)
+			return
+		}
+	}
+
+	log.Println("✅ Migrated upload paths to /api/uploads prefix")
+}
+
 func MigratePerformanceIndexes() {
 	if DB == nil {
 		return

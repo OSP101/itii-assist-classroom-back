@@ -115,6 +115,7 @@ func main() {
 	config.MigrateAttendanceRealtimeCompatibility()
 	config.MigrateScoreSchemaCompatibility()
 	config.MigrateQueueSessionCounterCompatibility()
+	config.MigrateUploadPathsToApiPrefix()
 	config.MigratePerformanceIndexes()
 	startAttendancePinLifecycleWorker()
 
@@ -164,7 +165,7 @@ func main() {
 		}))
 	}
 
-	app.Use("/uploads", static.New("./uploads"))
+	app.Use("/api/uploads", static.New("./uploads"))
 
 	app.Get("/api/health", func(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "success", "message": "API is Running!"})

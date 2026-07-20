@@ -23,7 +23,7 @@ func MaintenanceModeGuard() fiber.Handler {
 			path == "/api/maintenance-status" ||
 			path == "/api/system-settings/announcements/active" ||
 			strings.HasPrefix(path, "/ws") ||
-			strings.HasPrefix(path, "/uploads/") {
+			strings.HasPrefix(path, "/api/uploads/") {
 			return c.Next()
 		}
 
