@@ -9,6 +9,7 @@ import (
 
 	// เปลี่ยน "itii-assist" เป็นชื่อโมดูลของคุณในไฟล์ go.mod หากคุณตั้งชื่ออื่น
 	"itii-assist/config"
+	"itii-assist/handlers"
 	"itii-assist/middlewares"
 	"itii-assist/models"
 	"itii-assist/observability"
@@ -220,10 +221,25 @@ func startAttendancePinLifecycleWorker() {
 	go func() {
 		defer ticker.Stop()
 		for range ticker.C {
-			changes, err := repositories.MaintainAttendanceRuntimeSessions(context.Background(), time.Now())
+			now := time.Now()
+			changes := make([]repositories.AttendancePinStateChange, 0, 4)
+
+			// Auto-open scheduled sessions whose start time has arrived, so
+			// pre-created QR sessions open on time without an instructor online.
+			opened, err := repositories.AutoOpenDueAttendanceSessions(context.Background(), now)
+			if err != nil {
+				log.Printf("⚠️  Attendance auto-open worker failed: %v", err)
+			}
+			for _, o := range opened {
+				changes = append(changes, o.AttendancePinStateChange)
+				handlers.NotifyAttendanceSessionStarted(o.CourseID, o.SessionID, o.Title)
+			}
+
+			maintained, err := repositories.MaintainAttendanceRuntimeSessions(context.Background(), now)
 			if err != nil {
 				log.Printf("⚠️  Attendance PIN lifecycle worker failed: %v", err)
-				continue
+			} else {
+				changes = append(changes, maintained...)
 			}
 
 			for _, change := range changes {

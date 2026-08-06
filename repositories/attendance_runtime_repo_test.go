@@ -21,7 +21,7 @@ func setupAttendanceRuntimeTest(t *testing.T) (*miniredis.Miniredis, func()) {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&models.AttendanceSession{}, &models.AttendanceRecord{}, &models.AttendancePinHistory{}); err != nil {
+	if err := db.AutoMigrate(&models.Course{}, &models.AttendanceSession{}, &models.AttendanceRecord{}, &models.AttendancePinHistory{}); err != nil {
 		t.Fatalf("migrate sqlite: %v", err)
 	}
 
@@ -82,6 +82,93 @@ func createAttendanceSessionFixture(t *testing.T, autoRotate bool) models.Attend
 		t.Fatalf("create session: %v", err)
 	}
 	return session
+}
+
+func createCourseFixture(t *testing.T, id string, isActive bool) {
+	t.Helper()
+
+	course := models.Course{ID: id, Code: id, Name: "Course " + id, Year: 2026, Semester: 1}
+	if err := config.DB.Create(&course).Error; err != nil {
+		t.Fatalf("create course %s: %v", id, err)
+	}
+	// Set is_active via Update: creating from struct would let the
+	// default:true tag silently overwrite an explicit false.
+	if err := config.DB.Model(&models.Course{}).Where("id = ?", id).Update("is_active", isActive).Error; err != nil {
+		t.Fatalf("set course %s is_active: %v", id, err)
+	}
+}
+
+func TestAutoOpenDueAttendanceSessions(t *testing.T) {
+	_, cleanup := setupAttendanceRuntimeTest(t)
+	defer cleanup()
+
+	createCourseFixture(t, "CP-OPEN", true)
+	createCourseFixture(t, "CP-CLOSED", false)
+
+	now := time.Now()
+	autoRotate := false
+	newSession := func(courseID string, start time.Time) models.AttendanceSession {
+		session := models.AttendanceSession{
+			CourseID:             courseID,
+			Title:                "Scheduled attendance",
+			AutoRotatePin:        &autoRotate,
+			SessionType:          "lecture",
+			StartTime:            start,
+			EndTime:              start.Add(time.Hour),
+			LateThresholdMinutes: 15,
+			Status:               "draft",
+		}
+		if err := config.DB.Create(&session).Error; err != nil {
+			t.Fatalf("create session for %s: %v", courseID, err)
+		}
+		return session
+	}
+
+	due := newSession("CP-OPEN", now.Add(-time.Minute))
+	closedCourse := newSession("CP-CLOSED", now.Add(-time.Minute))
+	future := newSession("CP-OPEN", now.Add(10*time.Minute))
+
+	opened, err := AutoOpenDueAttendanceSessions(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("auto open due sessions: %v", err)
+	}
+	if len(opened) != 1 {
+		t.Fatalf("expected exactly 1 auto-opened session, got %d", len(opened))
+	}
+	if opened[0].SessionID != due.ID {
+		t.Fatalf("expected session %d to open, got %d", due.ID, opened[0].SessionID)
+	}
+	if !opened[0].StatusChanged || opened[0].Status != "active" {
+		t.Fatalf("expected active status change, got %+v", opened[0].AttendancePinStateChange)
+	}
+	if opened[0].PinCode == "" {
+		t.Fatal("expected auto-opened session to carry a pin")
+	}
+	if opened[0].Title != due.Title {
+		t.Fatalf("expected title %q, got %q", due.Title, opened[0].Title)
+	}
+
+	assertStatus := func(id uint, want string) {
+		var reloaded models.AttendanceSession
+		if err := config.DB.First(&reloaded, id).Error; err != nil {
+			t.Fatalf("reload session %d: %v", id, err)
+		}
+		if reloaded.Status != want {
+			t.Fatalf("session %d: expected status %q, got %q", id, want, reloaded.Status)
+		}
+	}
+	assertStatus(due.ID, "active")
+	assertStatus(closedCourse.ID, "draft")
+	assertStatus(future.ID, "draft")
+
+	// Second tick must be a no-op: the opened session is now active.
+	openedAgain, err := AutoOpenDueAttendanceSessions(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("auto open second tick: %v", err)
+	}
+	if len(openedAgain) != 0 {
+		t.Fatalf("expected no sessions on second tick, got %d", len(openedAgain))
+	}
 }
 
 func TestStartAttendanceSessionStatic(t *testing.T) {

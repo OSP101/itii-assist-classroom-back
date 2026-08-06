@@ -1430,6 +1430,20 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+// NotifyAttendanceSessionStarted mirrors the course-member notification sent by
+// the manual activate endpoint so sessions auto-opened by the background worker
+// notify students the same way. actorID 0 = system, so every member is notified.
+func NotifyAttendanceSessionStarted(courseID string, sessionID uint, title string) {
+	go createNotificationsForCourseMembers(
+		courseID, 0,
+		"attendance_started",
+		"Start attendance: "+title,
+		"Attendance has started in this course",
+		"/classroom/"+courseID+"/attendance",
+		buildNotifData(courseID, fmt.Sprint(sessionID), "attendance_session", ""),
+	)
+}
+
 func emitAttendancePinUpdated(session models.AttendanceSession) {
 	payload := fiber.Map{
 		"session_id":      session.ID,

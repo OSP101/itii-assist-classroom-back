@@ -1450,6 +1450,65 @@ func CompleteQueueBookingCompatHandler(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"booking": booking, "next_booking": nextBookingPayload}})
 }
 
+// GET /api/courses/:courseId/queue/sessions/:sessionId/bookings/:bookingId/scores
+// Returns the booking student's already-graded sub-item scores on the
+// booking's own linked assignment. Mirrored cross-course TAs hold no course
+// membership on the partner course, so they cannot call GET /api/scores there;
+// the worker UI fetches graded locks through this queue-scoped endpoint
+// (guarded by RequireQueueWorkerOrCoursePermission) instead.
+func GetQueueBookingExistingScoresHandler(c fiber.Ctx) error {
+	bookingID, err := strconv.ParseUint(c.Params("bookingId"), 10, 64)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid booking ID"})
+	}
+
+	booking, lookupErr := repositories.GetBookingByID(uint(bookingID))
+	if lookupErr != nil || booking == nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Booking not found"})
+	}
+
+	var session models.QueueSession
+	if err := config.DB.Select("id", "linked_assignment_id").Where("id = ?", booking.QueueSessionID).First(&session).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Queue session not found"})
+	}
+
+	subItemScores := make([]fiber.Map, 0)
+	if session.LinkedAssignmentID == nil {
+		return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"sub_item_scores": subItemScores}})
+	}
+
+	var scores []models.Score
+	if err := config.DB.Where("assignment_id = ? AND student_id = ? AND sub_item_id IS NOT NULL AND status = ?", *session.LinkedAssignmentID, booking.StudentID, "graded").Find(&scores).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load scores"})
+	}
+
+	graderIDs := make([]uint, 0, len(scores))
+	for _, row := range scores {
+		if row.GradedBy != nil {
+			graderIDs = append(graderIDs, *row.GradedBy)
+		}
+	}
+	graderNames, err := loadScoreGraderNames(graderIDs)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load scores"})
+	}
+
+	for _, row := range scores {
+		payload := fiber.Map{
+			"sub_item_id": *row.SubItemID,
+			"score":       row.Score,
+			"graded_at":   row.GradedAt,
+			"graded_by":   nil,
+		}
+		if row.GradedBy != nil {
+			payload["graded_by"] = fiber.Map{"id": *row.GradedBy, "display_name": graderNames[*row.GradedBy]}
+		}
+		subItemScores = append(subItemScores, payload)
+	}
+
+	return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"sub_item_scores": subItemScores}})
+}
+
 // POST /api/courses/:courseId/queue/sessions/:sessionId/bookings/:bookingId/skip
 func SkipQueueBookingCompatHandler(c fiber.Ctx) error {
 	bookingID, err := strconv.ParseUint(c.Params("bookingId"), 10, 64)
@@ -4313,10 +4372,26 @@ func buildWorkerBookingPayload(booking *models.QueueBooking) (fiber.Map, error) 
 		if session.LinkedAssignmentID != nil {
 			var assignment models.Assignment
 			if err := config.DB.Select("id", "name", "max_score").First(&assignment, *session.LinkedAssignmentID).Error; err == nil {
+				// Sub-items must come from the booking's own assignment: a mirrored
+				// TA grading a partner course's booking scores against these ids,
+				// not the sub-items of their own session's linked assignment.
+				var subItems []models.AssignmentSubItem
+				subItemPayloads := make([]fiber.Map, 0)
+				if err := config.DB.Where("assignment_id = ?", assignment.ID).Order("order_index ASC, id ASC").Find(&subItems).Error; err == nil {
+					for _, subItem := range subItems {
+						subItemPayloads = append(subItemPayloads, fiber.Map{
+							"id":          subItem.ID,
+							"name":        subItem.Name,
+							"max_score":   subItem.MaxScore,
+							"order_index": subItem.OrderIndex,
+						})
+					}
+				}
 				payload["origin_assignment"] = fiber.Map{
 					"id":        assignment.ID,
 					"name":      assignment.Name,
 					"max_score": assignment.MaxScore,
+					"sub_items": subItemPayloads,
 				}
 			}
 		}

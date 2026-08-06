@@ -848,6 +848,54 @@ func SyncAttendanceRuntimeAutoRotate(ctx context.Context, sessionID uint, autoRo
 	return state, nil
 }
 
+type AttendanceAutoOpenedSession struct {
+	AttendancePinStateChange
+	Title string
+}
+
+// AutoOpenDueAttendanceSessions promotes scheduled (draft) sessions whose start
+// window has arrived to active through the same runtime path as the manual
+// activate endpoint, so pre-created QR/PIN sessions open on time without anyone
+// visiting the web. Sessions of inactive courses are skipped (closed-course
+// guard). Per-session failures are logged and skipped so one broken session
+// cannot block the rest; failed sessions stay draft and are retried next tick.
+func AutoOpenDueAttendanceSessions(ctx context.Context, now time.Time) ([]AttendanceAutoOpenedSession, error) {
+	if !attendanceRedisAvailable() {
+		return nil, nil
+	}
+
+	var sessions []models.AttendanceSession
+	if err := config.DB.
+		Joins("JOIN courses ON courses.id = attendance_sessions.course_id AND courses.is_active = ?", true).
+		Where("attendance_sessions.status = 'draft' AND attendance_sessions.start_time <= ? AND attendance_sessions.end_time > ?", now, now).
+		Find(&sessions).Error; err != nil {
+		return nil, err
+	}
+
+	opened := make([]AttendanceAutoOpenedSession, 0, len(sessions))
+	for _, session := range sessions {
+		result, err := StartAttendanceSession(ctx, session.ID, "")
+		if err != nil {
+			log.Printf("event=attendance_auto_open_failed session_id=%d err=%v", session.ID, err)
+			continue
+		}
+		log.Printf("event=attendance_session_auto_opened session_id=%d course_id=%s", session.ID, session.CourseID)
+		opened = append(opened, AttendanceAutoOpenedSession{
+			AttendancePinStateChange: AttendancePinStateChange{
+				SessionID:     session.ID,
+				CourseID:      session.CourseID,
+				Status:        "active",
+				PinCode:       result.CurrentPIN,
+				PinIssuedAt:   result.State.PinIssuedAt,
+				PinRotatesAt:  result.State.NextRotationAt,
+				StatusChanged: true,
+			},
+			Title: session.Title,
+		})
+	}
+	return opened, nil
+}
+
 func MaintainAttendanceRuntimeSessions(ctx context.Context, now time.Time) ([]AttendancePinStateChange, error) {
 	var sessions []models.AttendanceSession
 	if err := config.DB.Where("status = 'active'").Find(&sessions).Error; err != nil {
