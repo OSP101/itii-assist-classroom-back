@@ -131,7 +131,7 @@ func GitHubLoginHandler(c fiber.Ctx) error {
 	}
 
 	action := c.Query("action")
-	linkToken := c.Query("link_token")
+	linkToken := linkTokenForRequest(c, action)
 
 	stateStr, err := signOAuthState(action, linkToken, "")
 	if err != nil {
@@ -239,10 +239,9 @@ func GitHubCallbackHandler(c fiber.Ctx) error {
 			return redirectErr("/auth/link-callback", "Failed to create session")
 		}
 
-		return c.Redirect().To(buildFrontendRedirectWithFragment(frontendURL, "/auth/link-callback", map[string]string{
-			"linked":       "github",
-			"accessToken":  at,
-			"refreshToken": rt,
+		utils.SetAuthCookies(c, at, rt)
+		return c.Redirect().To(buildFrontendRedirectWithQuery(frontendURL, "/auth/link-callback", map[string]string{
+			"linked": "github",
 		}))
 	}
 
@@ -287,8 +286,8 @@ func GitHubCallbackHandler(c fiber.Ctx) error {
 		"loginFlow": "oauth",
 	})
 
-	return c.Redirect().To(buildFrontendRedirectWithFragment(frontendURL, "/auth/callback", map[string]string{
-		"accessToken":  at,
-		"refreshToken": rt,
+	utils.SetAuthCookies(c, at, rt)
+	return c.Redirect().To(buildFrontendRedirectWithQuery(frontendURL, "/auth/callback", map[string]string{
+		"login": "success",
 	}))
 }

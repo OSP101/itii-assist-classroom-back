@@ -48,20 +48,31 @@ func normalizePublicBaseURL(raw string) string {
 }
 
 func getRequestPublicBaseURL(c fiber.Ctx) string {
+	// c.Hostname() strips the port (fine behind nginx on 443/80, but wrong
+	// for a direct connection on a non-standard port like local dev :8000)
+	// — c.Host() keeps host:port as sent by the client/proxy.
 	host := firstHeaderValue(c.Get("X-Forwarded-Host"))
 	if host == "" {
-		host = strings.TrimSpace(c.Hostname())
+		host = strings.TrimSpace(c.Host())
 	}
 	if host == "" {
 		return ""
 	}
 
+	// NOTE: fiber.Ctx.Protocol() returns the HTTP version ("HTTP/1.1"/
+	// "HTTP/2"), not the URL scheme — a Fiber v2→v3 API change. Must not
+	// be used here. X-Forwarded-Proto (always set by nginx in every real
+	// deployment) covers production; the fallback below checks the actual
+	// connection's TLS state directly, which is trust-proxy-config-
+	// independent and correct for a direct/un-proxied connection (e.g.
+	// local dev hitting the Go binary directly over plain HTTP).
 	scheme := firstHeaderValue(c.Get("X-Forwarded-Proto"))
 	if scheme == "" {
-		scheme = strings.TrimSpace(c.Protocol())
-	}
-	if scheme == "" {
-		scheme = "https"
+		if c.RequestCtx().IsTLS() {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
 	}
 
 	return normalizePublicBaseURL(scheme + "://" + host)
@@ -112,6 +123,24 @@ func buildFrontendRedirectWithFragment(baseURL, path string, params map[string]s
 	}
 
 	return fmt.Sprintf("%s%s#%s", baseURL, path, fragment.Encode())
+}
+
+// buildFrontendRedirectWithQuery is used once the auth cookies have already
+// been set on this same response (via utils.SetAuthCookies) — unlike
+// buildFrontendRedirectWithFragment, no tokens are ever passed here, only
+// non-sensitive UI signals (e.g. "login=success", "linked=google").
+func buildFrontendRedirectWithQuery(baseURL, path string, params map[string]string) string {
+	query := url.Values{}
+	for key, value := range params {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		query.Set(key, value)
+	}
+	if len(query) == 0 {
+		return baseURL + path
+	}
+	return fmt.Sprintf("%s%s?%s", baseURL, path, query.Encode())
 }
 
 // =============================================================================
@@ -363,11 +392,34 @@ func issueOAuthSession(c fiber.Ctx, user *models.User, provider string) (at, rt 
 	return
 }
 
+// linkTokenForRequest returns the current caller's access token for an
+// action=link request, so it can be carried through the signed OAuth state
+// to the callback (which validates it there — see the isLinkAction branch
+// in GoogleCallbackHandler/GitHubCallbackHandler). Web callers never had
+// this token in JS to send as a query param even before the httpOnly-cookie
+// migration was the safer choice — this request itself (opened as a normal
+// browser navigation while already logged in) carries the Bearer header
+// (mobile, if ever used this way) or the access-token cookie (web)
+// automatically, exactly like any other authenticated request.
+func linkTokenForRequest(c fiber.Ctx, action string) string {
+	if action != "link" {
+		return ""
+	}
+	authHeader := c.Get("Authorization")
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		return strings.TrimPrefix(authHeader, "Bearer ")
+	}
+	return c.Cookies(utils.AccessTokenCookieName)
+}
+
 // =============================================================================
 // GET /api/auth/google
 // Redirects browser to Google's consent screen.
 // Optional query params:
-//   action=link&link_token=<access_token>
+//   action=link  — links the CURRENTLY authenticated caller's account. The
+//   access token itself is taken from this request's own Authorization
+//   header or httpOnly cookie (not a query param) and carried through the
+//   signed state to the callback — see linkTokenForRequest.
 // =============================================================================
 
 func GoogleLoginHandler(c fiber.Ctx) error {
@@ -379,7 +431,7 @@ func GoogleLoginHandler(c fiber.Ctx) error {
 	}
 
 	action := c.Query("action")
-	linkToken := c.Query("link_token")
+	linkToken := linkTokenForRequest(c, action)
 	audience := strings.ToLower(strings.TrimSpace(c.Query("audience")))
 	if audience != "student" {
 		audience = ""
@@ -498,10 +550,9 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 		if err != nil {
 			return redirectErr("/auth/link-callback", "Failed to create session")
 		}
-		return c.Redirect().To(buildFrontendRedirectWithFragment(frontendURL, "/auth/link-callback", map[string]string{
-			"linked":       "google",
-			"accessToken":  at,
-			"refreshToken": rt,
+		utils.SetAuthCookies(c, at, rt)
+		return c.Redirect().To(buildFrontendRedirectWithQuery(frontendURL, "/auth/link-callback", map[string]string{
+			"linked": "google",
 		}))
 	}
 
@@ -524,9 +575,9 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 			"email":      student.Email,
 			"provider":   "google",
 		})
-		return c.Redirect().To(buildFrontendRedirectWithFragment(frontendURL, "/auth/callback", map[string]string{
-			"accessToken":  at,
-			"refreshToken": rt,
+		utils.SetAuthCookies(c, at, rt)
+		return c.Redirect().To(buildFrontendRedirectWithQuery(frontendURL, "/auth/callback", map[string]string{
+			"login": "success",
 		}))
 	}
 
@@ -569,8 +620,8 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 		"provider":  "google",
 		"loginFlow": "oauth",
 	})
-	return c.Redirect().To(buildFrontendRedirectWithFragment(frontendURL, "/auth/callback", map[string]string{
-		"accessToken":  at,
-		"refreshToken": rt,
+	utils.SetAuthCookies(c, at, rt)
+	return c.Redirect().To(buildFrontendRedirectWithQuery(frontendURL, "/auth/callback", map[string]string{
+		"login": "success",
 	}))
 }

@@ -19,8 +19,15 @@ const (
 	attendanceDisplaySocketTicketTTL = time.Minute
 )
 
+// NOTE: fiber.Ctx.Protocol() returns the HTTP version ("HTTP/1.1"/"HTTP/2"),
+// NOT the URL scheme — a Fiber v2→v3 API change that silently made this
+// always return false (cookies below always got Secure=false). Found while
+// migrating auth cookies (see utils/auth_cookies.go for the same fix).
 func isSecureRequest(c fiber.Ctx) bool {
-	return strings.EqualFold(c.Protocol(), "https")
+	if proto := c.Get("X-Forwarded-Proto"); proto != "" {
+		return strings.EqualFold(strings.TrimSpace(proto), "https")
+	}
+	return c.RequestCtx().IsTLS()
 }
 
 func setAttendanceDisplayCookie(c fiber.Ctx, name string, value string, expiresAt time.Time) {

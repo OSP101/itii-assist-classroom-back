@@ -244,6 +244,10 @@ func (h *AuthHandler) Login(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึก Token ไม่สำเร็จ"})
 	}
 
+	if utils.IsWebClient(c) {
+		utils.SetAuthCookies(c, accessToken, refreshToken)
+	}
+
 	reqID, traceID, ip := services.ExtractMeta(c)
 	h.auditLogger.LogSystem(c.Context(), services.SystemEvent{
 		ActorUserID:  user.ID,
@@ -276,17 +280,29 @@ func (h *AuthHandler) Login(c fiber.Ctx) error {
 
 func RefreshHandler(c fiber.Ctx) error {
 	var input RefreshInput
-	if err := c.Bind().JSON(&input); err != nil || input.RefreshToken == "" {
+	_ = c.Bind().JSON(&input) // web clients send an empty/no body and rely on the refresh cookie below
+
+	refreshToken := input.RefreshToken
+	if refreshToken == "" {
+		refreshToken = c.Cookies(utils.RefreshTokenCookieName)
+	}
+	if refreshToken == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "กรุณาส่ง refreshToken"})
 	}
 
-	claims, err := utils.ValidateRefreshToken(input.RefreshToken)
+	claims, err := utils.ValidateRefreshToken(refreshToken)
 	if err != nil {
+		if utils.IsWebClient(c) {
+			utils.ClearAuthCookies(c)
+		}
 		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Refresh Token ไม่ถูกต้องหรือหมดอายุ"})
 	}
 
 	tokenRecord, err := repositories.FindRefreshTokenByJTI(claims.JTI)
 	if err != nil {
+		if utils.IsWebClient(c) {
+			utils.ClearAuthCookies(c)
+		}
 		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Refresh Token ถูกยกเลิกแล้ว"})
 	}
 
@@ -294,6 +310,9 @@ func RefreshHandler(c fiber.Ctx) error {
 	if claims.Kind == "s" || tokenRecord.Kind == "s" {
 		student, studentErr := repositories.FindStudentByID(tokenRecord.UserID)
 		if studentErr != nil || !student.IsActive {
+			if utils.IsWebClient(c) {
+				utils.ClearAuthCookies(c)
+			}
 			return c.Status(401).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูลนักศึกษาหรือถูกระงับการใช้งาน"})
 		}
 		if err := repositories.RevokeRefreshToken(claims.JTI); err != nil {
@@ -312,6 +331,9 @@ func RefreshHandler(c fiber.Ctx) error {
 		}); err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึก Token ใหม่ไม่สำเร็จ"})
 		}
+		if utils.IsWebClient(c) {
+			utils.SetAuthCookies(c, accessToken, refreshToken)
+		}
 		return c.JSON(fiber.Map{
 			"success": true,
 			"message": "ต่ออายุ Token สำเร็จ",
@@ -321,6 +343,9 @@ func RefreshHandler(c fiber.Ctx) error {
 
 	user, err := repositories.FindUserByID(tokenRecord.UserID)
 	if err != nil || !user.IsActive {
+		if utils.IsWebClient(c) {
+			utils.ClearAuthCookies(c)
+		}
 		return c.Status(401).JSON(fiber.Map{"success": false, "message": "ไม่พบผู้ใช้หรือถูกระงับการใช้งาน"})
 	}
 
@@ -345,6 +370,10 @@ func RefreshHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึก Token ใหม่ไม่สำเร็จ"})
 	}
 
+	if utils.IsWebClient(c) {
+		utils.SetAuthCookies(c, accessToken, refreshToken)
+	}
+
 	return c.JSON(fiber.Map{
 		"success": true,
 		"message": "ต่ออายุ Token สำเร็จ",
@@ -363,13 +392,22 @@ func (h *AuthHandler) Logout(c fiber.Ctx) error {
 	var jti string
 	var actorID uint
 	var input LogoutInput
-	if err := c.Bind().JSON(&input); err == nil && input.RefreshToken != "" {
-		claims, err := utils.ValidateRefreshToken(input.RefreshToken)
+	_ = c.Bind().JSON(&input)
+
+	refreshToken := input.RefreshToken
+	if refreshToken == "" {
+		refreshToken = c.Cookies(utils.RefreshTokenCookieName)
+	}
+	if refreshToken != "" {
+		claims, err := utils.ValidateRefreshToken(refreshToken)
 		if err == nil {
 			jti = claims.JTI
 			actorID = claims.UserID
 			_ = repositories.RevokeRefreshToken(claims.JTI)
 		}
+	}
+	if utils.IsWebClient(c) {
+		utils.ClearAuthCookies(c)
 	}
 	reqID, traceID, ip := services.ExtractMeta(c)
 	h.auditLogger.LogSystem(c.Context(), services.SystemEvent{

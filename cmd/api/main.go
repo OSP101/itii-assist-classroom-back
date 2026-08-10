@@ -17,6 +17,7 @@ import (
 	"itii-assist/repositories"
 	"itii-assist/routes"
 	"itii-assist/services"
+	"itii-assist/utils"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
@@ -145,12 +146,22 @@ func main() {
 	// CORS — ต้องอยู่ก่อน middleware auth ทุกตัว
 	rawOrigins := os.Getenv("CORS_ALLOWED_ORIGINS")
 	var allowedOrigins []string
+	// Header list also carries the two headers introduced for cookie-based
+	// web auth: X-Client-Type (tells the backend "this is the browser, use
+	// cookies" vs the mobile app's Bearer-only requests) and X-CSRF-Token
+	// (the double-submit CSRF header, checked inside Protected()/
+	// OptionalProtected() — see middlewares/auth_middleware.go).
+	corsAllowHeaders := []string{"Origin", "Content-Type", "Accept", "Authorization", utils.WebClientHeader, utils.CSRFHeaderName}
+
 	if rawOrigins == "" || rawOrigins == "*" {
-		// Allow all origins via func to avoid Fiber v3 strict URL validation
+		// Allow all origins via func to avoid Fiber v3 strict URL validation.
+		// AllowCredentials + AllowOriginsFunc is safe (unlike a literal "*"):
+		// Fiber reflects the specific request Origin, not a wildcard.
 		app.Use(cors.New(cors.Config{
 			AllowOriginsFunc: func(origin string) bool { return true },
 			AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-			AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+			AllowHeaders:     corsAllowHeaders,
+			AllowCredentials: true,
 		}))
 	} else {
 		for _, o := range strings.Split(rawOrigins, ",") {
@@ -161,7 +172,7 @@ func main() {
 		app.Use(cors.New(cors.Config{
 			AllowOrigins:     allowedOrigins,
 			AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-			AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+			AllowHeaders:     corsAllowHeaders,
 			AllowCredentials: true,
 		}))
 	}

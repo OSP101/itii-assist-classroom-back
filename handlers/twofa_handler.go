@@ -722,6 +722,10 @@ func CompleteTwoFALoginHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึก Token ไม่สำเร็จ"})
 	}
 
+	if utils.IsWebClient(c) {
+		utils.SetAuthCookies(c, accessToken, refreshToken)
+	}
+
 	actorUserID := user.ID
 	{
 		dt, br, osn := utils.ParseUserAgent(c.Get("User-Agent"))

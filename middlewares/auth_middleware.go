@@ -48,6 +48,39 @@ func GetUserRole(c fiber.Ctx) (string, bool) {
 	return role, ok
 }
 
+// extractAccessToken reads the access token from the Authorization header
+// first (the mobile app's only path, unchanged), falling back to the
+// httpOnly access-token cookie set by the web login/refresh/OAuth flows
+// when no Bearer header is present. Reports whether the cookie path was
+// used, since only cookie-authenticated requests need the CSRF check below
+// — a browser never auto-attaches a custom Authorization header cross-site,
+// so Bearer requests (mobile, or any lingering non-cookie web client) are
+// inherently CSRF-safe already.
+func extractAccessToken(c fiber.Ctx) (token string, viaCookie bool) {
+	authHeader := c.Get("Authorization")
+	if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
+		return strings.TrimPrefix(authHeader, "Bearer "), false
+	}
+	return c.Cookies(utils.AccessTokenCookieName), true
+}
+
+// csrfOK reports whether the double-submit-cookie CSRF check passes for a
+// request that just authenticated via cookie: the frontend must echo the
+// readable csrf_token cookie's value back in the X-CSRF-Token header, which
+// a cross-site page cannot read to forge. Side-effect-free — callers decide
+// how to respond to a failure (Protected() hard-errors; OptionalProtected()
+// falls through as anonymous instead, matching its "optional" contract).
+func csrfOK(c fiber.Ctx) bool {
+	switch c.Method() {
+	case fiber.MethodGet, fiber.MethodHead, fiber.MethodOptions:
+		return true
+	}
+
+	cookieToken := c.Cookies(utils.CSRFCookieName)
+	headerToken := c.Get(utils.CSRFHeaderName)
+	return cookieToken != "" && headerToken != "" && cookieToken == headerToken
+}
+
 func Protected() fiber.Handler {
 	return func(c fiber.Ctx) error {
 		// Skip auth for CORS preflight requests
@@ -55,15 +88,13 @@ func Protected() fiber.Handler {
 			return c.Next()
 		}
 
-		authHeader := c.Get("Authorization")
-		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+		tokenString, viaCookie := extractAccessToken(c)
+		if tokenString == "" {
 			return c.Status(401).JSON(fiber.Map{
 				"success": false,
 				"message": "ไม่ได้ส่ง Token หรือรูปแบบไม่ถูกต้อง (ต้องการ Bearer Token)",
 			})
 		}
-
-		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 
 		claims, err := utils.ValidateAccessToken(tokenString)
 		if err != nil {
@@ -80,6 +111,13 @@ func Protected() fiber.Handler {
 					"message": "Session ถูกยกเลิกหรือหมดอายุแล้ว กรุณาเข้าสู่ระบบใหม่",
 				})
 			}
+		}
+
+		if viaCookie && !csrfOK(c) {
+			return c.Status(403).JSON(fiber.Map{
+				"success": false,
+				"message": "CSRF token ไม่ถูกต้องหรือหายไป กรุณาโหลดหน้าใหม่แล้วลองอีกครั้ง",
+			})
 		}
 
 		c.Locals("jti", claims.JTI)
@@ -102,12 +140,11 @@ func OptionalProtected() fiber.Handler {
 			return c.Next()
 		}
 
-		authHeader := c.Get("Authorization")
-		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+		tokenString, viaCookie := extractAccessToken(c)
+		if tokenString == "" {
 			return c.Next()
 		}
 
-		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 		claims, err := utils.ValidateAccessToken(tokenString)
 		if err != nil {
 			return c.Next()
@@ -117,6 +154,14 @@ func OptionalProtected() fiber.Handler {
 			if _, err := repositories.FindRefreshTokenByJTI(claims.JTI); err != nil {
 				return c.Next()
 			}
+		}
+
+		// Unlike Protected(), an optional session that fails CSRF just
+		// falls through as anonymous (skip setting locals, keep going)
+		// rather than hard-erroring — the route itself decides whether
+		// anonymous access is acceptable.
+		if viaCookie && !csrfOK(c) {
+			return c.Next()
 		}
 
 		c.Locals("jti", claims.JTI)
