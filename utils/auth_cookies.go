@@ -102,6 +102,21 @@ func SetAuthCookies(c fiber.Ctx, accessToken, refreshToken string) {
 			HTTPOnly: false, // must be readable by frontend JS to echo back in CSRFHeaderName
 			SameSite: "Lax",
 		})
+		// Also hand the token back in a response header. The reverse proxy in
+		// front of cocolabs.computing.kku.ac.th rewrites Set-Cookie and forces
+		// HttpOnly onto every cookie, which silently makes the cookie above
+		// unreadable to JS there (and only there) — see ExposeCSRFToken.
+		c.Set(CSRFHeaderName, csrfToken)
+	}
+}
+
+// ExposeCSRFToken echoes the request's existing csrf_token cookie back as a
+// response header, so a frontend that cannot read the cookie itself can still
+// recover the current token on a plain GET (see GetMeHandler). Safe because
+// the same-origin policy stops a cross-site page from reading the response.
+func ExposeCSRFToken(c fiber.Ctx) {
+	if token := c.Cookies(CSRFCookieName); token != "" {
+		c.Set(CSRFHeaderName, token)
 	}
 }
 

@@ -560,6 +560,11 @@ func ResetPasswordHandler(c fiber.Ctx) error {
 // =============================================================================
 
 func GetMeHandler(c fiber.Ctx) error {
+	// Lets the web frontend recover the current CSRF token on a plain GET —
+	// its own cookie copy is unreadable behind the KKU reverse proxy, which
+	// forces HttpOnly onto every Set-Cookie it relays.
+	utils.ExposeCSRFToken(c)
+
 	// Student session: return student data from students table
 	if studentID, ok := middlewares.GetStudentID(c); ok {
 		student, err := repositories.FindStudentByID(studentID)
