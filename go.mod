@@ -5,6 +5,7 @@ go 1.26.2
 require (
 	github.com/SherClockHolmes/webpush-go v1.4.0
 	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/disintegration/imaging v1.6.2
 	github.com/fasthttp/websocket v1.5.8
 	github.com/glebarez/sqlite v1.11.0
 	github.com/gofiber/fiber/v3 v3.1.0
@@ -75,6 +76,7 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
+	golang.org/x/image v0.0.0-20191009234506-e7c1f5e7dbb8 // indirect
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect

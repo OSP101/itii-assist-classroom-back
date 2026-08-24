@@ -835,13 +835,25 @@ func UploadAvatarHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Only image files are allowed"})
 	}
 
+	// Downscale + re-encode as JPEG so large phone-camera uploads (which
+	// otherwise ride along unmodified in every UserBasic embedded in
+	// course/instructor/TA list responses) don't balloon those payloads.
+	// Falls back to the original bytes for formats we can't decode (WebP,
+	// animated GIF) rather than failing the upload.
+	filename := fileHeader.Filename
+	if resized, ok := utils.ProcessUploadedImage(content, 512, 512, 85); ok {
+		content = resized
+		contentType = "image/jpeg"
+		filename = "avatar.jpg"
+	}
+
 	// Saved to disk and referenced by URL, not stored inline as base64: the
 	// avatar rides along in every UserBasic embedded in course/instructor/TA
 	// list responses, so a base64 blob there multiplies by every user who has
 	// one — this previously ballooned /api/courses/my-courses and
 	// /api/courses/instructors to several MB each.
 	oldAvatar := user.Avatar
-	publicPath, err := saveAvatarFile(content, contentType, fileHeader.Filename)
+	publicPath, err := saveAvatarFile(content, contentType, filename)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to save avatar"})
 	}
