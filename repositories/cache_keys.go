@@ -22,6 +22,7 @@ import (
 const (
 	cacheKeyCourseOverview = "cache:course:overview:"
 	cacheKeyClassroomList  = "cache:classroom:list:"
+	cacheKeyMyCourses      = "cache:mycourses:"
 )
 
 // TTLs are the backstop, not the primary correctness mechanism — writes
@@ -34,6 +35,10 @@ func courseOverviewTTL() time.Duration {
 func classroomListTTL() time.Duration {
 	// Rooms and desk layouts change a handful of times a semester.
 	return cacheTTLFromEnv("CACHE_CLASSROOM_LIST_SECONDS", 300)
+}
+
+func myCoursesTTL() time.Duration {
+	return cacheTTLFromEnv("CACHE_MY_COURSES_SECONDS", 30)
 }
 
 // cacheTTLFromEnv reads a TTL override. A value of 0 disables that cache
@@ -82,6 +87,33 @@ func classroomListCacheKey(params ClassroomListParams) string {
 
 	sum := sha1.Sum([]byte(builder.String()))
 	return cacheKeyClassroomList + hex.EncodeToString(sum[:])
+}
+
+// myCoursesCacheKey hashes the user, role and every list param into the key.
+// GetMyCourses's result is scoped to one caller (each course carries that
+// caller's section/group membership), so per config/cache.go's "nothing
+// user-specific under a shared key" rule, userID has to be part of the
+// digest — not just an extra param alongside the others.
+func myCoursesCacheKey(userID uint, role string, params CourseListParams) string {
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "%d|%d|%d|", userID, params.Page, params.Limit)
+	for _, field := range []string{role, params.Search, params.Status, params.SortBy, params.SortOrder} {
+		fmt.Fprintf(&builder, "%d:%s|", len(field), field)
+	}
+	fmt.Fprintf(&builder, "%d|%d", params.Year, params.Semester)
+
+	sum := sha1.Sum([]byte(builder.String()))
+	return cacheKeyMyCourses + hex.EncodeToString(sum[:])
+}
+
+// InvalidateMyCoursesCache drops every cached "my courses" list for every
+// user. Entries are keyed by a hash that includes the user id, so there is no
+// prefix that targets only the users affected by one course's membership
+// change — clearing the whole family is the same trade
+// InvalidateClassroomListCache makes, and the short TTL keeps a missed call
+// cheap.
+func InvalidateMyCoursesCache() {
+	config.CacheDeletePrefix(cacheKeyMyCourses)
 }
 
 // InvalidateCourseOverviewCache drops the cached overview for one course. Call

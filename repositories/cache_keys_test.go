@@ -65,6 +65,51 @@ func TestClassroomListCacheKeySeparatorInjection(t *testing.T) {
 	}
 }
 
+// Every field of CourseListParams, plus userID and role, has to affect the
+// key — GetMyCourses's result differs by all of them (role changes the join,
+// userID scopes the membership, the rest filter/paginate/sort).
+func TestMyCoursesCacheKeyCoversEveryField(t *testing.T) {
+	baseParams := CourseListParams{
+		Page: 1, Limit: 12, Search: "cp", Year: 2569, Semester: 1,
+		Status: "active", SortBy: "year", SortOrder: "DESC",
+	}
+	baseKey := myCoursesCacheKey(1, "instructor", baseParams)
+
+	if myCoursesCacheKey(2, "instructor", baseParams) == baseKey {
+		t.Fatal("changing userID did not change the cache key")
+	}
+	if myCoursesCacheKey(1, "ta", baseParams) == baseKey {
+		t.Fatal("changing role did not change the cache key")
+	}
+
+	variants := map[string]CourseListParams{
+		"page":      {Page: 2, Limit: 12, Search: "cp", Year: 2569, Semester: 1, Status: "active", SortBy: "year", SortOrder: "DESC"},
+		"limit":     {Page: 1, Limit: 10, Search: "cp", Year: 2569, Semester: 1, Status: "active", SortBy: "year", SortOrder: "DESC"},
+		"search":    {Page: 1, Limit: 12, Search: "tc", Year: 2569, Semester: 1, Status: "active", SortBy: "year", SortOrder: "DESC"},
+		"year":      {Page: 1, Limit: 12, Search: "cp", Year: 2568, Semester: 1, Status: "active", SortBy: "year", SortOrder: "DESC"},
+		"semester":  {Page: 1, Limit: 12, Search: "cp", Year: 2569, Semester: 2, Status: "active", SortBy: "year", SortOrder: "DESC"},
+		"status":    {Page: 1, Limit: 12, Search: "cp", Year: 2569, Semester: 1, Status: "inactive", SortBy: "year", SortOrder: "DESC"},
+		"sortBy":    {Page: 1, Limit: 12, Search: "cp", Year: 2569, Semester: 1, Status: "active", SortBy: "code", SortOrder: "DESC"},
+		"sortOrder": {Page: 1, Limit: 12, Search: "cp", Year: 2569, Semester: 1, Status: "active", SortBy: "year", SortOrder: "ASC"},
+	}
+
+	for field, params := range variants {
+		t.Run(field, func(t *testing.T) {
+			if myCoursesCacheKey(1, "instructor", params) == baseKey {
+				t.Fatalf("changing %s did not change the cache key", field)
+			}
+		})
+	}
+}
+
+func TestMyCoursesCacheKeyIsStable(t *testing.T) {
+	params := CourseListParams{Page: 1, Limit: 12, Status: "active"}
+
+	if myCoursesCacheKey(7, "student", params) != myCoursesCacheKey(7, "student", params) {
+		t.Fatal("identical inputs must produce identical keys or nothing ever hits")
+	}
+}
+
 func TestCacheTTLFromEnv(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -95,4 +140,5 @@ func TestInvalidationIsSafeWithoutRedis(t *testing.T) {
 	InvalidateClassroomListCache()
 	InvalidateCourseOverviewCacheByAssignment(0)
 	InvalidateCourseOverviewCacheBySection(0)
+	InvalidateMyCoursesCache()
 }

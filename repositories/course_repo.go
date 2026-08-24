@@ -652,14 +652,20 @@ func IsActiveCourseExists(code string, year, semester int, excludeID string) boo
 }
 
 func CreateCourse(course *models.Course) error {
+	defer InvalidateMyCoursesCache()
+
 	return config.DB.Create(course).Error
 }
 
 func UpdateCourse(course *models.Course) error {
+	defer InvalidateMyCoursesCache()
+
 	return config.DB.Save(course).Error
 }
 
 func DeleteCourse(id string) error {
+	defer InvalidateMyCoursesCache()
+
 	db := config.DB
 
 	// Get sections
@@ -682,6 +688,8 @@ func DeleteCourse(id string) error {
 }
 
 func ToggleCourseStatus(id string) (*models.Course, error) {
+	defer InvalidateMyCoursesCache()
+
 	db := config.DB
 	var course models.Course
 	if err := db.First(&course, "id = ?", id).Error; err != nil {
@@ -776,6 +784,7 @@ func IsSectionExists(courseID string, sectionNo string, excludeID uint) bool {
 
 func CreateSection(section *models.CourseSection) error {
 	defer InvalidateCourseOverviewCache(section.CourseID)
+	defer InvalidateMyCoursesCache()
 
 	return config.DB.Create(section).Error
 }
@@ -796,6 +805,7 @@ func FindSectionByID(sectionID uint, courseID string) (*models.CourseSection, er
 
 func DeleteSection(sectionID uint, courseID string) error {
 	defer InvalidateCourseOverviewCache(courseID)
+	defer InvalidateMyCoursesCache()
 
 	db := config.DB
 	db.Where("course_section_id = ?", sectionID).Delete(&models.CourseSectionStudent{})
@@ -807,6 +817,8 @@ func DeleteSection(sectionID uint, courseID string) error {
 // ============================================================
 
 func AddCourseInstructor(courseID string, userID uint, isPrimary bool) error {
+	defer InvalidateMyCoursesCache()
+
 	return config.DB.Create(&models.CourseInstructor{
 		CourseID:    courseID,
 		UserID:      userID,
@@ -818,6 +830,7 @@ func AddCourseInstructor(courseID string, userID uint, isPrimary bool) error {
 
 func BulkAddCourseInstructors(courseID string, userIDs []uint) (addedUsers []UserBasic, skipped int, err error) {
 	defer InvalidateCourseOverviewCache(courseID)
+	defer InvalidateMyCoursesCache()
 
 	var existing []models.CourseInstructor
 	config.DB.Where("course_id = ? AND user_id IN ?", courseID, userIDs).Find(&existing)
@@ -857,6 +870,8 @@ func BulkAddCourseInstructors(courseID string, userIDs []uint) (addedUsers []Use
 }
 
 func RemoveCourseInstructor(courseID string, userID uint) (bool, error) {
+	defer InvalidateMyCoursesCache()
+
 	db := config.DB
 
 	// Check if primary
@@ -893,6 +908,8 @@ func GetCourseInstructorCount(courseID string) int64 {
 }
 
 func ReplaceAllCourseInstructors(courseID string, userIDs []uint) error {
+	defer InvalidateMyCoursesCache()
+
 	db := config.DB
 	db.Where("course_id = ?", courseID).Delete(&models.CourseInstructor{})
 	if len(userIDs) == 0 {
@@ -916,6 +933,7 @@ func ReplaceAllCourseInstructors(courseID string, userIDs []uint) error {
 
 func AddCourseTA(courseID string, userID uint) error {
 	defer InvalidateCourseOverviewCache(courseID)
+	defer InvalidateMyCoursesCache()
 
 	return config.DB.Create(&models.CourseTA{
 		CourseID:    courseID,
@@ -927,6 +945,7 @@ func AddCourseTA(courseID string, userID uint) error {
 
 func BulkAddCourseTAs(courseID string, userIDs []uint) (addedUsers []UserBasic, skipped int, err error) {
 	defer InvalidateCourseOverviewCache(courseID)
+	defer InvalidateMyCoursesCache()
 
 	userIDs = uniqueCourseRepoUintValues(userIDs)
 	if len(userIDs) == 0 {
@@ -1022,6 +1041,7 @@ func uniqueCourseRepoUintValues(values []uint) []uint {
 
 func RemoveCourseTA(courseID string, userID uint) bool {
 	defer InvalidateCourseOverviewCache(courseID)
+	defer InvalidateMyCoursesCache()
 
 	result := config.DB.Where("course_id = ? AND user_id = ?", courseID, userID).Delete(&models.CourseTA{})
 	return result.RowsAffected > 0
@@ -1117,6 +1137,7 @@ func AddStudentToSection(sectionID uint, studentID uint) error {
 	// After the transaction, so a concurrent read cannot repopulate the cache
 	// from uncommitted state.
 	defer InvalidateCourseOverviewCacheBySection(sectionID)
+	defer InvalidateMyCoursesCache()
 
 	return config.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&models.CourseSectionStudent{
@@ -1139,6 +1160,7 @@ func AddStudentToSection(sectionID uint, studentID uint) error {
 
 func BulkAddStudentsToSection(courseID string, sectionID uint, studentIDs []uint, resolveConflicts string) (BulkAddStudentsResult, error) {
 	defer InvalidateCourseOverviewCache(courseID)
+	defer InvalidateMyCoursesCache()
 
 	result := BulkAddStudentsResult{Conflicts: []StudentImportConflict{}}
 
@@ -1287,12 +1309,14 @@ func RemoveStudentFromSection(sectionID uint, studentID uint) bool {
 	result := config.DB.Where("course_section_id = ? AND student_id = ?", sectionID, studentID).Delete(&models.CourseSectionStudent{})
 	if result.RowsAffected > 0 {
 		InvalidateCourseOverviewCacheBySection(sectionID)
+		InvalidateMyCoursesCache()
 	}
 	return result.RowsAffected > 0
 }
 
 func MoveStudentBetweenSections(courseID string, fromSectionID uint, toSectionID uint, studentID uint) (bool, error) {
 	defer InvalidateCourseOverviewCache(courseID)
+	defer InvalidateMyCoursesCache()
 
 	if fromSectionID == toSectionID {
 		return false, nil
@@ -1551,7 +1575,35 @@ func GetAvailableTAs(courseID string) ([]models.User, error) {
 	return users, err
 }
 
+// GetMyCourses is read-through cached per (user, role, params) — it is the
+// heaviest call on the home dashboard (8-11 sequential queries with no single
+// dominant one to index away) and the sidebar course dropdown and the home
+// page's paginated list both call it on every load with different params, so
+// an uncached repeat visit paid the full cost twice.
 func GetMyCourses(userID uint, role string, params CourseListParams) (CourseListResult, error) {
+	cacheKey := myCoursesCacheKey(userID, role, params)
+	ttl := myCoursesTTL()
+
+	if ttl > 0 {
+		var cached CourseListResult
+		if config.CacheGetJSON(cacheKey, &cached) {
+			return cached, nil
+		}
+	}
+
+	result, err := buildMyCourses(userID, role, params)
+	if err != nil {
+		return CourseListResult{}, err
+	}
+
+	if ttl > 0 {
+		config.CacheSetJSON(cacheKey, result, ttl)
+	}
+
+	return result, nil
+}
+
+func buildMyCourses(userID uint, role string, params CourseListParams) (CourseListResult, error) {
 	db := config.DB
 
 	query := db.Model(&models.Course{})
