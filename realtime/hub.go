@@ -25,12 +25,40 @@ type outgoingMessage struct {
 	Data  interface{} `json:"data,omitempty"`
 }
 
+// Keepalive budget for the WebSocket connections. Without these a client that
+// vanishes without a TCP FIN (phone screen off, WiFi→4G handover, the KKU proxy
+// dropping an idle tunnel) stays registered in the hub forever: ReadJSON blocks
+// until the OS TCP timeout, which may never arrive, and writePump blocks inside
+// WriteJSON on a half-open socket. Those ghost clients accumulate every class
+// session and make every broadcast walk a longer and longer room map.
+//
+// pingPeriod must stay comfortably below pongWait so a single dropped ping does
+// not kill a healthy connection. Browsers answer protocol-level ping frames in
+// the WebSocket layer itself, so no client-side change is needed.
+const (
+	pongWait   = 60 * time.Second
+	pingPeriod = 25 * time.Second
+	writeWait  = 10 * time.Second
+)
+
 type client struct {
 	id    string
 	hub   *hub
 	conn  *websocket.Conn
 	send  chan outgoingMessage
 	rooms map[string]struct{}
+
+	// done is closed exactly once when the client is unregistered. The send
+	// channel is deliberately never closed: broadcast() hands messages over
+	// after releasing the hub lock, so closing it would let a concurrent
+	// unregister turn a broadcast into a send-on-closed-channel panic — and a
+	// panic on a WebSocket goroutine takes the whole process down.
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *client) markDone() {
+	c.closeOnce.Do(func() { close(c.done) })
 }
 
 type hub struct {
@@ -57,10 +85,14 @@ var displaySocketTickets = struct {
 }
 
 var upgrader = websocket.FastHTTPUpgrader{
-	HandshakeTimeout:  10 * time.Second,
-	ReadBufferSize:    1024,
-	WriteBufferSize:   1024,
-	EnableCompression: true,
+	HandshakeTimeout: 10 * time.Second,
+	ReadBufferSize:   1024,
+	WriteBufferSize:  1024,
+	// Compression is off on purpose: the payloads here are small JSON events,
+	// so per-message deflate buys almost nothing while costing a sizeable
+	// flate buffer per open connection — real memory pressure once a few
+	// hundred students are connected at once.
+	EnableCompression: false,
 	CheckOrigin: func(ctx *fasthttp.RequestCtx) bool {
 		return true
 	},
@@ -79,6 +111,7 @@ func Handler() fiber.Handler {
 				conn:  conn,
 				send:  make(chan outgoingMessage, 64),
 				rooms: make(map[string]struct{}),
+				done:  make(chan struct{}),
 			}
 
 			defaultHub.register(client)
@@ -108,7 +141,7 @@ func (h *hub) unregister(client *client) {
 	for room := range client.rooms {
 		h.leaveLocked(client, room)
 	}
-	close(client.send)
+	client.markDone()
 	log.Printf("realtime: client disconnected %s", client.id)
 }
 
@@ -165,9 +198,21 @@ func (h *hub) broadcast(room string, event string, data interface{}, except *cli
 
 	message := outgoingMessage{Event: event, Data: data}
 	for _, target := range targets {
+		// Checked in its own select first: folding this into the send below
+		// would leave both cases ready at once, and select picks at random, so
+		// a disconnected client would still get messages roughly half the time.
+		select {
+		case <-target.done:
+			// Already unregistered by a concurrent disconnect — drop it.
+			continue
+		default:
+		}
+
 		select {
 		case target.send <- message:
 		default:
+			// Buffer full: the client is not draining, so drop it rather than
+			// letting a stalled reader block every other subscriber.
 			go h.unregister(target)
 		}
 	}
@@ -179,19 +224,50 @@ func (c *client) readPump() {
 		_ = c.conn.Close()
 	}()
 
+	// Every frame the peer sends — including the pong answering our ping —
+	// pushes the deadline out. A peer that goes silent for pongWait is treated
+	// as gone, which is the only thing that reliably reaps half-open sockets.
+	_ = c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	c.conn.SetPongHandler(func(string) error {
+		return c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	})
+
 	for {
 		var message incomingMessage
 		if err := c.conn.ReadJSON(&message); err != nil {
 			return
 		}
+		_ = c.conn.SetReadDeadline(time.Now().Add(pongWait))
 		c.handleMessage(message)
 	}
 }
 
 func (c *client) writePump() {
-	for message := range c.send {
-		if err := c.conn.WriteJSON(message); err != nil {
+	ticker := time.NewTicker(pingPeriod)
+	defer func() {
+		ticker.Stop()
+		// Closing the connection here is what unblocks readPump when the write
+		// side is the one that failed; otherwise readPump would sit in ReadJSON
+		// on a dead socket and the client would never be unregistered.
+		_ = c.conn.Close()
+	}()
+
+	for {
+		select {
+		case <-c.done:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			_ = c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 			return
+		case message := <-c.send:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.WriteJSON(message); err != nil {
+				return
+			}
+		case <-ticker.C:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -404,4 +480,14 @@ func rawMap(data json.RawMessage) map[string]interface{} {
 
 func nowMillis() int64 {
 	return time.Now().UnixMilli()
+}
+
+// Stats reports how many WebSocket clients and rooms the hub currently holds.
+// Exposed as Prometheus gauges so a ghost-connection leak shows up as a count
+// that only ever climbs, instead of only being noticed as "the site got slow
+// again a few days after the last restart".
+func Stats() (clients int, rooms int) {
+	defaultHub.mu.RLock()
+	defer defaultHub.mu.RUnlock()
+	return len(defaultHub.clients), len(defaultHub.rooms)
 }

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"itii-assist/config"
 	"itii-assist/models"
 	"itii-assist/repositories"
 	"log"
@@ -36,9 +37,14 @@ const (
 	BackupStepUpActionDownload = "system_settings.backups.download"
 
 	dailyBackupStateConfigKey = "system.backup.daily_last_success_date"
-	backupStatusConfigKey     = "system.backup.status"
-	backupStorageProviderR2   = "cloudflare_r2"
-	backupRetentionSlots      = 7
+	dailyBackupLockKey        = "backup:daily:lock"
+	// Longer than the 30-minute timeout inside RunDatabaseBackupNow, so the
+	// lock cannot expire while a backup is still running, but short enough that
+	// a process killed mid-backup does not block tomorrow's attempt.
+	dailyBackupLockTTL      = 35 * time.Minute
+	backupStatusConfigKey   = "system.backup.status"
+	backupStorageProviderR2 = "cloudflare_r2"
+	backupRetentionSlots    = 7
 )
 
 type BackupOperationStatus struct {
@@ -133,6 +139,26 @@ func tryRunDailyBackup(location *time.Location) {
 	today := now.Format("2006-01-02")
 	lastRunDate, err := repositories.GetAppConfigValue(dailyBackupStateConfigKey)
 	if err == nil && strings.TrimSpace(lastRunDate) == today {
+		return
+	}
+
+	// The date marker above is only written *after* a backup finishes, and a
+	// backup takes minutes. Under blue-green both backend slots run this loop,
+	// so without a lock the standby ticks mid-backup, still sees no marker for
+	// today, and starts a second concurrent pg_dump against the live database.
+	//
+	// beginBackupOperation() cannot cover this — it is an in-process mutex and
+	// the two slots are separate processes.
+	if !acquireDailyBackupLock() {
+		log.Println("ℹ️  Daily backup already running on another instance, skipping this tick")
+		return
+	}
+	defer releaseDailyBackupLock()
+
+	// Re-check under the lock: the other instance may have finished between the
+	// marker read above and the lock being acquired here.
+	if lastRunDate, err := repositories.GetAppConfigValue(dailyBackupStateConfigKey); err == nil &&
+		strings.TrimSpace(lastRunDate) == today {
 		return
 	}
 
@@ -814,4 +840,41 @@ func setBackupStatus(next BackupOperationStatus) error {
 		return err
 	}
 	return repositories.SetAppConfigValue(backupStatusConfigKey, string(raw))
+}
+
+// acquireDailyBackupLock takes a cross-instance lock for the daily backup.
+//
+// Returns true when this process may proceed. If Redis is unavailable it also
+// returns true: losing the automated backup entirely is a worse outcome than
+// the duplicate it is guarding against, and a duplicate backup is wasteful
+// rather than destructive.
+func acquireDailyBackupLock() bool {
+	if config.Redis == nil {
+		return true
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	acquired, err := config.Redis.SetNX(ctx, dailyBackupLockKey, "1", dailyBackupLockTTL).Result()
+	if err != nil {
+		log.Printf("⚠️  Could not take the daily backup lock, proceeding anyway: %v", err)
+		return true
+	}
+
+	return acquired
+}
+
+func releaseDailyBackupLock() {
+	if config.Redis == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := config.Redis.Del(ctx, dailyBackupLockKey).Err(); err != nil {
+		// Not fatal: the TTL releases it regardless, just later than ideal.
+		log.Printf("⚠️  Could not release the daily backup lock: %v", err)
+	}
 }

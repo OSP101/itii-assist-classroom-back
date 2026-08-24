@@ -13,12 +13,48 @@ import (
 	"github.com/google/uuid"
 )
 
-var httpLogger *slog.Logger
+var (
+	httpLogger      *slog.Logger
+	accessLogActive bool
+)
 
 func init() {
+	accessLogActive = accessLogEnabled()
 	httpLogger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level: accessLogLevel(),
 	}))
+}
+
+// accessLogEnabled gates the per-request access log line only. Panic recovery,
+// the Prometheus metrics and 5xx/panic logging in this middleware always run —
+// turning off the access log must never turn off error visibility or let a
+// handler panic escape and kill the process.
+//
+// Writing two JSON lines per request to a container's stdout is a genuine
+// bottleneck under load (it is a blocking write), so this switch exists to be
+// turned off during load tests and on very busy deployments.
+func accessLogEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENABLE_REQUEST_LOGGER"))) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+// accessLogLevel defaults to info. The previous hardcoded debug level meant the
+// handler could never filter anything out.
+func accessLogLevel() slog.Level {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL"))) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }
 
 // RequestLogger returns a Fiber middleware that logs every HTTP request as a
@@ -50,7 +86,12 @@ func RequestLogger() fiber.Handler {
 
 		method := c.Method()
 		ip := c.IP()
-		userAgent := string(c.Request().Header.UserAgent())
+		userAgent := ""
+		if accessLogActive {
+			// Only materialised when it will actually be logged: this copies
+			// the header out of the request buffer on every single request.
+			userAgent = string(c.Request().Header.UserAgent())
+		}
 
 		// Panic recovery wrapping c.Next()
 		var nextErr error
@@ -109,6 +150,12 @@ func RequestLogger() fiber.Handler {
 		}
 		if studentID, ok := GetStudentID(c); ok {
 			observability.TrackAuthenticatedPrincipal("student", studentID)
+		}
+
+		// Errors are always reported; the routine access line is what the
+		// switch silences.
+		if !accessLogActive && status < 500 {
+			return nextErr
 		}
 
 		attrs := []any{

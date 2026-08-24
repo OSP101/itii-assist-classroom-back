@@ -48,7 +48,34 @@ type ClassroomStats struct {
 	Deleted           int64 `json:"deleted"`
 }
 
+// GetClassrooms is read-through cached. Rooms and their desk layouts change a
+// few times a semester, but the list is loaded by the classroom picker on
+// several screens. The response does not vary by caller — role is checked by
+// middleware before this runs — so one entry per filter combination is shared.
 func GetClassrooms(params ClassroomListParams) (ClassroomListResult, error) {
+	cacheKey := classroomListCacheKey(params)
+	ttl := classroomListTTL()
+
+	if ttl > 0 {
+		var cached ClassroomListResult
+		if config.CacheGetJSON(cacheKey, &cached) {
+			return cached, nil
+		}
+	}
+
+	result, err := queryClassrooms(params)
+	if err != nil {
+		return result, err
+	}
+
+	if ttl > 0 {
+		config.CacheSetJSON(cacheKey, result, ttl)
+	}
+
+	return result, nil
+}
+
+func queryClassrooms(params ClassroomListParams) (ClassroomListResult, error) {
 	db := config.DB
 	query := db.Model(&models.Classroom{})
 
@@ -197,11 +224,19 @@ func CreateClassroom(classroom *models.Classroom) error {
 	}
 	classroom.ID = id
 	classroom.CreatedAt = time.Now()
-	return config.DB.Create(classroom).Error
+	if err := config.DB.Create(classroom).Error; err != nil {
+		return err
+	}
+	InvalidateClassroomListCache()
+	return nil
 }
 
 func UpdateClassroom(classroom *models.Classroom) error {
-	return config.DB.Save(classroom).Error
+	if err := config.DB.Save(classroom).Error; err != nil {
+		return err
+	}
+	InvalidateClassroomListCache()
+	return nil
 }
 
 func ToggleClassroomStatus(id string) (*models.Classroom, error) {
@@ -211,22 +246,35 @@ func ToggleClassroomStatus(id string) (*models.Classroom, error) {
 	}
 	c.IsActive = !c.IsActive
 	config.DB.Save(&c)
+	InvalidateClassroomListCache()
 	return &c, nil
 }
 
 func SoftDeleteClassroom(id string) error {
-	return config.DB.Model(&models.Classroom{}).Where("id = ?", id).Update("is_deleted", true).Error
+	if err := config.DB.Model(&models.Classroom{}).Where("id = ?", id).Update("is_deleted", true).Error; err != nil {
+		return err
+	}
+	InvalidateClassroomListCache()
+	return nil
 }
 
 func HardDeleteClassroom(id string) error {
 	db := config.DB
 	db.Where("classroom_id = ?", id).Delete(&models.Desk{})
 	db.Where("classroom_id = ?", id).Delete(&models.Zone{})
-	return db.Where("id = ?", id).Delete(&models.Classroom{}).Error
+	if err := db.Where("id = ?", id).Delete(&models.Classroom{}).Error; err != nil {
+		return err
+	}
+	InvalidateClassroomListCache()
+	return nil
 }
 
 func RestoreClassroom(id string) error {
-	return config.DB.Model(&models.Classroom{}).Where("id = ?", id).Update("is_deleted", false).Error
+	if err := config.DB.Model(&models.Classroom{}).Where("id = ?", id).Update("is_deleted", false).Error; err != nil {
+		return err
+	}
+	InvalidateClassroomListCache()
+	return nil
 }
 
 // UpdateLayout replaces all desks and zones for a classroom with the provided data.
@@ -374,5 +422,8 @@ func UpdateLayout(classroomID string, deskInputs []DeskInput, zoneInputs []ZoneI
 		}
 	}
 
+	// Desk and zone layout is embedded in the cached classroom list, so it has
+	// to be invalidated here too, not only on classroom-level writes.
+	InvalidateClassroomListCache()
 	return nil
 }

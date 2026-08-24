@@ -5,10 +5,12 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 // สร้างตัวแปร Global เพื่อให้ไฟล์อื่นเรียกใช้ Database ได้
@@ -30,7 +32,22 @@ func ConnectDB() {
 		host, user, password, dbname, port)
 
 	// เปิดการเชื่อมต่อ
-	database, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	database, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		// PrepareStmt stays OFF for the connection itself so the startup
+		// migrations run as plain statements — see EnablePreparedStatements,
+		// which turns it on once the DDL is done. These two settings are still
+		// read from here when that session is created.
+		//
+		// The cache size MUST be bounded. GORM defaults it to MaxInt —
+		// effectively unlimited — and this codebase has ~140 `IN ?` queries.
+		// GORM expands those to a different SQL string for every slice length,
+		// so an unbounded cache would keep accumulating distinct entries, each
+		// one a real prepared statement pinned on every pooled connection:
+		// exactly the slow-creep failure we are removing everywhere else.
+		PrepareStmtMaxSize: getEnvInt("DB_PREPARE_STMT_MAX_SIZE", 512),
+		PrepareStmtTTL:     time.Duration(getEnvInt("DB_PREPARE_STMT_TTL_MINUTES", 20)) * time.Minute,
+		Logger:             newGormLogger(),
+	})
 	if err != nil {
 		log.Fatal("❌ Failed to connect to database! \n", err)
 	}
@@ -404,6 +421,62 @@ func MigratePerformanceIndexes() {
 			name: "queue_sessions_group_pin_code",
 			sql:  `CREATE INDEX IF NOT EXISTS idx_queue_sessions_group_pin_code ON queue_sessions (group_pin_code) WHERE group_pin_code IS NOT NULL`,
 		},
+
+		// ── Retention support ────────────────────────────────────────────
+		//
+		// The nightly purge deletes by `created_at < cutoff`. GORM's model tags
+		// gave these tables indexes on their foreign keys but not on created_at,
+		// so without these the purge sequentially scans the largest tables in
+		// the database — on attendance_pin_histories, which gains a row every
+		// minute for every open session, that is the biggest scan of all.
+		//
+		// system_logs and course_activity_logs already carry a created_at index
+		// from their model tags and are deliberately not repeated here.
+		{
+			name: "attendance_pin_histories_created_at",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_attendance_pin_histories_created_at ON attendance_pin_histories (created_at)`,
+		},
+		{
+			name: "notification_logs_created_at",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_notification_logs_created_at ON notification_logs (created_at)`,
+		},
+		{
+			name: "attendance_display_audit_logs_created_at",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_attendance_display_audit_logs_created_at ON attendance_display_audit_logs (created_at)`,
+		},
+		{
+			// Matches the purge predicate exactly: only read notifications are
+			// ever deleted, so the partial index stays small and skips the
+			// unread rows that are never candidates.
+			name: "user_notifications_read_created_at",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_user_notifications_read_created_at ON user_notifications (created_at) WHERE is_read = true`,
+		},
+
+		// ── Filter-then-sort paths ───────────────────────────────────────
+		//
+		// Each of these queries filters on one column and sorts by another.
+		// A single-column index on the filter alone still forces PostgreSQL to
+		// fetch every matching row and sort it; putting the sort column into the
+		// index lets it read the rows already ordered and stop at the LIMIT.
+		{
+			// GetUserNotifications: WHERE user_id = ? ORDER BY created_at DESC
+			// — the notification inbox, opened constantly, and the row count per
+			// user only grows.
+			name: "user_notifications_user_created_at",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_user_notifications_user_created_at ON user_notifications (user_id, created_at DESC)`,
+		},
+		{
+			// Course activity log listing: always scoped to a course, always
+			// newest-first, always paginated.
+			name: "course_activity_logs_course_created_at",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_course_activity_logs_course_created_at ON course_activity_logs (course_id, created_at DESC)`,
+		},
+		{
+			// GetCourseOverview: WHERE course_id = ? AND is_active = true
+			// ORDER BY created_at DESC. Part of the heaviest read in the app.
+			name: "assignments_course_active_created_at",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_assignments_course_active_created_at ON assignments (course_id, created_at DESC) WHERE is_active = true`,
+		},
 	}
 
 	ensuredCount := 0
@@ -500,4 +573,222 @@ func MigrateAttendanceRealtimeCompatibility() {
 	}
 
 	log.Println("âœ… Attendance realtime compatibility synchronized")
+}
+
+// MigrateAutovacuumSettings tightens autovacuum for the high-churn tables.
+//
+// PostgreSQL's default autovacuum_vacuum_scale_factor is 0.2 — vacuum waits
+// until dead tuples reach 20% of the table. That is a moving target: the bigger
+// a table gets, the longer it goes between vacuums, so bloat on exactly the
+// busiest tables compounds over months. These per-table overrides pin the
+// threshold to a small fraction so vacuum keeps up as the tables grow.
+//
+// Idempotent, and a failure on one table only logs and continues — a missing
+// table (fresh install, feature not yet migrated) must not block startup.
+func MigrateAutovacuumSettings() {
+	if DB == nil {
+		return
+	}
+
+	// Log/append tables: high insert rate, deleted in bulk by the retention
+	// worker, so they need aggressive vacuuming to reclaim the space.
+	appendOnlyTables := []string{
+		"system_logs",
+		"course_activity_logs",
+		"attendance_pin_histories",
+		"notification_logs",
+		"attendance_display_audit_logs",
+		"user_notifications",
+	}
+
+	// Hot transactional tables: every UPDATE leaves a dead tuple, and these are
+	// updated constantly during a class session.
+	hotTables := []string{
+		"queue_bookings",
+		"queue_desk_statuses",
+		"attendance_records",
+		"attendance_sessions",
+		"queue_sessions",
+		"scores",
+	}
+
+	tunedCount := 0
+	apply := func(tables []string, vacuumScale, analyzeScale string) {
+		for _, table := range tables {
+			statement := fmt.Sprintf(
+				`ALTER TABLE %s SET (
+					autovacuum_vacuum_scale_factor = %s,
+					autovacuum_analyze_scale_factor = %s,
+					autovacuum_vacuum_threshold = 1000,
+					autovacuum_analyze_threshold = 1000
+				)`,
+				table, vacuumScale, analyzeScale,
+			)
+			if err := DB.Exec(statement).Error; err != nil {
+				log.Printf("⚠️  Failed to tune autovacuum for %s: %v", table, err)
+				continue
+			}
+			tunedCount++
+		}
+	}
+
+	apply(appendOnlyTables, "0.02", "0.01")
+	apply(hotTables, "0.05", "0.02")
+
+	log.Printf("✅ Tuned autovacuum for %d table(s)", tunedCount)
+}
+
+// MigrateCloseStaleAttendanceSessions closes attendance sessions that are still
+// marked active long after their scheduled end.
+//
+// These accumulate whenever a session fails to close cleanly (server restarted
+// mid-session, Redis unavailable at the moment of closing, an error in the
+// close path). Nothing ever cleaned them up, and because the PIN lifecycle
+// worker selects every row WHERE status = 'active', each stuck row was
+// reprocessed on every single tick — permanently, and the set only ever grew.
+//
+// The runtime close path is skipped on purpose: it exists to release Redis PIN
+// state, and for sessions this old the Redis keys expired long ago. The PIN
+// columns are cleared here so no stale code can be matched against.
+func MigrateCloseStaleAttendanceSessions() {
+	if DB == nil {
+		return
+	}
+
+	// A full day past end_time — comfortably beyond any legitimately running
+	// session, so this can never close one that is actually in use.
+	const staleGrace = "24 hours"
+
+	result := DB.Exec(`
+		UPDATE attendance_sessions
+		SET status = 'closed',
+		    closed_at = COALESCE(closed_at, end_time),
+		    pin_code = '',
+		    previous_pin_code = '',
+		    current_pin_hash = '',
+		    previous_pin_hash = '',
+		    pin_issued_at = NULL,
+		    pin_grace_until = NULL,
+		    pin_rotates_at = NULL
+		WHERE status = 'active'
+		  AND end_time < NOW() - INTERVAL '` + staleGrace + `'`)
+
+	if result.Error != nil {
+		log.Printf("⚠️  Failed to close stale attendance sessions: %v", result.Error)
+		return
+	}
+	if result.RowsAffected > 0 {
+		log.Printf("🧹 Closed %d stale attendance session(s) left active past their end time", result.RowsAffected)
+	}
+}
+
+// newGormLogger configures GORM's query logger.
+//
+// The deployment has no pg_stat_statements, so slow-query logging is currently
+// the only way to find out which queries are actually costing time. Anything
+// over the threshold is logged at warn level with its duration.
+//
+// ParameterizedQueries is on deliberately: it logs `WHERE email = $1` instead
+// of interpolating the real value. Query arguments here routinely contain
+// student identifiers and emails, and those must not end up sitting in the
+// container's log stream.
+func newGormLogger() gormlogger.Interface {
+	return gormlogger.New(
+		log.New(os.Stdout, "", log.LstdFlags),
+		gormlogger.Config{
+			SlowThreshold: slowQueryThreshold(),
+			LogLevel:      gormlogger.Warn,
+			// First()/Take() misses are a normal control-flow signal all over
+			// this codebase; logging them buries the real warnings.
+			IgnoreRecordNotFoundError: true,
+			ParameterizedQueries:      true,
+			Colorful:                  false,
+		},
+	)
+}
+
+// DBPoolStats exposes connection-pool utilisation for the Prometheus gauges.
+// A pool sitting at max open connections with requests queueing on WaitCount is
+// the difference between "a query is slow" and "there was no connection free to
+// run it on" — two problems that feel identical from the browser.
+func DBPoolStats() (inUse int, idle int, open int, waitCount int64) {
+	if DB == nil {
+		return 0, 0, 0, 0
+	}
+
+	sqlDB, err := DB.DB()
+	if err != nil {
+		return 0, 0, 0, 0
+	}
+
+	stats := sqlDB.Stats()
+	return stats.InUse, stats.Idle, stats.OpenConnections, stats.WaitCount
+}
+
+// EnablePreparedStatements switches DB over to a prepared-statement session.
+//
+// Call this once, after every migration has finished. Prepared statements are a
+// straight win on the request path — PostgreSQL stops re-parsing and re-planning
+// the same query text on every call — but the migrations run ALTER TABLE,
+// CREATE INDEX and other utility statements, and those are not worth routing
+// through the extended-query prepare path at startup for a one-time execution.
+//
+// Bounds come from PrepareStmtMaxSize/PrepareStmtTTL on the original config, so
+// the cache is still a TTL'd LRU rather than an unbounded map.
+func EnablePreparedStatements() {
+	if DB == nil {
+		return
+	}
+
+	DB = DB.Session(&gorm.Session{PrepareStmt: true})
+	log.Printf("✅ Prepared statement cache enabled (max=%d, ttl=%s)",
+		DB.PrepareStmtMaxSize, DB.PrepareStmtTTL)
+}
+
+// slowQueryThreshold is the duration above which GORM logs a query as slow.
+// 200ms is GORM's own default and a reasonable bar for this workload: fast
+// enough to catch real problems, slow enough not to flood the log with normal
+// queries.
+func slowQueryThreshold() time.Duration {
+	return time.Duration(getEnvInt("DB_SLOW_QUERY_THRESHOLD_MS", 200)) * time.Millisecond
+}
+
+// MigratePgStatStatements enables the pg_stat_statements extension.
+//
+// Two separate things are required and it is easy to do only one: the library
+// must be preloaded at server start (shared_preload_libraries, set in
+// docker-compose.yml) AND the extension must be created inside the database.
+// Creating it without the preload succeeds here but leaves every query against
+// the view failing, so this reports which of the two is missing rather than
+// silently appearing to work.
+//
+// Never fatal: query statistics are a diagnostic, and losing them must not stop
+// the API from serving. A deployment whose database user lacks the privilege to
+// create extensions simply logs and carries on.
+func MigratePgStatStatements() {
+	if DB == nil {
+		return
+	}
+
+	// The extension can exist in the catalog while the library is not loaded,
+	// which is the confusing half-configured state worth calling out explicitly.
+	var preloadedLibraries string
+	if err := DB.Raw("SHOW shared_preload_libraries").Scan(&preloadedLibraries).Error; err != nil {
+		log.Printf("⚠️  Could not read shared_preload_libraries: %v", err)
+		return
+	}
+
+	if !strings.Contains(preloadedLibraries, "pg_stat_statements") {
+		log.Println("ℹ️  pg_stat_statements is not in shared_preload_libraries — query statistics are unavailable")
+		log.Println("   Add it to the db service command in docker-compose.yml, then recreate the container (a reload will not apply it)")
+		return
+	}
+
+	if err := DB.Exec("CREATE EXTENSION IF NOT EXISTS pg_stat_statements").Error; err != nil {
+		log.Printf("⚠️  pg_stat_statements is preloaded but the extension could not be created: %v", err)
+		log.Println("   Creating an extension requires a superuser; run it manually as the database owner if needed")
+		return
+	}
+
+	log.Println("✅ pg_stat_statements enabled — inspect with: SELECT query, calls, mean_exec_time FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 20")
 }

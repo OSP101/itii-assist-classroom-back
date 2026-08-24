@@ -518,7 +518,36 @@ type CourseOverview struct {
 	ScoreDistribution     map[string]int                         `json:"scoreDistribution"`
 }
 
+// GetCourseOverview is read-through cached. It is by far the heaviest read in
+// the app — six queries, one of which pulls every score in the course with two
+// joins, then aggregates in Go — and it is the first thing rendered when a
+// course is opened. The payload is identical for every caller (authorisation is
+// enforced by RequireCourseAccess before the handler runs), so it is safe to
+// share one entry per course.
 func GetCourseOverview(courseID string) (*CourseOverview, error) {
+	cacheKey := courseOverviewCacheKey(courseID)
+	ttl := courseOverviewTTL()
+
+	if ttl > 0 {
+		var cached CourseOverview
+		if config.CacheGetJSON(cacheKey, &cached) {
+			return &cached, nil
+		}
+	}
+
+	overview, err := buildCourseOverview(courseID)
+	if err != nil {
+		return nil, err
+	}
+
+	if ttl > 0 {
+		config.CacheSetJSON(cacheKey, overview, ttl)
+	}
+
+	return overview, nil
+}
+
+func buildCourseOverview(courseID string) (*CourseOverview, error) {
 	db := config.DB
 
 	// ── 1. Basic counts ──────────────────────────────────────────

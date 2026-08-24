@@ -775,10 +775,14 @@ func IsSectionExists(courseID string, sectionNo string, excludeID uint) bool {
 }
 
 func CreateSection(section *models.CourseSection) error {
+	defer InvalidateCourseOverviewCache(section.CourseID)
+
 	return config.DB.Create(section).Error
 }
 
 func UpdateSection(section *models.CourseSection) error {
+	defer InvalidateCourseOverviewCache(section.CourseID)
+
 	return config.DB.Save(section).Error
 }
 
@@ -791,6 +795,8 @@ func FindSectionByID(sectionID uint, courseID string) (*models.CourseSection, er
 }
 
 func DeleteSection(sectionID uint, courseID string) error {
+	defer InvalidateCourseOverviewCache(courseID)
+
 	db := config.DB
 	db.Where("course_section_id = ?", sectionID).Delete(&models.CourseSectionStudent{})
 	return db.Where("id = ? AND course_id = ?", sectionID, courseID).Delete(&models.CourseSection{}).Error
@@ -811,6 +817,8 @@ func AddCourseInstructor(courseID string, userID uint, isPrimary bool) error {
 }
 
 func BulkAddCourseInstructors(courseID string, userIDs []uint) (addedUsers []UserBasic, skipped int, err error) {
+	defer InvalidateCourseOverviewCache(courseID)
+
 	var existing []models.CourseInstructor
 	config.DB.Where("course_id = ? AND user_id IN ?", courseID, userIDs).Find(&existing)
 	existingSet := map[uint]bool{}
@@ -907,6 +915,8 @@ func ReplaceAllCourseInstructors(courseID string, userIDs []uint) error {
 // ============================================================
 
 func AddCourseTA(courseID string, userID uint) error {
+	defer InvalidateCourseOverviewCache(courseID)
+
 	return config.DB.Create(&models.CourseTA{
 		CourseID:    courseID,
 		UserID:      userID,
@@ -916,6 +926,8 @@ func AddCourseTA(courseID string, userID uint) error {
 }
 
 func BulkAddCourseTAs(courseID string, userIDs []uint) (addedUsers []UserBasic, skipped int, err error) {
+	defer InvalidateCourseOverviewCache(courseID)
+
 	userIDs = uniqueCourseRepoUintValues(userIDs)
 	if len(userIDs) == 0 {
 		return []UserBasic{}, 0, nil
@@ -1009,6 +1021,8 @@ func uniqueCourseRepoUintValues(values []uint) []uint {
 }
 
 func RemoveCourseTA(courseID string, userID uint) bool {
+	defer InvalidateCourseOverviewCache(courseID)
+
 	result := config.DB.Where("course_id = ? AND user_id = ?", courseID, userID).Delete(&models.CourseTA{})
 	return result.RowsAffected > 0
 }
@@ -1100,6 +1114,10 @@ func GetStudentCurrentSectionInCourse(courseID string, studentID uint) (*Section
 
 func AddStudentToSection(sectionID uint, studentID uint) error {
 	now := time.Now()
+	// After the transaction, so a concurrent read cannot repopulate the cache
+	// from uncommitted state.
+	defer InvalidateCourseOverviewCacheBySection(sectionID)
+
 	return config.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(&models.CourseSectionStudent{
 			CourseSectionID: sectionID,
@@ -1120,6 +1138,8 @@ func AddStudentToSection(sectionID uint, studentID uint) error {
 }
 
 func BulkAddStudentsToSection(courseID string, sectionID uint, studentIDs []uint, resolveConflicts string) (BulkAddStudentsResult, error) {
+	defer InvalidateCourseOverviewCache(courseID)
+
 	result := BulkAddStudentsResult{Conflicts: []StudentImportConflict{}}
 
 	if resolveConflicts != "move" {
@@ -1265,10 +1285,15 @@ func BulkAddStudentsToSection(courseID string, sectionID uint, studentIDs []uint
 
 func RemoveStudentFromSection(sectionID uint, studentID uint) bool {
 	result := config.DB.Where("course_section_id = ? AND student_id = ?", sectionID, studentID).Delete(&models.CourseSectionStudent{})
+	if result.RowsAffected > 0 {
+		InvalidateCourseOverviewCacheBySection(sectionID)
+	}
 	return result.RowsAffected > 0
 }
 
 func MoveStudentBetweenSections(courseID string, fromSectionID uint, toSectionID uint, studentID uint) (bool, error) {
+	defer InvalidateCourseOverviewCache(courseID)
+
 	if fromSectionID == toSectionID {
 		return false, nil
 	}

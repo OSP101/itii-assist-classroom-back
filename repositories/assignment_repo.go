@@ -138,6 +138,7 @@ func CreateAssignment(a *models.Assignment, subItems []models.AssignmentSubItem)
 		}
 		db.Create(&subItems)
 	}
+	InvalidateCourseOverviewCache(a.CourseID)
 	return nil
 }
 
@@ -177,6 +178,10 @@ func (e *ErrSubItemsHaveScores) TotalScores() int64 {
 // only after their scores are accounted for — either there are none, or the
 // caller has explicitly confirmed the deletion.
 func UpdateAssignment(a *models.Assignment, subItems *[]models.AssignmentSubItem, confirmDeleteScores bool) error {
+	// Invalidate after the transaction so a concurrent read cannot repopulate
+	// the cache from uncommitted state.
+	defer InvalidateCourseOverviewCache(a.CourseID)
+
 	return config.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Save(a).Error; err != nil {
 			return err
@@ -300,7 +305,11 @@ func subItemsWithScoresTx(tx *gorm.DB, subItemIDs []uint, existingByID map[uint]
 }
 
 func SoftDeleteAssignment(id uint) error {
-	return config.DB.Model(&models.Assignment{}).Where("id = ?", id).Update("is_active", false).Error
+	if err := config.DB.Model(&models.Assignment{}).Where("id = ?", id).Update("is_active", false).Error; err != nil {
+		return err
+	}
+	InvalidateCourseOverviewCacheByAssignment(id)
+	return nil
 }
 
 func ReorderAssignments(courseID string, orderedIDs []uint) error {

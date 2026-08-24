@@ -6,12 +6,14 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"itii-assist/config"
 	"itii-assist/models"
+	"itii-assist/realtime"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/prometheus/client_golang/prometheus"
@@ -30,7 +32,20 @@ const (
 type activeSessionTracker struct {
 	mu       sync.RWMutex
 	lastSeen map[string]time.Time
+	// lastPrune throttles the sweep. touch() runs on every authenticated
+	// request while holding the only lock in this struct, so sweeping the whole
+	// map there made each request O(active users) inside a global critical
+	// section — with a few hundred students checking in at once, requests spend
+	// their time queueing behind each other on this mutex rather than doing
+	// work. The map is bounded by the active window either way, so sweeping on
+	// a timer costs nothing but a few stale keys between sweeps.
+	lastPrune time.Time
 }
+
+// pruneInterval is the longest a stale key may linger before a sweep removes
+// it. Well below activeWindow, so active_sessions_5m stays accurate to within
+// one interval even if nothing scrapes it.
+const pruneInterval = 30 * time.Second
 
 func newActiveSessionTracker() *activeSessionTracker {
 	return &activeSessionTracker{
@@ -43,19 +58,25 @@ func (t *activeSessionTracker) touch(kind string, id uint, now time.Time) {
 		return
 	}
 
-	key := fmt.Sprintf("%s:%d", kind, id)
+	// strconv rather than fmt.Sprintf: this runs on every authenticated
+	// request, and Sprintf's reflection path is pure overhead for two values.
+	key := kind + ":" + strconv.FormatUint(uint64(id), 10)
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	t.lastSeen[key] = now
-	t.pruneLocked(now)
+	if now.Sub(t.lastPrune) >= pruneInterval {
+		t.pruneLocked(now)
+	}
 }
 
 func (t *activeSessionTracker) countActive(now time.Time) float64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	// Scrapes are infrequent, so this one always sweeps: the reported number is
+	// exact at the moment it is read regardless of when the last sweep ran.
 	t.pruneLocked(now)
 	return float64(len(t.lastSeen))
 }
@@ -67,6 +88,7 @@ func (t *activeSessionTracker) pruneLocked(now time.Time) {
 			delete(t.lastSeen, key)
 		}
 	}
+	t.lastPrune = now
 }
 
 type prometheusMetrics struct {
@@ -139,6 +161,57 @@ func (m *prometheusMetrics) register() {
 	}, func() float64 {
 		return m.activeSessions.countActive(time.Now())
 	})
+
+	// These two are the leak detectors for the realtime hub: on a healthy
+	// instance they rise and fall with actual class activity and return near
+	// zero overnight. A floor that only ever climbs across days means ghost
+	// connections are accumulating again.
+	promauto.NewGaugeFunc(prometheus.GaugeOpts{
+		Namespace: optionalMetricNS,
+		Subsystem: optionalMetricSS,
+		Name:      "realtime_connected_clients",
+		Help:      "WebSocket clients currently registered in the realtime hub.",
+	}, func() float64 {
+		clients, _ := realtime.Stats()
+		return float64(clients)
+	})
+
+	promauto.NewGaugeFunc(prometheus.GaugeOpts{
+		Namespace: optionalMetricNS,
+		Subsystem: optionalMetricSS,
+		Name:      "realtime_active_rooms",
+		Help:      "Realtime hub rooms that currently have at least one subscriber.",
+	}, func() float64 {
+		_, rooms := realtime.Stats()
+		return float64(rooms)
+	})
+
+	// Pool saturation vs. query slowness look identical from the browser — both
+	// are "the page is waiting". db_connections_wait_total climbing is the
+	// signal that requests are queueing for a connection rather than running.
+	poolGauges := []struct {
+		name  string
+		help  string
+		value func(inUse, idle, open int, waitCount int64) float64
+	}{
+		{"db_connections_in_use", "Database connections currently executing a query.", func(inUse, _, _ int, _ int64) float64 { return float64(inUse) }},
+		{"db_connections_idle", "Database connections open but idle in the pool.", func(_, idle, _ int, _ int64) float64 { return float64(idle) }},
+		{"db_connections_open", "Total database connections open by this backend.", func(_, _, open int, _ int64) float64 { return float64(open) }},
+		{"db_connections_wait_total", "Cumulative count of requests that had to wait for a free database connection.", func(_, _, _ int, waitCount int64) float64 { return float64(waitCount) }},
+	}
+
+	for _, gauge := range poolGauges {
+		value := gauge.value
+		promauto.NewGaugeFunc(prometheus.GaugeOpts{
+			Namespace: optionalMetricNS,
+			Subsystem: optionalMetricSS,
+			Name:      gauge.name,
+			Help:      gauge.help,
+		}, func() float64 {
+			inUse, idle, open, waitCount := config.DBPoolStats()
+			return value(inUse, idle, open, waitCount)
+		})
+	}
 
 	promauto.NewGaugeFunc(prometheus.GaugeOpts{
 		Namespace: optionalMetricNS,

@@ -60,14 +60,23 @@ func SubmitScore(score *models.Score) error {
 		existing.GradedBy = score.GradedBy
 		existing.GradedAt = &now
 		existing.Status = "graded"
-		return db.Save(&existing).Error
+		if err := db.Save(&existing).Error; err != nil {
+			return err
+		}
+		InvalidateCourseOverviewCacheByAssignment(score.AssignmentID)
+		return nil
 	}
-	return db.Create(score).Error
+
+	if err := db.Create(score).Error; err != nil {
+		return err
+	}
+	InvalidateCourseOverviewCacheByAssignment(score.AssignmentID)
+	return nil
 }
 
 func BulkUpsertScores(scores []models.Score) error {
 	db := config.DB
-	return db.Transaction(func(tx *gorm.DB) error {
+	err := db.Transaction(func(tx *gorm.DB) error {
 		now := time.Now()
 		for i := range scores {
 			scores[i].GradedAt = &now
@@ -104,6 +113,27 @@ func BulkUpsertScores(scores []models.Score) error {
 		}
 		return nil
 	})
+
+	if err != nil {
+		return err
+	}
+
+	// Invalidated after the transaction commits, not inside it: dropping the
+	// cache mid-transaction would let a concurrent read repopulate it from
+	// pre-commit data, leaving a stale entry behind that nothing would clear.
+	//
+	// Every distinct assignment is invalidated rather than assuming the batch
+	// shares one course — nothing in the signature guarantees that, and the
+	// cost is one deduplicated lookup per assignment.
+	seenAssignments := make(map[uint]struct{}, len(scores))
+	for _, score := range scores {
+		if _, done := seenAssignments[score.AssignmentID]; done {
+			continue
+		}
+		seenAssignments[score.AssignmentID] = struct{}{}
+		InvalidateCourseOverviewCacheByAssignment(score.AssignmentID)
+	}
+	return nil
 }
 
 // GetScoreMatrix returns a map of studentID -> assignmentID -> score
@@ -166,5 +196,21 @@ func ReviewEditRequest(id uint, approved bool, reviewerID uint, comment string) 
 	req.ReviewedBy = &reviewerID
 	req.ReviewedAt = &now
 	req.ReviewComment = comment
-	return db.Save(&req).Error
+	if err := db.Save(&req).Error; err != nil {
+		return err
+	}
+
+	// An approved request rewrites a score, so the overview it feeds is stale.
+	// Resolved through the score rather than the request, which has no
+	// assignment reference of its own.
+	if approved {
+		var assignmentID uint
+		if err := db.Model(&models.Score{}).
+			Select("assignment_id").
+			Where("id = ?", req.ScoreID).
+			Scan(&assignmentID).Error; err == nil {
+			InvalidateCourseOverviewCacheByAssignment(assignmentID)
+		}
+	}
+	return nil
 }

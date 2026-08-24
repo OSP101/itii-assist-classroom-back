@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,7 +22,6 @@ import (
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/cors"
-	"github.com/gofiber/fiber/v3/middleware/logger"
 	"github.com/gofiber/fiber/v3/middleware/static"
 	"github.com/joho/godotenv"
 )
@@ -119,6 +119,17 @@ func main() {
 	config.MigrateQueueSessionCounterCompatibility()
 	config.MigrateUploadPathsToApiPrefix()
 	config.MigratePerformanceIndexes()
+	config.MigrateAutovacuumSettings()
+	config.MigratePgStatStatements()
+	// Must run before the lifecycle worker starts, so the worker's first tick
+	// already sees a clean working set instead of every session ever stuck.
+	config.MigrateCloseStaleAttendanceSessions()
+
+	// Last step of the DB setup: every migration above has run its DDL as a
+	// plain statement, so from here on the request path can use the prepared
+	// statement cache.
+	config.EnablePreparedStatements()
+
 	startAttendancePinLifecycleWorker()
 
 	// Web Push (webpush-go, VAPID) needs VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY set
@@ -138,8 +149,12 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 		ProxyHeader:  "X-Real-IP",
 	})
+	// RequestLogger already emits a structured JSON line per request (and
+	// records the Prometheus metrics, and recovers panics). Fiber's logger.New()
+	// on top of it wrote a second line for the same request to the same stdout,
+	// doubling the blocking-write cost on the hot path for no extra
+	// information. Use APP_ENABLE_REQUEST_LOGGER=false to silence access logs.
 	app.Use(middlewares.RequestLogger())
-	app.Use(logger.New())
 
 	auditLogger := services.NewAuditLogger(config.DB)
 
@@ -221,13 +236,45 @@ func main() {
 			}
 		}
 	}()
+	startLogRetentionWorker()
+	// Was written but never started: the function existed, R2 and
+	// BACKUP_DAILY_HOUR/MINUTE were configured in .env, and nothing ever called
+	// it — so the scheduled backup had never run once. Manual backups from the
+	// admin screen were unaffected, which is why it went unnoticed.
+	services.StartDailyDatabaseBackupWorker()
 	startQueueMidnightWorker()
 	startQueuePausedSessionLeaseWorker()
 	log.Fatal(app.Listen(":8000"))
 }
 
+// attendancePinTickInterval is how often the PIN lifecycle worker sweeps.
+//
+// It was 1 second, which meant two full queries against attendance_sessions
+// every second forever — ~86,400 transactions a day even with nobody using the
+// system. PINs rotate on a one-minute cadence, so a few seconds of resolution
+// is far more precision than the feature needs, and 5s cuts that background
+// load by 80%. Override with ATTENDANCE_PIN_TICK_SECONDS if a deployment wants
+// tighter timing.
+func attendancePinTickInterval() time.Duration {
+	const defaultSeconds = 5
+
+	seconds := defaultSeconds
+	if raw := strings.TrimSpace(os.Getenv("ATTENDANCE_PIN_TICK_SECONDS")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 30 {
+			log.Printf("⚠️  Invalid ATTENDANCE_PIN_TICK_SECONDS=%q (expected 1-30), using %d", raw, defaultSeconds)
+		} else {
+			seconds = parsed
+		}
+	}
+
+	return time.Duration(seconds) * time.Second
+}
+
 func startAttendancePinLifecycleWorker() {
-	ticker := time.NewTicker(1 * time.Second)
+	interval := attendancePinTickInterval()
+	log.Printf("⏱️  Attendance PIN lifecycle worker interval: %s", interval)
+	ticker := time.NewTicker(interval)
 
 	go func() {
 		defer ticker.Stop()
@@ -377,6 +424,45 @@ func startQueuePausedSessionLeaseWorker() {
 
 		for range ticker.C {
 			runCleanup()
+		}
+	}()
+}
+
+// retentionStartupDelay keeps the first purge off the startup path — see
+// startLogRetentionWorker.
+const retentionStartupDelay = 5 * time.Minute
+
+// startLogRetentionWorker purges rows past their retention window from the
+// append-only log tables once a day.
+//
+// The first run is deliberately delayed rather than firing at boot: on a
+// deployment with years of accumulated logs it is the heaviest run of all, and
+// competing with startup migrations plus the first wave of user traffic is the
+// worst possible time for it. Batching inside PurgeExpiredLogs caps how much
+// any single run can delete, so a large backlog drains over several days
+// instead of in one long stall.
+func startLogRetentionWorker() {
+	runPurge := func() {
+		for _, result := range repositories.PurgeExpiredLogs() {
+			if result.Deleted == 0 {
+				continue
+			}
+			if result.Capped {
+				log.Printf("🧹 Retention: deleted %d row(s) from %s (per-run limit reached, more remain — continuing next run)", result.Deleted, result.Table)
+				continue
+			}
+			log.Printf("🧹 Retention: deleted %d row(s) from %s", result.Deleted, result.Table)
+		}
+	}
+
+	go func() {
+		time.Sleep(retentionStartupDelay)
+		runPurge()
+
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			runPurge()
 		}
 	}()
 }
