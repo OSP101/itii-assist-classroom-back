@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"itii-assist/config"
 	"itii-assist/middlewares"
 	"itii-assist/models"
@@ -10,6 +11,8 @@ import (
 	"itii-assist/services"
 	"itii-assist/utils"
 	"log"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -327,6 +330,55 @@ func GetCourseByIDHandler(c fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูลรายวิชา"})
 	}
 	return c.JSON(fiber.Map{"success": true, "data": detail})
+}
+
+// =============================================================================
+// POST /api/courses/cover-image
+// =============================================================================
+
+// UploadCourseCoverHandler saves an uploaded course cover to disk and returns
+// its public URL. The frontend's crop/position editor previously sent the
+// image itself as a base64 data URI in the course create/update payload,
+// which got stored as-is in courses.image — every course carrying its own
+// full-size image inline meant a page of 10-12 courses in a list response
+// could run into the megabytes. Saving to uploads/course-covers/ and storing
+// a URL instead keeps list responses to the size they should be.
+func UploadCourseCoverHandler(c fiber.Ctx) error {
+	fileHeader, err := c.FormFile("image")
+	if err != nil || fileHeader == nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไม่พบไฟล์รูปภาพ"})
+	}
+
+	if fileHeader.Size <= 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไฟล์รูปภาพไม่ถูกต้อง"})
+	}
+	if fileHeader.Size > 2*1024*1024 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไฟล์มีขนาดใหญ่เกินไป สูงสุด 2MB"})
+	}
+
+	contentType := strings.ToLower(strings.TrimSpace(fileHeader.Header.Get("Content-Type")))
+	if !strings.HasPrefix(contentType, "image/") {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "รองรับเฉพาะไฟล์รูปภาพ"})
+	}
+
+	baseDir := filepath.Join("uploads", "course-covers")
+	if mkdirErr := os.MkdirAll(baseDir, 0o755); mkdirErr != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ไม่สามารถสร้างโฟลเดอร์จัดเก็บรูปได้"})
+	}
+
+	ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
+	if ext == "" {
+		ext = ".jpg"
+	}
+	fileName := fmt.Sprintf("course-cover-%d%s", time.Now().UnixNano(), ext)
+	filePath := filepath.Join(baseDir, fileName)
+
+	if saveErr := c.SaveFile(fileHeader, filePath); saveErr != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ไม่สามารถบันทึกรูปปกวิชาได้"})
+	}
+
+	publicPath := filepath.ToSlash(filepath.Join("/api/uploads", "course-covers", fileName))
+	return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"url": publicPath}})
 }
 
 // =============================================================================

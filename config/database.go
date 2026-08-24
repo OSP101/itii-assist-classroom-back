@@ -358,6 +358,78 @@ func MigrateBase64AvatarsToFiles() {
 	log.Printf("✅ Migrated %d base64 avatar(s) to files under uploads/avatars", migrated)
 }
 
+// MigrateBase64CourseCoversToFiles is MigrateBase64AvatarsToFiles's twin for
+// courses.image: the cover-crop editor used to send its base64 preview
+// straight through as the course's image field instead of uploading a file,
+// so a course's own cover rode along inline in every course-list response
+// that included it. Idempotent for the same reason — a migrated row's image
+// no longer starts with "data:".
+func MigrateBase64CourseCoversToFiles() {
+	if DB == nil {
+		return
+	}
+
+	var rows []struct {
+		ID    string
+		Image string
+	}
+	if err := DB.Raw(`SELECT id, image FROM courses WHERE image LIKE 'data:%;base64,%'`).Scan(&rows).Error; err != nil {
+		log.Printf("⚠️  Failed to query base64 course covers for migration: %v", err)
+		return
+	}
+	if len(rows) == 0 {
+		return
+	}
+
+	baseDir := filepath.Join("uploads", "course-covers")
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		log.Printf("⚠️  Failed to create uploads/course-covers directory for cover migration: %v", err)
+		return
+	}
+
+	migrated := 0
+	for _, row := range rows {
+		comma := strings.Index(row.Image, ",")
+		if comma < 0 {
+			continue
+		}
+		header := row.Image[:comma]
+		payload := row.Image[comma+1:]
+
+		content, err := base64.StdEncoding.DecodeString(payload)
+		if err != nil {
+			log.Printf("⚠️  Skipping unparseable cover image for course %s: %v", row.ID, err)
+			continue
+		}
+
+		ext := ".jpg"
+		switch {
+		case strings.Contains(header, "image/png"):
+			ext = ".png"
+		case strings.Contains(header, "image/gif"):
+			ext = ".gif"
+		case strings.Contains(header, "image/webp"):
+			ext = ".webp"
+		}
+
+		fileName := fmt.Sprintf("course-cover-migrated-%s-%d%s", row.ID, time.Now().UnixNano(), ext)
+		filePath := filepath.Join(baseDir, fileName)
+		if err := os.WriteFile(filePath, content, 0o644); err != nil {
+			log.Printf("⚠️  Failed to write migrated cover image for course %s: %v", row.ID, err)
+			continue
+		}
+
+		publicPath := filepath.ToSlash(filepath.Join("/api/uploads", "course-covers", fileName))
+		if err := DB.Exec(`UPDATE courses SET image = ? WHERE id = ?`, publicPath, row.ID).Error; err != nil {
+			log.Printf("⚠️  Failed to update cover image URL for course %s: %v", row.ID, err)
+			continue
+		}
+		migrated++
+	}
+
+	log.Printf("✅ Migrated %d base64 course cover(s) to files under uploads/course-covers", migrated)
+}
+
 func MigratePerformanceIndexes() {
 	if DB == nil {
 		return

@@ -17,6 +17,9 @@ func SetupCourseRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	protected.Get("/instructors", middlewares.RequireRole("admin", "instructor", "ta"), handlers.GetInstructorsListHandler)
 	protected.Get("/tas-list", middlewares.RequireRole("admin", "instructor", "ta"), handlers.GetTAsListHandler)
 
+	// Course cover image upload (no course id yet on create, so not course-scoped)
+	protected.Post("/cover-image", middlewares.RequireRole("admin", "instructor"), handlers.UploadCourseCoverHandler)
+
 	// My courses (instructor, ta, student)
 	protected.Get("/my-courses", middlewares.RequireRole("instructor", "ta", "student"), handlers.GetMyCoursesHandler)
 	protected.Get("/my-courses/stats", middlewares.RequireRole("instructor", "ta"), handlers.GetMyCoursesStatsHandler)

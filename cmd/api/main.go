@@ -119,6 +119,7 @@ func main() {
 	config.MigrateQueueSessionCounterCompatibility()
 	config.MigrateUploadPathsToApiPrefix()
 	config.MigrateBase64AvatarsToFiles()
+	config.MigrateBase64CourseCoversToFiles()
 	config.MigratePerformanceIndexes()
 	config.MigrateAutovacuumSettings()
 	config.MigratePgStatStatements()
