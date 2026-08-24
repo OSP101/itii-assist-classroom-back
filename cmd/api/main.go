@@ -118,6 +118,7 @@ func main() {
 	config.MigrateScoreSchemaCompatibility()
 	config.MigrateQueueSessionCounterCompatibility()
 	config.MigrateUploadPathsToApiPrefix()
+	config.MigrateBase64AvatarsToFiles()
 	config.MigratePerformanceIndexes()
 	config.MigrateAutovacuumSettings()
 	config.MigratePgStatStatements()

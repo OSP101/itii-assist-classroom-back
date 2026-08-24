@@ -1,8 +1,8 @@
 package handlers
 
 import (
-	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"itii-assist/config"
 	"itii-assist/middlewares"
@@ -11,6 +11,8 @@ import (
 	"itii-assist/services"
 	"itii-assist/utils"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -833,11 +835,21 @@ func UploadAvatarHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Only image files are allowed"})
 	}
 
-	base64Avatar := "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(content)
-	user.Avatar = base64Avatar
+	// Saved to disk and referenced by URL, not stored inline as base64: the
+	// avatar rides along in every UserBasic embedded in course/instructor/TA
+	// list responses, so a base64 blob there multiplies by every user who has
+	// one — this previously ballooned /api/courses/my-courses and
+	// /api/courses/instructors to several MB each.
+	oldAvatar := user.Avatar
+	publicPath, err := saveAvatarFile(content, contentType, fileHeader.Filename)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to save avatar"})
+	}
+	user.Avatar = publicPath
 	if err := repositories.UpdateUser(user); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update avatar"})
 	}
+	deleteLocalAvatarFile(oldAvatar)
 
 	{
 		dt, br, osn := utils.ParseUserAgent(c.Get("User-Agent"))
@@ -858,9 +870,61 @@ func UploadAvatarHandler(c fiber.Ctx) error {
 		"success": true,
 		"message": "Avatar updated successfully",
 		"data": fiber.Map{
-			"avatar": base64Avatar,
+			"avatar": publicPath,
 		},
 	})
+}
+
+// saveAvatarFile writes an uploaded avatar to uploads/avatars and returns its
+// public /api/uploads URL (served by the static.New("./uploads") mount in
+// cmd/api/main.go).
+func saveAvatarFile(content []byte, contentType string, originalFilename string) (string, error) {
+	baseDir := filepath.Join("uploads", "avatars")
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		return "", err
+	}
+
+	ext := strings.ToLower(filepath.Ext(originalFilename))
+	if ext == "" {
+		ext = extensionForImageContentType(contentType)
+	}
+	fileName := fmt.Sprintf("avatar-%d%s", time.Now().UnixNano(), ext)
+	filePath := filepath.Join(baseDir, fileName)
+
+	if err := os.WriteFile(filePath, content, 0o644); err != nil {
+		return "", err
+	}
+
+	return filepath.ToSlash(filepath.Join("/api/uploads", "avatars", fileName)), nil
+}
+
+func extensionForImageContentType(contentType string) string {
+	switch contentType {
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".jpg"
+	}
+}
+
+// deleteLocalAvatarFile removes a previous avatar from disk when it was one
+// of ours (served under /api/uploads/avatars/...). OAuth-provided avatar
+// URLs and legacy base64 values are left alone — there is nothing on disk to
+// remove for those.
+func deleteLocalAvatarFile(avatarURL string) {
+	const prefix = "/api/uploads/avatars/"
+	if !strings.HasPrefix(avatarURL, prefix) {
+		return
+	}
+	fileName := strings.TrimPrefix(avatarURL, prefix)
+	if fileName == "" || strings.ContainsAny(fileName, "/\\") {
+		return
+	}
+	_ = os.Remove(filepath.Join("uploads", "avatars", fileName))
 }
 
 // =============================================================================
@@ -874,10 +938,12 @@ func RemoveAvatarHandler(c fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "User not found"})
 	}
 
+	oldAvatar := user.Avatar
 	user.Avatar = ""
 	if err := repositories.UpdateUser(user); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to remove avatar"})
 	}
+	deleteLocalAvatarFile(oldAvatar)
 
 	{
 		dt, br, osn := utils.ParseUserAgent(c.Get("User-Agent"))

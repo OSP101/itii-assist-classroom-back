@@ -1,9 +1,11 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -278,6 +280,82 @@ func MigrateUploadPathsToApiPrefix() {
 	}
 
 	log.Println("✅ Migrated upload paths to /api/uploads prefix")
+}
+
+// MigrateBase64AvatarsToFiles converts any users.avatar values still holding
+// a base64 data URI (from the old UploadAvatarHandler, which stored the
+// entire uploaded image inline before it was changed to save a file under
+// uploads/avatars/ and store a URL) into a file on disk plus an
+// /api/uploads/avatars/... URL. Those inline blobs rode along in every
+// UserBasic embedded in course/instructor/TA list responses, so a handful of
+// users with profile photos was enough to balloon endpoints like
+// /api/courses/my-courses and /api/courses/instructors from a few KB to
+// several MB each. Idempotent: a migrated row's avatar no longer matches the
+// "data:" prefix, so re-running this on every boot is a no-op for it.
+func MigrateBase64AvatarsToFiles() {
+	if DB == nil {
+		return
+	}
+
+	var rows []struct {
+		ID     uint
+		Avatar string
+	}
+	if err := DB.Raw(`SELECT id, avatar FROM users WHERE avatar LIKE 'data:%;base64,%'`).Scan(&rows).Error; err != nil {
+		log.Printf("⚠️  Failed to query base64 avatars for migration: %v", err)
+		return
+	}
+	if len(rows) == 0 {
+		return
+	}
+
+	baseDir := filepath.Join("uploads", "avatars")
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		log.Printf("⚠️  Failed to create uploads/avatars directory for avatar migration: %v", err)
+		return
+	}
+
+	migrated := 0
+	for _, row := range rows {
+		comma := strings.Index(row.Avatar, ",")
+		if comma < 0 {
+			continue
+		}
+		header := row.Avatar[:comma]
+		payload := row.Avatar[comma+1:]
+
+		content, err := base64.StdEncoding.DecodeString(payload)
+		if err != nil {
+			log.Printf("⚠️  Skipping unparseable avatar for user %d: %v", row.ID, err)
+			continue
+		}
+
+		ext := ".jpg"
+		switch {
+		case strings.Contains(header, "image/png"):
+			ext = ".png"
+		case strings.Contains(header, "image/gif"):
+			ext = ".gif"
+		case strings.Contains(header, "image/webp"):
+			ext = ".webp"
+		}
+
+		fileName := fmt.Sprintf("avatar-migrated-%d-%d%s", row.ID, time.Now().UnixNano(), ext)
+		filePath := filepath.Join(baseDir, fileName)
+		if err := os.WriteFile(filePath, content, 0o644); err != nil {
+			log.Printf("⚠️  Failed to write migrated avatar for user %d: %v", row.ID, err)
+			continue
+		}
+
+		publicPath := filepath.ToSlash(filepath.Join("/api/uploads", "avatars", fileName))
+		if err := DB.Exec(`UPDATE users SET avatar = ? WHERE id = ?`, publicPath, row.ID).Error; err != nil {
+			log.Printf("⚠️  Failed to update avatar URL for user %d: %v", row.ID, err)
+			continue
+		}
+		migrated++
+	}
+
+	log.Printf("✅ Migrated %d base64 avatar(s) to files under uploads/avatars", migrated)
 }
 
 func MigratePerformanceIndexes() {
