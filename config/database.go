@@ -477,6 +477,31 @@ func MigratePerformanceIndexes() {
 			name: "assignments_course_active_created_at",
 			sql:  `CREATE INDEX IF NOT EXISTS idx_assignments_course_active_created_at ON assignments (course_id, created_at DESC) WHERE is_active = true`,
 		},
+
+		// ── My-courses list (home dashboard) ────────────────────────────
+		//
+		// GetMyCourses joins course_instructors/course_tas on
+		// `ON x.course_id = courses.id AND x.user_id = ?`. The model tags
+		// only gave each table separate single-column indexes on course_id
+		// and user_id, not a composite covering the join predicate.
+		{
+			name: "course_instructors_user_course",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_course_instructors_user_course ON course_instructors (user_id, course_id)`,
+		},
+		{
+			name: "course_tas_user_course",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_course_tas_user_course ON course_tas (user_id, course_id)`,
+		},
+		{
+			// courses.is_active / year / semester are filtered directly
+			// (WHERE courses.is_active = true, etc.) with no index at all.
+			name: "courses_is_active",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_courses_is_active ON courses (is_active)`,
+		},
+		{
+			name: "courses_year_semester",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_courses_year_semester ON courses (year, semester)`,
+		},
 	}
 
 	ensuredCount := 0
