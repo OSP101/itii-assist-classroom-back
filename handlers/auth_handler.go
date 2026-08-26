@@ -532,8 +532,8 @@ func ResetPasswordHandler(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&input); err != nil || input.Token == "" || input.NewPassword == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Token and new password are required"})
 	}
-	if len(input.NewPassword) < 6 {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร"})
+	if err := utils.ValidatePasswordStrength(input.NewPassword); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
 
 	tokenRecord, err := repositories.FindValidPasswordResetToken(input.Token)
@@ -669,8 +669,8 @@ func ChangePasswordHandler(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
 	}
-	if input.NewPassword == "" || len(input.NewPassword) < 6 {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "รหัสผ่านใหม่ต้องมีอย่างน้อย 6 ตัวอักษร"})
+	if err := utils.ValidatePasswordStrength(input.NewPassword); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
 
 	userID := c.Locals("user_id").(uint)
@@ -725,8 +725,8 @@ func ForceChangePasswordHandler(c fiber.Ctx) error {
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
 	}
-	if input.NewPassword == "" || len(input.NewPassword) < 6 {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร"})
+	if err := utils.ValidatePasswordStrength(input.NewPassword); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
 
 	userID := c.Locals("user_id").(uint)

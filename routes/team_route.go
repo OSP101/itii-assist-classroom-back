@@ -14,6 +14,7 @@ func SetupTeamRoutes(app *fiber.App) {
 
 	protected.Get("/", middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionViewTeams, "instructor", "ta"), handlers.GetTeamsHandler)
 	protected.Post("/bulk", middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionCreateTeams, "instructor", "ta"), handlers.BulkCreateTeamsHandler)
+	protected.Post("/randomize", middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionCreateTeams, "instructor", "ta"), handlers.RandomizeTeamsHandler)
 	protected.Post("/bulk-delete", middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionDeleteTeams, "instructor", "ta"), handlers.BulkDeleteTeamsHandler)
 	protected.Post("/", middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionCreateTeams, "instructor", "ta"), handlers.CreateTeamHandler)
 	protected.Put("/:teamId", middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("id"), repositories.PermissionUpdateTeams, "instructor", "ta"), handlers.UpdateTeamHandler)

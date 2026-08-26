@@ -258,6 +258,9 @@ func UpdateUserHandler(c fiber.Ctx) error {
 		user.Avatar = input.Avatar
 	}
 	if input.Password != "" {
+		if err := utils.ValidatePasswordStrength(input.Password); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
+		}
 		hashed, err := utils.HashPassword(input.Password)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "เข้ารหัสผ่านไม่สำเร็จ"})

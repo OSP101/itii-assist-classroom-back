@@ -3,6 +3,7 @@ package handlers
 import (
 	"itii-assist/repositories"
 	"strconv"
+	"strings"
 
 	"github.com/gofiber/fiber/v3"
 )
@@ -137,6 +138,67 @@ func BulkCreateTeamsHandler(c fiber.Ctx) error {
 	return c.Status(201).JSON(fiber.Map{
 		"success": true,
 		"message": "สร้างกลุ่มสำเร็จ",
+		"data": fiber.Map{
+			"createdCount": len(created),
+			"teams":        created,
+		},
+	})
+}
+
+// =============================================================================
+// POST /api/courses/:id/teams/randomize
+// =============================================================================
+
+// RandomizeTeamsHandler สุ่มแบ่งกลุ่มนักศึกษาที่ยังไม่ได้เข้ากลุ่มทั้งหมดในรายวิชา
+// ทำการสุ่มและตรวจสอบรายชื่อทั้งหมดฝั่ง server (ไม่รับรายชื่อ/ผลการสุ่มจาก client)
+// เพื่อป้องกันการปลอมแปลงผลการสุ่มจากฝั่ง frontend
+func RandomizeTeamsHandler(c fiber.Ctx) error {
+	courseID := c.Params("id")
+
+	var input struct {
+		GroupType  string `json:"group_type"`
+		WeekNumber *int   `json:"week_number"`
+		GroupSize  int    `json:"group_size"`
+		NamePrefix string `json:"name_prefix"`
+	}
+	if err := c.Bind().JSON(&input); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
+	}
+	if input.GroupSize < 1 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "จำนวนสมาชิกต่อกลุ่มต้องมากกว่า 0"})
+	}
+
+	groupType := strings.ToLower(strings.TrimSpace(input.GroupType))
+	if groupType == "" {
+		groupType = "permanent"
+	}
+	if (groupType == "temporary" || groupType == "weekly") && input.WeekNumber == nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "กรุณาระบุสัปดาห์สำหรับกลุ่มรายสัปดาห์"})
+	}
+
+	namePrefix := strings.TrimSpace(input.NamePrefix)
+	if namePrefix == "" {
+		namePrefix = "กลุ่มที่"
+	}
+
+	created, err := repositories.RandomizeTeams(courseID, groupType, input.WeekNumber, input.GroupSize, namePrefix)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "สุ่มกลุ่มไม่สำเร็จ"})
+	}
+	if len(created) == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไม่มีนักศึกษาที่ยังไม่ได้เข้ากลุ่มให้สุ่ม"})
+	}
+
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, courseID, actorID, "randomize_teams", "course", "course", courseID, "", fiber.Map{
+		"created_count": len(created),
+		"group_type":    groupType,
+		"group_size":    input.GroupSize,
+	})
+
+	return c.Status(201).JSON(fiber.Map{
+		"success": true,
+		"message": "สุ่มกลุ่มสำเร็จ",
 		"data": fiber.Map{
 			"createdCount": len(created),
 			"teams":        created,

@@ -1,9 +1,12 @@
 package repositories
 
 import (
+	"crypto/rand"
 	"fmt"
 	"itii-assist/config"
 	"itii-assist/models"
+	"math/big"
+	"sort"
 	"strings"
 	"time"
 
@@ -47,8 +50,55 @@ func normalizeTeamGroupType(groupType string) string {
 	}
 }
 
+// getEnrolledStudentIDs คืนชุด student_id ทั้งหมดที่ลงทะเบียนใน section ของรายวิชานี้
+func getEnrolledStudentIDs(courseID string) (map[uint]struct{}, error) {
+	var rows []struct {
+		StudentID uint `gorm:"column:student_id"`
+	}
+	if err := config.DB.Raw(`
+		SELECT DISTINCT css.student_id
+		FROM course_section_students css
+		JOIN course_sections cs ON cs.id = css.course_section_id
+		WHERE cs.course_id = ?
+	`, courseID).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	ids := make(map[uint]struct{}, len(rows))
+	for _, row := range rows {
+		ids[row.StudentID] = struct{}{}
+	}
+	return ids, nil
+}
+
+// getExistingGroupMemberships คืน map[student_id]ชื่อกลุ่ม สำหรับสมาชิกที่ถูกจัดกลุ่มไปแล้ว
+// ในรายวิชา/ประเภทกลุ่ม/สัปดาห์ (กรณีกลุ่มรายสัปดาห์) ที่ระบุ
+func getExistingGroupMemberships(courseID string, normalizedGroupType string, weekNumber *int) (map[uint]string, error) {
+	query := config.DB.Table("student_group_members sgm").
+		Select("sgm.student_id, sg.name as group_name, sg.week_number").
+		Joins("JOIN student_groups sg ON sg.id = sgm.group_id").
+		Where("sg.course_id = ? AND sg.group_type = ?", courseID, normalizedGroupType)
+	if normalizedGroupType == "temporary" && weekNumber != nil {
+		query = query.Where("sg.week_number = ?", *weekNumber)
+	}
+
+	var rows []struct {
+		StudentID  uint   `gorm:"column:student_id"`
+		GroupName  string `gorm:"column:group_name"`
+		WeekNumber *int   `gorm:"column:week_number"`
+	}
+	if err := query.Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	memberships := make(map[uint]string, len(rows))
+	for _, row := range rows {
+		memberships[row.StudentID] = row.GroupName
+	}
+	return memberships, nil
+}
+
 func ValidateTeamInputs(courseID string, groupType string, weekNumber *int, teams []TeamCreateInput) []string {
-	db := config.DB
 	normalizedGroupType := normalizeTeamGroupType(groupType)
 	errors := make([]string, 0)
 
@@ -60,42 +110,14 @@ func ValidateTeamInputs(courseID string, groupType string, weekNumber *int, team
 		return []string{"กรุณาระบุสัปดาห์สำหรับกลุ่มรายสัปดาห์"}
 	}
 
-	var enrolledRows []struct {
-		StudentID uint `gorm:"column:student_id"`
-	}
-	if err := db.Raw(`
-		SELECT DISTINCT css.student_id
-		FROM course_section_students css
-		JOIN course_sections cs ON cs.id = css.course_section_id
-		WHERE cs.course_id = ?
-	`, courseID).Scan(&enrolledRows).Error; err != nil {
+	enrolledStudentIDs, err := getEnrolledStudentIDs(courseID)
+	if err != nil {
 		return []string{"ไม่สามารถตรวจสอบรายชื่อนักศึกษาในรายวิชาได้"}
 	}
 
-	enrolledStudentIDs := make(map[uint]struct{}, len(enrolledRows))
-	for _, row := range enrolledRows {
-		enrolledStudentIDs[row.StudentID] = struct{}{}
-	}
-
-	var existingMembershipRows []struct {
-		StudentID  uint   `gorm:"column:student_id"`
-		GroupName  string `gorm:"column:group_name"`
-		WeekNumber *int   `gorm:"column:week_number"`
-	}
-	query := db.Table("student_group_members sgm").
-		Select("sgm.student_id, sg.name as group_name, sg.week_number").
-		Joins("JOIN student_groups sg ON sg.id = sgm.group_id").
-		Where("sg.course_id = ? AND sg.group_type = ?", courseID, normalizedGroupType)
-	if normalizedGroupType == "temporary" && weekNumber != nil {
-		query = query.Where("sg.week_number = ?", *weekNumber)
-	}
-	if err := query.Scan(&existingMembershipRows).Error; err != nil {
+	existingMemberships, err := getExistingGroupMemberships(courseID, normalizedGroupType, weekNumber)
+	if err != nil {
 		return []string{"ไม่สามารถตรวจสอบสมาชิกกลุ่มเดิมได้"}
-	}
-
-	existingMemberships := make(map[uint]string, len(existingMembershipRows))
-	for _, row := range existingMembershipRows {
-		existingMemberships[row.StudentID] = row.GroupName
 	}
 
 	seenTeamNames := make(map[string]string, len(teams))
@@ -362,6 +384,67 @@ func BulkCreateTeams(courseID string, groupType string, weekNumber *int, teams [
 	}
 
 	return created, nil
+}
+
+// secureShuffle สลับลำดับ ids แบบสุ่มด้วย Fisher-Yates โดยใช้ crypto/rand
+// (ไม่ใช่ math/rand หรือ Math.random ฝั่ง client) เพื่อให้การสุ่มกลุ่มเกิดขึ้น
+// และตรวจสอบได้จากฝั่ง server เท่านั้น ไม่พึ่งพาผลลัพธ์ที่ client ส่งมา
+func secureShuffle(ids []uint) {
+	for i := len(ids) - 1; i > 0; i-- {
+		nBig, err := rand.Int(rand.Reader, big.NewInt(int64(i+1)))
+		if err != nil {
+			continue
+		}
+		j := nBig.Int64()
+		ids[i], ids[j] = ids[j], ids[i]
+	}
+}
+
+// RandomizeTeams สุ่มแบ่งกลุ่มนักศึกษาที่ "ยังไม่ได้เข้ากลุ่ม" ทั้งหมดในรายวิชานี้
+// (คำนวณรายชื่อผู้ที่ยังไม่ถูกจัดกลุ่มจากฐานข้อมูลโดยตรง ไม่รับรายชื่อจาก client)
+// ออกเป็นกลุ่มละ groupSize คน แล้วสร้างกลุ่มจริงในฐานข้อมูลภายใน transaction เดียว
+func RandomizeTeams(courseID string, groupType string, weekNumber *int, groupSize int, namePrefix string) ([]TeamWithMembers, error) {
+	normalizedGroupType := normalizeTeamGroupType(groupType)
+
+	enrolledStudentIDs, err := getEnrolledStudentIDs(courseID)
+	if err != nil {
+		return nil, err
+	}
+	existingMemberships, err := getExistingGroupMemberships(courseID, normalizedGroupType, weekNumber)
+	if err != nil {
+		return nil, err
+	}
+
+	pool := make([]uint, 0, len(enrolledStudentIDs))
+	for studentID := range enrolledStudentIDs {
+		if _, alreadyGrouped := existingMemberships[studentID]; !alreadyGrouped {
+			pool = append(pool, studentID)
+		}
+	}
+	// เรียงลำดับให้แน่นอนก่อนสุ่ม เพราะลำดับการวน map ใน Go ไม่คงที่
+	sort.Slice(pool, func(i, j int) bool { return pool[i] < pool[j] })
+
+	if len(pool) == 0 {
+		return []TeamWithMembers{}, nil
+	}
+
+	secureShuffle(pool)
+
+	entries := make([]TeamCreateInput, 0, (len(pool)+groupSize-1)/groupSize)
+	groupIndex := 1
+	for i := 0; i < len(pool); i += groupSize {
+		end := i + groupSize
+		if end > len(pool) {
+			end = len(pool)
+		}
+		entries = append(entries, TeamCreateInput{
+			Name:      fmt.Sprintf("%s %d", namePrefix, groupIndex),
+			MemberIDs: pool[i:end],
+		})
+		groupIndex++
+	}
+
+	return BulkCreateTeams(courseID, normalizedGroupType, weekNumber, entries)
 }
 
 func UpdateTeam(teamID uint, courseID string, name string, memberIDs *[]uint) (*TeamWithMembers, error) {
