@@ -273,6 +273,8 @@ func KKUCallbackHandler(c fiber.Ctx) error {
 		}
 		recordAuthLoginSystemLog(c, nil, "kku_student", map[string]any{
 			"student_id": student.ID,
+			"student_no": student.StudentID,
+			"full_name":  student.FullName,
 			"email":      email,
 			"provider":   "kku",
 		})

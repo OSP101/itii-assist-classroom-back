@@ -38,6 +38,35 @@ func attachActorUserToLog(log models.SystemLog) fiber.Map {
 				"role":      user.Role,
 			}
 		}
+		return data
+	}
+
+	// Student logins carry no ActorUserID (students live outside the users table);
+	// the actor identity is embedded in Detail instead, keyed by student_id.
+	var detail map[string]any
+	if err := json.Unmarshal(log.Detail, &detail); err == nil {
+		if rawID, ok := detail["student_id"]; ok {
+			var studentID uint
+			switch v := rawID.(type) {
+			case float64:
+				studentID = uint(v)
+			case string:
+				if n, err := strconv.ParseUint(v, 10, 64); err == nil {
+					studentID = uint(n)
+				}
+			}
+			if studentID > 0 {
+				var student models.Student
+				if err := config.DB.Select("id", "student_id", "full_name", "email").First(&student, studentID).Error; err == nil {
+					data["actor_student"] = fiber.Map{
+						"id":         student.ID,
+						"student_no": student.StudentID,
+						"full_name":  student.FullName,
+						"email":      student.Email,
+					}
+				}
+			}
+		}
 	}
 
 	return data
@@ -174,6 +203,22 @@ func ExportLogsHandler(c fiber.Ctx) error {
 		if item.ActorUserID != nil {
 			if user, err := repositories.FindUserByID(*item.ActorUserID); err == nil {
 				userLabel = fmt.Sprintf("%s (%s)", user.FullName, user.Email)
+			}
+		} else {
+			var detail map[string]any
+			if err := json.Unmarshal(item.Detail, &detail); err == nil {
+				if rawID, ok := detail["student_id"]; ok {
+					var studentID uint
+					if v, ok := rawID.(float64); ok {
+						studentID = uint(v)
+					}
+					if studentID > 0 {
+						var student models.Student
+						if err := config.DB.Select("id", "student_id", "full_name", "email").First(&student, studentID).Error; err == nil {
+							userLabel = fmt.Sprintf("%s (%s) [นักศึกษา]", student.FullName, student.Email)
+						}
+					}
+				}
 			}
 		}
 		statusCode := ""

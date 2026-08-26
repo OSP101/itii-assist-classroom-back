@@ -1478,3 +1478,145 @@ func GetSessionInfo(sessionID uint) (*AttendanceSessionInfo, error) {
 		Section:              section,
 	}, nil
 }
+
+// ---------------------------------------------------------------------------
+// Course-wide attendance report (TOR 3.9.2)
+// ---------------------------------------------------------------------------
+
+type AttendanceCourseSessionRow struct {
+	ID    uint            `json:"id"`
+	Title string          `json:"title"`
+	Date  time.Time       `json:"date"`
+	Stats AttendanceStats `json:"stats"`
+	Rate  float64         `json:"attendance_rate"`
+}
+
+type AttendanceCourseStudentRow struct {
+	StudentID  uint    `json:"student_id"`
+	StudentNo  string  `json:"student_no"`
+	FullName   string  `json:"full_name"`
+	Present    int     `json:"present"`
+	Late       int     `json:"late"`
+	Leave      int     `json:"leave"`
+	Absent     int     `json:"absent"`
+	TotalMarks int     `json:"total_marks"`
+	Rate       float64 `json:"attendance_rate"`
+}
+
+type AttendanceCourseSummary struct {
+	CourseID      string                       `json:"course_id"`
+	TotalSessions int                          `json:"total_sessions"`
+	TotalStudents int                          `json:"total_students"`
+	Overall       AttendanceStats              `json:"overall"`
+	OverallRate   float64                      `json:"overall_attendance_rate"`
+	BySession     []AttendanceCourseSessionRow `json:"by_session"`
+	ByStudent     []AttendanceCourseStudentRow `json:"by_student"`
+}
+
+// GetAttendanceCourseSummary aggregates attendance across every session in a course,
+// producing a per-session and per-student breakdown for the course-wide attendance report.
+func GetAttendanceCourseSummary(courseID string) (*AttendanceCourseSummary, error) {
+	db := config.DB
+
+	sessions, err := GetAttendanceSessions(courseID, "")
+	if err != nil {
+		return nil, err
+	}
+
+	totalStudents, err := countAttendanceTargetStudents(courseID, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	summary := &AttendanceCourseSummary{
+		CourseID:      courseID,
+		TotalSessions: len(sessions),
+		TotalStudents: totalStudents,
+		BySession:     make([]AttendanceCourseSessionRow, 0, len(sessions)),
+		ByStudent:     make([]AttendanceCourseStudentRow, 0),
+	}
+
+	sessionIDs := make([]uint, 0, len(sessions))
+	for _, s := range sessions {
+		sessionIDs = append(sessionIDs, s.ID)
+
+		summary.Overall.Present += s.Stats.Present
+		summary.Overall.Late += s.Stats.Late
+		summary.Overall.Leave += s.Stats.Leave
+		summary.Overall.Absent += s.Stats.Absent
+		summary.Overall.Total += s.Stats.Total
+		summary.Overall.CheckedIn += s.Stats.CheckedIn
+
+		rate := 0.0
+		eligible := s.Stats.Total
+		if eligible > 0 {
+			rate = float64(s.Stats.CheckedIn) / float64(eligible) * 100
+		}
+		summary.BySession = append(summary.BySession, AttendanceCourseSessionRow{
+			ID:    s.ID,
+			Title: s.Title,
+			Date:  s.StartTime,
+			Stats: s.Stats,
+			Rate:  math.Round(rate*100) / 100,
+		})
+	}
+
+	if summary.Overall.Total > 0 {
+		summary.OverallRate = math.Round(float64(summary.Overall.CheckedIn)/float64(summary.Overall.Total)*100*100) / 100
+	}
+
+	if len(sessionIDs) == 0 {
+		return summary, nil
+	}
+
+	type studentStatRow struct {
+		StudentID uint
+		StudentNo string
+		FullName  string
+		Status    string
+		Count     int64
+	}
+	var rows []studentStatRow
+	if err := db.Raw(`
+		SELECT ar.student_id AS student_id, st.student_id AS student_no, st.full_name AS full_name, ar.status AS status, COUNT(*) AS count
+		FROM attendance_records ar
+		JOIN students st ON st.id = ar.student_id
+		WHERE ar.attendance_session_id IN ?
+		GROUP BY ar.student_id, st.student_id, st.full_name, ar.status
+	`, sessionIDs).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	studentMap := map[uint]*AttendanceCourseStudentRow{}
+	order := make([]uint, 0)
+	for _, r := range rows {
+		row, ok := studentMap[r.StudentID]
+		if !ok {
+			row = &AttendanceCourseStudentRow{StudentID: r.StudentID, StudentNo: r.StudentNo, FullName: r.FullName}
+			studentMap[r.StudentID] = row
+			order = append(order, r.StudentID)
+		}
+		switch r.Status {
+		case "present":
+			row.Present = int(r.Count)
+		case "late":
+			row.Late = int(r.Count)
+		case "leave":
+			row.Leave = int(r.Count)
+		case "absent":
+			row.Absent = int(r.Count)
+		}
+		row.TotalMarks += int(r.Count)
+	}
+
+	for _, sid := range order {
+		row := studentMap[sid]
+		checkedIn := row.Present + row.Late + row.Leave
+		if row.TotalMarks > 0 {
+			row.Rate = math.Round(float64(checkedIn)/float64(row.TotalMarks)*100*100) / 100
+		}
+		summary.ByStudent = append(summary.ByStudent, *row)
+	}
+
+	return summary, nil
+}

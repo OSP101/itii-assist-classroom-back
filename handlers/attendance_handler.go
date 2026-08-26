@@ -699,6 +699,19 @@ func GetAttendanceSessionsHandler(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "data": sessions})
 }
 
+// GET /api/attendance/course-summary?course_id=
+func GetAttendanceCourseSummaryHandler(c fiber.Ctx) error {
+	courseID := c.Query("course_id")
+	if courseID == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "course_id required"})
+	}
+	summary, err := repositories.GetAttendanceCourseSummary(courseID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to build attendance report"})
+	}
+	return c.JSON(fiber.Map{"success": true, "data": summary})
+}
+
 // GET /api/attendance/:id
 func GetAttendanceSessionHandler(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 64)

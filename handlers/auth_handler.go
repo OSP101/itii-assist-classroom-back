@@ -237,11 +237,12 @@ func (h *AuthHandler) Login(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "สร้าง Token ไม่สำเร็จ"})
 	}
 
+	sessionStartedAt := time.Now()
 	if err := repositories.CreateRefreshToken(&models.RefreshToken{
 		JTI:       jti,
 		UserID:    user.ID,
 		ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
-		Meta:      buildSessionMeta(c, "local"),
+		Meta:      buildSessionMeta(c, "local", sessionStartedAt),
 	}); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึก Token ไม่สำเร็จ"})
 	}
@@ -272,6 +273,7 @@ func (h *AuthHandler) Login(c fiber.Ctx) error {
 			"accessToken":        accessToken,
 			"refreshToken":       refreshToken,
 			"mustChangePassword": user.MustChangePassword,
+			"sessionExpiresAt":   sessionStartedAt.Add(MaxSessionDuration),
 		},
 	})
 }
@@ -308,6 +310,24 @@ func RefreshHandler(c fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Refresh Token ถูกยกเลิกแล้ว"})
 	}
 
+	// Absolute session cap: a refresh token can keep rotating past its own 7-day
+	// TTL forever, so this is the only place that ever forces a stale session to
+	// end. sessionStartedAt is carried forward from the very first login, not
+	// reset by rotation.
+	sessionStartedAt := sessionStartFromToken(*tokenRecord)
+	if time.Since(sessionStartedAt) >= MaxSessionDuration {
+		_ = repositories.RevokeRefreshToken(claims.JTI)
+		if utils.IsWebClient(c) {
+			utils.ClearAuthCookies(c)
+		}
+		return c.Status(401).JSON(fiber.Map{
+			"success": false,
+			"code":    "SESSION_EXPIRED",
+			"message": "เข้าสู่ระบบนานเกินไป กรุณาเข้าสู่ระบบใหม่เพื่อความปลอดภัย",
+		})
+	}
+	sessionExpiresAt := sessionStartedAt.Add(MaxSessionDuration)
+
 	// Student session refresh
 	if claims.Kind == "s" || tokenRecord.Kind == "s" {
 		student, studentErr := repositories.FindStudentByID(tokenRecord.UserID)
@@ -329,7 +349,7 @@ func RefreshHandler(c fiber.Ctx) error {
 			UserID:    student.ID,
 			Kind:      "s",
 			ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
-			Meta:      buildSessionMeta(c, "student"),
+			Meta:      buildSessionMeta(c, "student", sessionStartedAt),
 		}); err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึก Token ใหม่ไม่สำเร็จ"})
 		}
@@ -339,7 +359,11 @@ func RefreshHandler(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{
 			"success": true,
 			"message": "ต่ออายุ Token สำเร็จ",
-			"data":    fiber.Map{"accessToken": accessToken, "refreshToken": refreshToken},
+			"data": fiber.Map{
+				"accessToken":      accessToken,
+				"refreshToken":     refreshToken,
+				"sessionExpiresAt": sessionExpiresAt,
+			},
 		})
 	}
 
@@ -367,7 +391,7 @@ func RefreshHandler(c fiber.Ctx) error {
 		UserID:    user.ID,
 		Kind:      "u",
 		ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
-		Meta:      buildSessionMeta(c, "refresh"),
+		Meta:      buildSessionMeta(c, "refresh", sessionStartedAt),
 	}); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึก Token ใหม่ไม่สำเร็จ"})
 	}
@@ -380,8 +404,9 @@ func RefreshHandler(c fiber.Ctx) error {
 		"success": true,
 		"message": "ต่ออายุ Token สำเร็จ",
 		"data": fiber.Map{
-			"accessToken":  accessToken,
-			"refreshToken": refreshToken,
+			"accessToken":      accessToken,
+			"refreshToken":     refreshToken,
+			"sessionExpiresAt": sessionExpiresAt,
 		},
 	})
 }
@@ -561,11 +586,32 @@ func ResetPasswordHandler(c fiber.Ctx) error {
 // GET /api/auth/me
 // =============================================================================
 
+// currentSessionExpiresAt resolves the absolute 12h session cap for the
+// request's own access token, by looking up its refresh-token record (same
+// JTI — see utils.GenerateTokenPair) and reading the SessionStartedAt carried
+// in its Meta. This is the channel OAuth/SSO logins rely on to learn their
+// session deadline, since those land via a redirect with no JSON body of
+// their own to carry it. Returns nil (never blocks the response) if the
+// lookup fails for any reason — the warning UI simply won't fire.
+func currentSessionExpiresAt(c fiber.Ctx) *time.Time {
+	jti, _ := c.Locals("jti").(string)
+	if jti == "" {
+		return nil
+	}
+	tokenRecord, err := repositories.FindRefreshTokenByJTI(jti)
+	if err != nil {
+		return nil
+	}
+	expiresAt := sessionStartFromToken(*tokenRecord).Add(MaxSessionDuration)
+	return &expiresAt
+}
+
 func GetMeHandler(c fiber.Ctx) error {
 	// Lets the web frontend recover the current CSRF token on a plain GET —
 	// its own cookie copy is unreadable behind the KKU reverse proxy, which
 	// forces HttpOnly onto every Set-Cookie it relays.
 	utils.ExposeCSRFToken(c)
+	sessionExpiresAt := currentSessionExpiresAt(c)
 
 	// Student session: return student data from students table
 	if studentID, ok := middlewares.GetStudentID(c); ok {
@@ -595,6 +641,7 @@ func GetMeHandler(c fiber.Ctx) error {
 					"created_at": student.CreatedAt,
 					"updated_at": student.UpdatedAt,
 				},
+				"sessionExpiresAt": sessionExpiresAt,
 			},
 		})
 	}
@@ -606,7 +653,10 @@ func GetMeHandler(c fiber.Ctx) error {
 	}
 	return c.JSON(fiber.Map{
 		"success": true,
-		"data":    fiber.Map{"user": safeUser(user)},
+		"data": fiber.Map{
+			"user":             safeUser(user),
+			"sessionExpiresAt": sessionExpiresAt,
+		},
 	})
 }
 
@@ -994,19 +1044,54 @@ func RemoveAvatarHandler(c fiber.Ctx) error {
 // GET /api/auth/sessions
 // =============================================================================
 
+// MaxSessionDuration caps how long a session may live via refresh-token
+// rotation before the user is forced to log in again, regardless of activity.
+// This is an absolute cap on top of the refresh token's own 7-day TTL — a
+// session that keeps refreshing every few minutes would otherwise never end.
+const MaxSessionDuration = 12 * time.Hour
+
 type sessionMeta struct {
 	IP        string `json:"ip"`
 	UserAgent string `json:"userAgent"`
 	Provider  string `json:"provider"`
+	// SessionStartedAt is set once at the first login and carried forward
+	// unchanged through every refresh-token rotation, so elapsed session time
+	// can be measured independently of the (sliding) refresh token TTL.
+	SessionStartedAt time.Time `json:"sessionStartedAt"`
 }
 
-func buildSessionMeta(c fiber.Ctx, provider string) datatypes.JSON {
+func buildSessionMeta(c fiber.Ctx, provider string, sessionStartedAt time.Time) datatypes.JSON {
 	metaJSON, _ := json.Marshal(sessionMeta{
-		IP:        c.IP(),
-		UserAgent: string(c.Request().Header.UserAgent()),
-		Provider:  provider,
+		IP:               c.IP(),
+		UserAgent:        string(c.Request().Header.UserAgent()),
+		Provider:         provider,
+		SessionStartedAt: sessionStartedAt,
 	})
 	return datatypes.JSON(metaJSON)
+}
+
+// sessionStartFromToken recovers when a session originally began from an
+// existing refresh-token record, for carrying forward across rotations.
+// Falls back to the token's own CreatedAt when Meta predates this field
+// (a session that was already active when this feature shipped, so its true
+// login time was never recorded). Since a token record is only ever found
+// with up to 7 days left on its own TTL (FindRefreshTokenByJTI filters out
+// expired ones), that fallback is at most 7 days in the past — meaning an
+// old session already past the new 12h cap will be logged out on its very
+// next refresh after deploy. That one-time transition is intentional: this
+// function's job is to enforce the cap, not grandfather sessions that
+// predate it in indefinitely.
+func sessionStartFromToken(token models.RefreshToken) time.Time {
+	if token.Meta != nil {
+		var meta sessionMeta
+		if err := json.Unmarshal(token.Meta, &meta); err == nil && !meta.SessionStartedAt.IsZero() {
+			return meta.SessionStartedAt
+		}
+	}
+	if !token.CreatedAt.IsZero() {
+		return token.CreatedAt
+	}
+	return time.Now()
 }
 
 func loadNearestSessionMetaFallback(userID uint, token models.RefreshToken) sessionMeta {

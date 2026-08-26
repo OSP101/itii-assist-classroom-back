@@ -2,6 +2,7 @@ package repositories
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -387,4 +388,139 @@ func loadAssignmentAttendanceLinks(assignmentIDs []uint) (map[uint][]LinkedAtten
 	}
 
 	return result, nil
+}
+
+// ---------------------------------------------------------------------------
+// Course-wide assignment status report (TOR 3.9.4)
+// ---------------------------------------------------------------------------
+
+type AssignmentCourseStatusRow struct {
+	AssignmentID   uint       `json:"assignment_id"`
+	Name           string     `json:"name"`
+	AssignmentType string     `json:"assignment_type"`
+	MaxScore       float64    `json:"max_score"`
+	DueDate        *time.Time `json:"due_date,omitempty"`
+	IsDraft        bool       `json:"is_draft"`
+	TargetCount    int        `json:"target_count"`
+	GradedCount    int        `json:"graded_count"`
+	UngradedCount  int        `json:"ungraded_count"`
+	GradedRate     float64    `json:"graded_rate"`
+}
+
+type AssignmentCourseSummary struct {
+	CourseID         string                      `json:"course_id"`
+	TotalAssignments int                         `json:"total_assignments"`
+	OverallGraded    int                         `json:"overall_graded"`
+	OverallTarget    int                         `json:"overall_target"`
+	OverallRate      float64                     `json:"overall_graded_rate"`
+	Assignments      []AssignmentCourseStatusRow `json:"assignments"`
+}
+
+// GetAssignmentCourseSummary aggregates submission/grading status across every
+// active assignment in a course, for the course-wide assignment status report.
+func GetAssignmentCourseSummary(courseID string) (*AssignmentCourseSummary, error) {
+	db := config.DB
+
+	var assignments []models.Assignment
+	if err := db.Where("course_id = ? AND is_active = true", courseID).
+		Order("order_index ASC, created_at DESC").Find(&assignments).Error; err != nil {
+		return nil, err
+	}
+
+	summary := &AssignmentCourseSummary{
+		CourseID:    courseID,
+		Assignments: make([]AssignmentCourseStatusRow, 0, len(assignments)),
+	}
+	if len(assignments) == 0 {
+		return summary, nil
+	}
+	summary.TotalAssignments = len(assignments)
+
+	enrolledStudents, err := GetEnrolledStudents(courseID)
+	if err != nil {
+		return nil, err
+	}
+	studentCount := len(enrolledStudents)
+
+	assignmentIDs := make([]uint, len(assignments))
+	for i, a := range assignments {
+		assignmentIDs[i] = a.ID
+	}
+
+	type gradedRow struct {
+		AssignmentID uint
+		Count        int64
+	}
+	var gradedRows []gradedRow
+	if err := db.Raw(`
+		SELECT assignment_id, COUNT(*) AS count
+		FROM scores
+		WHERE assignment_id IN ? AND sub_item_id IS NULL
+		GROUP BY assignment_id
+	`, assignmentIDs).Scan(&gradedRows).Error; err != nil {
+		return nil, err
+	}
+	gradedMap := map[uint]int{}
+	for _, r := range gradedRows {
+		gradedMap[r.AssignmentID] = int(r.Count)
+	}
+
+	type groupCountRow struct {
+		CourseID  string
+		GroupType string
+		Count     int64
+	}
+	var groupCountRows []groupCountRow
+	db.Raw(`
+		SELECT course_id, group_type, COUNT(*) AS count
+		FROM student_groups
+		WHERE course_id = ?
+		GROUP BY course_id, group_type
+	`, courseID).Scan(&groupCountRows)
+	groupCountMap := map[string]int{}
+	for _, r := range groupCountRows {
+		groupCountMap[r.GroupType] = int(r.Count)
+	}
+
+	for _, a := range assignments {
+		target := studentCount
+		switch a.AssignmentType {
+		case "permanent_group":
+			target = groupCountMap["permanent"]
+		case "weekly_group":
+			target = groupCountMap["temporary"]
+		}
+
+		graded := gradedMap[a.ID]
+		ungraded := target - graded
+		if ungraded < 0 {
+			ungraded = 0
+		}
+		rate := 0.0
+		if target > 0 {
+			rate = math.Round(float64(graded)/float64(target)*100*100) / 100
+		}
+
+		summary.Assignments = append(summary.Assignments, AssignmentCourseStatusRow{
+			AssignmentID:   a.ID,
+			Name:           a.Name,
+			AssignmentType: a.AssignmentType,
+			MaxScore:       a.MaxScore,
+			DueDate:        a.DueDate,
+			IsDraft:        a.IsDraft,
+			TargetCount:    target,
+			GradedCount:    graded,
+			UngradedCount:  ungraded,
+			GradedRate:     rate,
+		})
+
+		summary.OverallGraded += graded
+		summary.OverallTarget += target
+	}
+
+	if summary.OverallTarget > 0 {
+		summary.OverallRate = math.Round(float64(summary.OverallGraded)/float64(summary.OverallTarget)*100*100) / 100
+	}
+
+	return summary, nil
 }

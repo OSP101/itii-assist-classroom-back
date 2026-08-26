@@ -353,9 +353,10 @@ func issueStudentOAuthSession(c fiber.Ctx, student *models.Student) (at, rt stri
 		return
 	}
 	meta := sessionMeta{
-		IP:        c.IP(),
-		UserAgent: string(c.Request().Header.UserAgent()),
-		Provider:  "google",
+		IP:               c.IP(),
+		UserAgent:        string(c.Request().Header.UserAgent()),
+		Provider:         "google",
+		SessionStartedAt: time.Now(),
 	}
 	metaJSON, _ := json.Marshal(meta)
 	err = repositories.CreateRefreshToken(&models.RefreshToken{
@@ -378,9 +379,10 @@ func issueOAuthSession(c fiber.Ctx, user *models.User, provider string) (at, rt 
 		return
 	}
 	meta := sessionMeta{
-		IP:        c.IP(),
-		UserAgent: string(c.Request().Header.UserAgent()),
-		Provider:  provider,
+		IP:               c.IP(),
+		UserAgent:        string(c.Request().Header.UserAgent()),
+		Provider:         provider,
+		SessionStartedAt: time.Now(),
 	}
 	metaJSON, _ := json.Marshal(meta)
 	err = repositories.CreateRefreshToken(&models.RefreshToken{
@@ -573,6 +575,8 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 		}
 		recordAuthLoginSystemLog(c, nil, "google_student", map[string]any{
 			"student_id": student.ID,
+			"student_no": student.StudentID,
+			"full_name":  student.FullName,
 			"email":      student.Email,
 			"provider":   "google",
 		})

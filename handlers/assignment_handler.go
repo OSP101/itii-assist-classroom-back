@@ -25,6 +25,19 @@ func GetAssignmentsHandler(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "data": assignments})
 }
 
+// GET /api/assignments/course-summary?course_id=
+func GetAssignmentCourseSummaryHandler(c fiber.Ctx) error {
+	courseID := c.Query("course_id")
+	if courseID == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "course_id required"})
+	}
+	summary, err := repositories.GetAssignmentCourseSummary(courseID)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to build assignment report"})
+	}
+	return c.JSON(fiber.Map{"success": true, "data": summary})
+}
+
 // GET /api/assignments/:id
 func GetAssignmentHandler(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
@@ -193,20 +206,20 @@ func UpdateAssignmentHandler(c fiber.Ctx) error {
 	actorID := c.Locals("user_id").(uint)
 
 	var input struct {
-		Name                       string     `json:"name"`
-		Description                string     `json:"description"`
-		AssignmentType             string     `json:"assignment_type"`
-		WeekNumber                 *int       `json:"week_number"`
-		LinkedAttendanceSessionID  *uint      `json:"linked_attendance_session_id"`
-		LinkedAttendanceSessionIDs *[]uint    `json:"linked_attendance_session_ids"`
-		AttendanceCondition        string     `json:"attendance_condition"`
-		MaxScore                   *float64   `json:"max_score"`
-		DueDate                    *time.Time `json:"due_date"`
-		IsScoreVisible             *bool      `json:"is_score_visible"`
-		IsDraft                    *bool      `json:"is_draft"`
-		PublishAt                  *time.Time `json:"publish_at"`
-		ClearPublishAt             bool       `json:"clear_publish_at"`
-		ConfirmDeleteScores        bool       `json:"confirm_delete_scores"`
+		Name                       string                           `json:"name"`
+		Description                string                           `json:"description"`
+		AssignmentType             string                           `json:"assignment_type"`
+		WeekNumber                 *int                             `json:"week_number"`
+		LinkedAttendanceSessionID  *uint                            `json:"linked_attendance_session_id"`
+		LinkedAttendanceSessionIDs *[]uint                          `json:"linked_attendance_session_ids"`
+		AttendanceCondition        string                           `json:"attendance_condition"`
+		MaxScore                   *float64                         `json:"max_score"`
+		DueDate                    *time.Time                       `json:"due_date"`
+		IsScoreVisible             *bool                            `json:"is_score_visible"`
+		IsDraft                    *bool                            `json:"is_draft"`
+		PublishAt                  *time.Time                       `json:"publish_at"`
+		ClearPublishAt             bool                             `json:"clear_publish_at"`
+		ConfirmDeleteScores        bool                             `json:"confirm_delete_scores"`
 		SubItems                   *[]assignmentSubItemInput        `json:"sub_items"`
 		ReplaceSubItems            *[]assignmentReplaceSubItemInput `json:"replace_sub_items"`
 	}
