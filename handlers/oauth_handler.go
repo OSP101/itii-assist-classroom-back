@@ -114,6 +114,8 @@ func LinkAccountHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to link account"})
 	}
 
+	logPrivilegedAdminAction(c, userID, "link_oauth_account", "info", "users", strconv.FormatUint(uint64(userID), 10), fiber.Map{"provider": input.Provider})
+
 	return c.JSON(fiber.Map{
 		"success": true,
 		"message": input.Provider + " account linked successfully",
@@ -172,6 +174,8 @@ func UnlinkAccountHandler(c fiber.Ctx) error {
 		config.DB.Model(&user).Update("google_id", "")
 	}
 
+	logPrivilegedAdminAction(c, userID, "unlink_oauth_account", "info", "users", strconv.FormatUint(uint64(userID), 10), fiber.Map{"provider": provider})
+
 	return c.JSON(fiber.Map{"success": true, "message": provider + " account unlinked successfully"})
 }
 
@@ -214,6 +218,9 @@ func AdminUnlinkAccountHandler(c fiber.Ctx) error {
 	if result.RowsAffected == 0 {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "No " + provider + " account linked to this user"})
 	}
+
+	actorID, _ := c.Locals("user_id").(uint)
+	logPrivilegedAdminAction(c, actorID, "admin_unlink_oauth_account", "warn", "users", targetUserIDStr, fiber.Map{"provider": provider})
 
 	return c.JSON(fiber.Map{"success": true, "message": provider + " account unlinked successfully"})
 }

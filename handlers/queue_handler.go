@@ -3010,6 +3010,11 @@ func CancelQueueBookingPublicHandler(c fiber.Ctx) error {
 	emitQueueBookingChanged(booking.QueueSessionID, "booking-cancelled", booking)
 	emitToQueueWithGroup(booking.QueueSessionID, "queue-position-updated", fiber.Map{"booking_id": booking.ID, "timestamp": time.Now().UnixMilli()})
 
+	if session != nil {
+		actorID, _ := c.Locals("user_id").(uint)
+		logCourseActivity(c, session.CourseID, actorID, "cancel_queue_booking", "queue", "queue_booking", booking.ID, "", fiber.Map{"booking_type": booking.BookingType})
+	}
+
 	return c.JSON(fiber.Map{
 		"success": true,
 		"message": "ยกเลิกการจองสำเร็จ",
@@ -3990,6 +3995,9 @@ func UpdateQueueSessionCutoffPublicHandler(c fiber.Ctx) error {
 		"timestamp":         time.Now().UnixMilli(),
 	})
 	go emitQueueReportSnapshot(updatedSession.ID)
+
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, session.CourseID, actorID, "update_queue_cutoff", "queue", "queue_session", session.ID, "", updates)
 
 	return c.JSON(fiber.Map{"success": true, "data": updatedSession})
 }

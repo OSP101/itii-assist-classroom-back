@@ -79,6 +79,8 @@ func CreateTeamHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "สร้างกลุ่มไม่สำเร็จ"})
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, courseID, actorID, "create_team", "course", "team", team.ID, input.Name, fiber.Map{"group_type": groupType, "member_ids": input.MemberIDs})
 	return c.Status(201).JSON(fiber.Map{"success": true, "message": "สร้างกลุ่มสำเร็จ", "data": team})
 }
 
@@ -130,6 +132,8 @@ func BulkCreateTeamsHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "สร้างกลุ่มไม่สำเร็จ"})
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, courseID, actorID, "bulk_create_teams", "course", "course", courseID, "", fiber.Map{"created_count": len(created), "group_type": groupType})
 	return c.Status(201).JSON(fiber.Map{
 		"success": true,
 		"message": "สร้างกลุ่มสำเร็จ",
@@ -161,6 +165,8 @@ func BulkDeleteTeamsHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ลบกลุ่มไม่สำเร็จ"})
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, courseID, actorID, "bulk_delete_teams", "course", "course", courseID, "", fiber.Map{"team_ids": input.TeamIDs, "deleted_count": count})
 	return c.JSON(fiber.Map{
 		"success": true,
 		"message": "ลบกลุ่มสำเร็จ",
@@ -192,6 +198,8 @@ func UpdateTeamHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "อัพเดทกลุ่มไม่สำเร็จ"})
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, courseID, actorID, "update_team", "course", "team", teamID64, input.Name, fiber.Map{"member_ids": input.MemberIDs})
 	return c.JSON(fiber.Map{"success": true, "message": "อัพเดทกลุ่มสำเร็จ", "data": team})
 }
 
@@ -210,6 +218,8 @@ func DeleteTeamHandler(c fiber.Ctx) error {
 	if err := repositories.DeleteTeam(uint(teamID64), courseID); err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบกลุ่ม"})
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, courseID, actorID, "delete_team", "course", "team", teamID64, "", nil)
 	return c.JSON(fiber.Map{"success": true, "message": "ลบกลุ่มสำเร็จ"})
 }
 
@@ -235,6 +245,8 @@ func AddTeamMemberHandler(c fiber.Ctx) error {
 	if err := repositories.AddTeamMember(uint(teamID64), courseID, input.StudentID); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "เพิ่มสมาชิกไม่สำเร็จ"})
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, courseID, actorID, "add_team_member", "course", "team", teamID64, "", fiber.Map{"student_id": input.StudentID})
 	return c.JSON(fiber.Map{"success": true, "message": "เพิ่มสมาชิกสำเร็จ"})
 }
 
@@ -259,5 +271,7 @@ func RemoveTeamMemberHandler(c fiber.Ctx) error {
 	if err := repositories.RemoveTeamMember(uint(teamID64), courseID, uint(studentID64)); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ลบสมาชิกไม่สำเร็จ"})
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, courseID, actorID, "remove_team_member", "course", "team", teamID64, "", fiber.Map{"student_id": studentID64})
 	return c.JSON(fiber.Map{"success": true, "message": "ลบสมาชิกสำเร็จ"})
 }

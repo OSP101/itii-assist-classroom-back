@@ -261,6 +261,12 @@ func CreateStudentHandler(c fiber.Ctx) error {
 	if err := repositories.CreateStudent(&student); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "สร้างข้อมูลนักศึกษาไม่สำเร็จ"})
 	}
+
+	actorID, _ := c.Locals("user_id").(uint)
+	logPrivilegedAdminAction(c, actorID, "create_student", "info", "students", strconv.FormatUint(uint64(student.ID), 10), fiber.Map{
+		"student_id": student.StudentID, "full_name": student.FullName, "email": student.Email,
+	})
+
 	return c.Status(201).JSON(fiber.Map{
 		"success": true,
 		"message": "สร้างข้อมูลนักศึกษาสำเร็จ",
@@ -306,6 +312,11 @@ func ImportStudentsHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "นำเข้าข้อมูลไม่สำเร็จ"})
 	}
+
+	actorID, _ := c.Locals("user_id").(uint)
+	logPrivilegedAdminAction(c, actorID, "import_students", "info", "students", "", fiber.Map{
+		"created": result.Created, "skipped": result.Skipped, "failed": result.Failed,
+	})
 
 	return c.JSON(fiber.Map{
 		"success": true,
@@ -359,6 +370,8 @@ func UpdateStudentHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "อีเมลนี้มีอยู่ในระบบแล้ว"})
 	}
 
+	before := fiber.Map{"student_id": student.StudentID, "full_name": student.FullName, "email": student.Email, "is_active": student.IsActive}
+
 	student.StudentID = input.StudentID
 	student.FullName = input.FullName
 	student.Email = input.Email
@@ -372,6 +385,13 @@ func UpdateStudentHandler(c fiber.Ctx) error {
 	if err := repositories.UpdateStudent(student); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "อัปเดตข้อมูลไม่สำเร็จ"})
 	}
+
+	actorID, _ := c.Locals("user_id").(uint)
+	logPrivilegedAdminAction(c, actorID, "update_student", "info", "students", strconv.FormatUint(id, 10), fiber.Map{
+		"before": before,
+		"after":  fiber.Map{"student_id": student.StudentID, "full_name": student.FullName, "email": student.Email, "is_active": student.IsActive},
+	})
+
 	return c.JSON(fiber.Map{
 		"success": true,
 		"message": "อัปเดตข้อมูลนักศึกษาสำเร็จ",
@@ -395,9 +415,15 @@ func ToggleStudentStatusHandler(c fiber.Ctx) error {
 	}
 
 	msg := "ปิดใช้งานนักศึกษาสำเร็จ"
+	action := "deactivate_student"
 	if student.IsActive {
 		msg = "เปิดใช้งานนักศึกษาสำเร็จ"
+		action = "activate_student"
 	}
+
+	actorID, _ := c.Locals("user_id").(uint)
+	logPrivilegedAdminAction(c, actorID, action, "info", "students", strconv.FormatUint(id, 10), fiber.Map{"is_active": student.IsActive})
+
 	return c.JSON(fiber.Map{"success": true, "message": msg, "data": student})
 }
 
@@ -411,12 +437,19 @@ func DeleteStudentHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ID ไม่ถูกต้อง"})
 	}
 
-	if _, err := repositories.FindStudentByID(uint(id)); err != nil {
+	student, err := repositories.FindStudentByID(uint(id))
+	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูลนักศึกษา"})
 	}
 
 	if err := repositories.DeleteStudent(uint(id)); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ลบข้อมูลนักศึกษาไม่สำเร็จ"})
 	}
+
+	actorID, _ := c.Locals("user_id").(uint)
+	logPrivilegedAdminAction(c, actorID, "delete_student", "critical", "students", strconv.FormatUint(id, 10), fiber.Map{
+		"student_id": student.StudentID, "full_name": student.FullName, "email": student.Email,
+	})
+
 	return c.JSON(fiber.Map{"success": true, "message": "ลบข้อมูลนักศึกษาสำเร็จ"})
 }

@@ -702,6 +702,8 @@ func ForceChangePasswordHandler(c fiber.Ctx) error {
 
 	_ = repositories.RevokeAllUserRefreshTokens(userID)
 
+	logPrivilegedAdminAction(c, userID, "force_change_password", "info", "users", strconv.FormatUint(uint64(userID), 10), nil)
+
 	return c.JSON(fiber.Map{"success": true, "message": "เปลี่ยนรหัสผ่านสำเร็จ กรุณาเข้าสู่ระบบใหม่"})
 }
 
@@ -725,6 +727,8 @@ func UpdateProfileHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "รหัสผ่านไม่ถูกต้อง"})
 	}
 
+	prevFullName, prevEmail := user.FullName, user.Email
+
 	if input.FullName != "" {
 		user.FullName = input.FullName
 	}
@@ -738,6 +742,11 @@ func UpdateProfileHandler(c fiber.Ctx) error {
 	if err := repositories.UpdateUser(user); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "บันทึกไม่สำเร็จ"})
 	}
+
+	logPrivilegedAdminAction(c, userID, "update_profile", "info", "users", strconv.FormatUint(uint64(userID), 10), fiber.Map{
+		"before": fiber.Map{"full_name": prevFullName, "email": prevEmail},
+		"after":  fiber.Map{"full_name": user.FullName, "email": user.Email},
+	})
 
 	return c.JSON(fiber.Map{
 		"success": true,

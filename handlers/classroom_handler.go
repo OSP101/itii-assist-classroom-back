@@ -88,6 +88,7 @@ func CreateClassroomHandler(c fiber.Ctx) error {
 	if err := repositories.CreateClassroom(&classroom); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to create classroom"})
 	}
+	logPrivilegedAdminAction(c, userID, "create_classroom", "info", "classrooms", classroom.ID, fiber.Map{"name": classroom.Name, "building": classroom.Building})
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": classroom})
 }
 
@@ -125,6 +126,8 @@ func UpdateClassroomHandler(c fiber.Ctx) error {
 	if err := repositories.UpdateClassroom(&classroom.Classroom); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update classroom"})
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	logPrivilegedAdminAction(c, actorID, "update_classroom", "info", "classrooms", id, fiber.Map{"name": classroom.Classroom.Name, "building": classroom.Classroom.Building, "floor": classroom.Classroom.Floor})
 	return c.JSON(fiber.Map{"success": true, "data": classroom.Classroom})
 }
 
@@ -143,6 +146,9 @@ func UpdateClassroomLayoutHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update layout"})
 	}
 
+	actorID, _ := c.Locals("user_id").(uint)
+	logPrivilegedAdminAction(c, actorID, "update_classroom_layout", "info", "classrooms", id, fiber.Map{"desk_count": len(input.Desks), "zone_count": len(input.Zones)})
+
 	classroom, _ := repositories.GetClassroomByID(id)
 	return c.JSON(fiber.Map{"success": true, "data": classroom})
 }
@@ -154,6 +160,8 @@ func ToggleClassroomStatusHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Classroom not found"})
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	logPrivilegedAdminAction(c, actorID, "toggle_classroom_status", "info", "classrooms", id, fiber.Map{"is_active": classroom.IsActive})
 	return c.JSON(fiber.Map{"success": true, "data": classroom})
 }
 
@@ -163,6 +171,8 @@ func RestoreClassroomHandler(c fiber.Ctx) error {
 	if err := repositories.RestoreClassroom(id); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to restore classroom"})
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	logPrivilegedAdminAction(c, actorID, "restore_classroom", "info", "classrooms", id, nil)
 	return c.JSON(fiber.Map{"success": true, "message": "Classroom restored"})
 }
 
@@ -180,5 +190,11 @@ func DeleteClassroomHandler(c fiber.Ctx) error {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to delete classroom"})
 		}
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	severity := "warn"
+	if hard {
+		severity = "critical"
+	}
+	logPrivilegedAdminAction(c, actorID, "delete_classroom", severity, "classrooms", id, fiber.Map{"hard": hard})
 	return c.JSON(fiber.Map{"success": true, "message": "Classroom deleted"})
 }

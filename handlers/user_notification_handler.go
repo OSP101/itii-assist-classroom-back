@@ -196,6 +196,10 @@ func AdminBroadcastNotificationHandler(c fiber.Ctx) error {
 			"unread_count": count,
 		})
 	}
+	logPrivilegedAdminAction(c, actorID, "broadcast_notification", "info", "notifications", "", fiber.Map{
+		"title": input.Title, "target_count": len(targetIDs),
+	})
+
 	return c.JSON(fiber.Map{"success": true, "message": fmt.Sprintf("Sent to %d users", len(notifications))})
 }
 

@@ -93,6 +93,8 @@ func CreateExamSessionHandler(c fiber.Ctx) error {
 	if loaded, err := repositories.GetExamSessionByID(session.ID); err == nil {
 		session = loaded
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, courseID, actorID, "create_exam_session", "score", "exam_session", session.ID, "", fiber.Map{"exam_date": input.ExamDate, "classroom_ids": input.ClassroomIDs})
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": session})
 }
 
@@ -144,6 +146,8 @@ func UpdateExamSessionHandler(c fiber.Ctx) error {
 	if err := repositories.UpdateExamSession(uint(sessionID), updates); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update exam session"})
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, c.Params("courseId"), actorID, "update_exam_session", "score", "exam_session", sessionID, "", updates)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -162,6 +166,8 @@ func DeleteExamSessionHandler(c fiber.Ctx) error {
 	if err := repositories.DeleteExamSession(uint(sessionID)); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to delete session"})
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, c.Params("courseId"), actorID, "delete_exam_session", "score", "exam_session", sessionID, "", nil)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -239,6 +245,8 @@ func AssignExamSeatHandler(c fiber.Ctx) error {
 	if err := repositories.UpsertExamSeat(seat); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to assign seat"})
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, c.Params("courseId"), actorID, "assign_exam_seat", "score", "exam_seat", seat.ID, "", fiber.Map{"student_id": input.StudentID, "desk_id": input.DeskID, "seat_number": input.SeatNumber})
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": seat})
 }
 
@@ -300,6 +308,8 @@ func AutoAssignExamSeatsHandler(c fiber.Ctx) error {
 	if err := repositories.ReplaceExamSessionRooms(uint(sessionID), input.ClassroomIDs); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to sync exam rooms"})
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, courseID, actorID, "auto_assign_exam_seats", "score", "exam_session", sessionID, "", fiber.Map{"assigned": len(seats), "classroom_ids": input.ClassroomIDs})
 	return c.JSON(fiber.Map{"success": true, "assigned": len(seats)})
 }
 
@@ -359,6 +369,8 @@ func ReplaceExamSeatsHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load updated seats"})
 	}
 
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, c.Params("courseId"), actorID, "replace_exam_seats", "score", "exam_session", sessionID, "", fiber.Map{"seat_count": len(updatedSeats)})
 	return c.JSON(fiber.Map{"success": true, "data": updatedSeats})
 }
 
@@ -371,6 +383,8 @@ func UnassignExamSeatHandler(c fiber.Ctx) error {
 	if err := repositories.DeleteExamSeat(uint(seatID)); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to unassign seat"})
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, c.Params("courseId"), actorID, "unassign_exam_seat", "score", "exam_seat", seatID, "", nil)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -383,6 +397,8 @@ func ClearExamSeatsHandler(c fiber.Ctx) error {
 	if err := repositories.ClearExamSeats(uint(sessionID)); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to clear seats"})
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, c.Params("courseId"), actorID, "clear_exam_seats", "score", "exam_session", sessionID, "", nil)
 	return c.JSON(fiber.Map{"success": true})
 }
 
@@ -582,6 +598,8 @@ func ImportExamSeatsCommitHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to sync exam rooms"})
 	}
 
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, courseID, actorID, "import_exam_seats", "score", "exam_session", session.ID, "", fiber.Map{"imported": len(seats)})
 	return c.Status(201).JSON(fiber.Map{
 		"success":    true,
 		"session_id": session.ID,

@@ -53,6 +53,8 @@ func UpdateExamSettingHandler(c fiber.Ctx) error {
 	if err2 != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update exam setting"})
 	}
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, courseID, actorID, "update_exam_setting", "score", "exam_setting", settingID, "", fiber.Map{"max_score": input.MaxScore, "is_visible": input.IsVisible, "is_active": input.IsActive})
 	return c.JSON(fiber.Map{"success": true, "data": setting})
 }
 
@@ -239,12 +241,15 @@ func DeleteExamScoreHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid score ID"})
 	}
 
-	if err := repositories.DeleteExamScoreByCourse(uint(scoreID), c.Params("courseId")); err != nil {
+	courseID := c.Params("courseId")
+	if err := repositories.DeleteExamScoreByCourse(uint(scoreID), courseID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบคะแนน"})
 		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to delete exam score"})
 	}
 
+	actorID, _ := c.Locals("user_id").(uint)
+	logCourseActivity(c, courseID, actorID, "delete_exam_score", "score", "exam_score", scoreID, "", nil)
 	return c.JSON(fiber.Map{"success": true, "message": "ลบคะแนนสำเร็จ"})
 }

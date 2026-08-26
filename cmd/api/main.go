@@ -150,6 +150,13 @@ func main() {
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
 		ProxyHeader:  "X-Real-IP",
+		// Fiber v3 ignores ProxyHeader unless the immediate peer is trusted.
+		// The backend is only ever reached through the nginx container over
+		// the docker "app" network, so its peer address is always a private
+		// range — trust it so c.IP() reads nginx's X-Real-IP instead of
+		// falling back to nginx's own container IP (e.g. 172.18.0.6).
+		TrustProxy:       true,
+		TrustProxyConfig: fiber.TrustProxyConfig{Private: true, Loopback: true},
 	})
 	// RequestLogger already emits a structured JSON line per request (and
 	// records the Prometheus metrics, and recovers panics). Fiber's logger.New()

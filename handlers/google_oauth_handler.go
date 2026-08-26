@@ -550,6 +550,7 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 		if err != nil {
 			return redirectErr("/auth/link-callback", "Failed to create session")
 		}
+		logPrivilegedAdminAction(c, existingUser.ID, "link_oauth_account", "info", "users", fmt.Sprint(existingUser.ID), fiber.Map{"provider": "google"})
 		utils.SetAuthCookies(c, at, rt)
 		return c.Redirect().To(buildFrontendRedirectWithQuery(frontendURL, "/auth/link-callback", map[string]string{
 			"linked": "google",

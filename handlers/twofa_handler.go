@@ -543,12 +543,18 @@ func Disable2FAHandler(c fiber.Ctx) error {
 		}
 	}
 
+	previousMethod := user.TwoFactorMethod
+
 	config.DB.Model(&user).Updates(map[string]interface{}{
 		"two_factor_enabled":      false,
 		"two_factor_method":       "",
 		"two_factor_secret":       "",
 		"two_factor_backup_codes": nil,
 		"two_factor_confirmed_at": nil,
+	})
+
+	logPrivilegedAdminAction(c, user.ID, "disable_2fa", "warn", "users", fmt.Sprint(user.ID), fiber.Map{
+		"previous_method": previousMethod,
 	})
 
 	return c.JSON(fiber.Map{"success": true, "message": "ปิดใช้งานการยืนยันตัวตนสองขั้นตอนสำเร็จ"})
