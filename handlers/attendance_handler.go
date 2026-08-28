@@ -12,6 +12,7 @@ import (
 	"itii-assist/realtime"
 	"itii-assist/repositories"
 	"itii-assist/services"
+	"itii-assist/utils"
 	"log"
 	"net/http"
 	"net/url"
@@ -504,7 +505,18 @@ func GetSessionInfoHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
 	}
-	return c.JSON(fiber.Map{"success": true, "data": info})
+
+	guard := utils.EvaluateCampusCheckIn(c.Get(fiber.HeaderHost), c.Get(fiber.HeaderUserAgent), c.IP(), info.SessionType)
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    info,
+		"network_guard": fiber.Map{
+			"allowed":       guard.Allowed,
+			"exempt":        guard.Exempt,
+			"failed_checks": guard.FailedChecks,
+			"device_type":   guard.DeviceType,
+		},
+	})
 }
 
 // POST /api/attendance/verify-pin (public)
@@ -521,7 +533,7 @@ func VerifyAttendancePINHandler(c fiber.Ctx) error {
 
 	sessionID, err := repositories.LookupAttendanceSessionIDByPIN(ctx, input.PinCode)
 	if err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "message": "PIN ไม่ถูกต้อง หรือไม่มีการเปิดเช็คชื่อ"})
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "PIN ไม่ถูกต้อง หรือไม่มีการเปิดเช็กชื่อ"})
 	}
 
 	info, err := repositories.GetSessionInfo(sessionID)
@@ -633,18 +645,39 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 
 	result, err := repositories.StudentCheckIn(uint(id), studentID, input.PinCode, lat, lng, verifiedEmail, verifiedGoogleID, input.ClientID)
 	if err != nil {
-		statusCode, payload := attendancePublicErrorResponse(err, 400, "เช็คชื่อไม่สำเร็จ", "ไม่สามารถเช็คชื่อได้ในขณะนี้")
+		statusCode, payload := attendancePublicErrorResponse(err, 400, "เช็กชื่อไม่สำเร็จ", "ไม่สามารถเช็กชื่อได้ในขณะนี้")
+		recordCheckInAttempt(c, services.AttendanceCheckInEvent{
+			SessionID:  uint(id),
+			StudentID:  studentID,
+			Email:      verifiedEmail,
+			GoogleID:   verifiedGoogleID,
+			Result:     services.AttendanceResultFailed,
+			FailCode:   attendanceErrCode(err),
+			StatusCode: statusCode,
+		})
 		return c.Status(statusCode).JSON(payload)
 	}
+	checkInResult := services.AttendanceResultSuccess
+	if result.IsDuplicate {
+		checkInResult = services.AttendanceResultDuplicate
+	}
+	recordCheckInAttempt(c, services.AttendanceCheckInEvent{
+		SessionID:  uint(id),
+		StudentID:  studentID,
+		Email:      verifiedEmail,
+		GoogleID:   verifiedGoogleID,
+		Result:     checkInResult,
+		StatusCode: 200,
+	})
 	if student.ID == 0 {
 		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("id = ?", studentID).First(&student).Error; err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load student after check-in"})
 		}
 	}
 
-	message := "เช็คชื่อสำเร็จ: มาเรียน"
+	message := "เช็กชื่อสำเร็จ: มาเรียน"
 	if result.Status == "late" {
-		message = "เช็คชื่อสำเร็จ: มาสาย"
+		message = "เช็กชื่อสำเร็จ: มาสาย"
 	}
 
 	recordPayload := fiber.Map{
@@ -1427,9 +1460,30 @@ func StudentCheckInByPINHandler(c fiber.Ctx) error {
 
 	result, err := repositories.StudentCheckIn(sessionID, student.ID, input.PinCode, input.LocationLat, input.LocationLng, verifiedEmail, verifiedGoogleID, input.ClientID)
 	if err != nil {
-		statusCode, payload := attendancePublicErrorResponse(err, 400, "เช็คชื่อไม่สำเร็จ", "ไม่สามารถเช็คชื่อได้ในขณะนี้")
+		statusCode, payload := attendancePublicErrorResponse(err, 400, "เช็กชื่อไม่สำเร็จ", "ไม่สามารถเช็กชื่อได้ในขณะนี้")
+		recordCheckInAttempt(c, services.AttendanceCheckInEvent{
+			SessionID:  sessionID,
+			StudentID:  student.ID,
+			Email:      verifiedEmail,
+			GoogleID:   verifiedGoogleID,
+			Result:     services.AttendanceResultFailed,
+			FailCode:   attendanceErrCode(err),
+			StatusCode: statusCode,
+		})
 		return c.Status(statusCode).JSON(payload)
 	}
+	checkInResult := services.AttendanceResultSuccess
+	if result.IsDuplicate {
+		checkInResult = services.AttendanceResultDuplicate
+	}
+	recordCheckInAttempt(c, services.AttendanceCheckInEvent{
+		SessionID:  sessionID,
+		StudentID:  student.ID,
+		Email:      verifiedEmail,
+		GoogleID:   verifiedGoogleID,
+		Result:     checkInResult,
+		StatusCode: 200,
+	})
 
 	return c.JSON(fiber.Map{"success": true, "data": result})
 }
@@ -1527,7 +1581,7 @@ func VerifyStudentHandler(c fiber.Ctx) error {
 
 	status, err := repositories.GetAttendanceStudentSessionStatus(*input.SessionID, student.ID)
 	if err != nil {
-		statusCode, payload := attendancePublicErrorResponse(err, 403, "ไม่สามารถเช็คชื่อได้", "บัญชีนี้ไม่สามารถเช็คชื่อในรอบนี้ได้")
+		statusCode, payload := attendancePublicErrorResponse(err, 403, "ไม่สามารถเช็กชื่อได้", "บัญชีนี้ไม่สามารถเช็กชื่อในรอบนี้ได้")
 		return c.Status(statusCode).JSON(payload)
 	}
 	if status != nil && status.AlreadyCheckedIn {
@@ -1554,7 +1608,7 @@ func PreviewSectionChangeHandler(c fiber.Ctx) error {
 
 	detail, err := repositories.GetAttendanceSession(uint(id))
 	if err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบรอบการเช็คชื่อ"})
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบรอบการเช็กชื่อ"})
 	}
 
 	newSectionIDs := uniqueUintValues(input.CourseSectionIDs)
@@ -1679,7 +1733,7 @@ func PreviewTimeChangeHandler(c fiber.Ctx) error {
 
 	var session models.AttendanceSession
 	if err := config.DB.First(&session, uint(id)).Error; err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบรอบการเช็คชื่อ"})
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบรอบการเช็กชื่อ"})
 	}
 
 	var records []models.AttendanceRecord
@@ -1793,7 +1847,7 @@ func ApplyTimeChangeHandler(c fiber.Ctx) error {
 
 	detail, err := repositories.GetAttendanceSession(uint(id))
 	if err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบรอบการเช็คชื่อ"})
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบรอบการเช็กชื่อ"})
 	}
 	session := detail.AttendanceSession
 	newStart := session.StartTime
@@ -1867,9 +1921,9 @@ func ApplyTimeChangeHandler(c fiber.Ctx) error {
 			continue
 		}
 
-		note := "[ระบบ] สถานะถูกอัปเดตหลังปรับเวลาเช็คชื่อ"
+		note := "[ระบบ] สถานะถูกอัปเดตหลังปรับเวลาเช็กชื่อ"
 		if newStatus == "invalid" {
-			note = "[ระบบ] สถานะเปลี่ยนเป็นขาด เนื่องจากเวลาเช็คชื่ออยู่นอกช่วงเวลาใหม่"
+			note = "[ระบบ] สถานะเปลี่ยนเป็นขาด เนื่องจากเวลาเช็กชื่ออยู่นอกช่วงเวลาใหม่"
 		}
 		if err := tx.Model(&models.AttendanceRecord{}).Where("id = ?", record.ID).Updates(map[string]interface{}{"status": dbStatus, "updated_by": updatedBy, "note": note, "updated_at": time.Now()}).Error; err != nil {
 			tx.Rollback()

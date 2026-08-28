@@ -81,7 +81,7 @@ func main() {
 		&models.ExamSession{},
 		&models.ExamSessionRoom{},
 		&models.ExamSeat{},
-		// เช็คชื่อ
+		// เช็กชื่อ
 		&models.AttendanceSession{},
 		&models.AttendanceSessionSection{},
 		&models.AttendanceRecord{},

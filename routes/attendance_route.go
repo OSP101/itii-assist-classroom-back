@@ -11,12 +11,14 @@ import (
 
 func SetupAttendanceRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	attendanceHandler := handlers.NewAttendanceHandler(auditLogger)
-	// Public check-in endpoints (no auth)
-	app.Get("/api/attendance/check-in/:sessionId/info", handlers.GetSessionInfoHandler)
-	app.Post("/api/attendance/check-in/:sessionId", middlewares.OptionalProtected(), middlewares.AttendanceCheckInGuard(), handlers.StudentCheckInHandler)
-	app.Post("/api/attendance/check-in", middlewares.OptionalProtected(), middlewares.AttendanceCheckInGuard(), handlers.StudentCheckInByPINHandler)
-	app.Post("/api/attendance/verify-pin", handlers.VerifyAttendancePINHandler)
-	app.Post("/api/attendance/verify-student", middlewares.OptionalProtected(), handlers.VerifyStudentHandler)
+	// Public check-in endpoints (no auth). NoStore keeps these per-session,
+	// identity-bearing responses out of every intermediary cache (browser, KKU
+	// edge, Cloudflare), closing the cache-poisoning surface.
+	app.Get("/api/attendance/check-in/:sessionId/info", middlewares.NoStore(), handlers.GetSessionInfoHandler)
+	app.Post("/api/attendance/check-in/:sessionId", middlewares.NoStore(), middlewares.OptionalProtected(), middlewares.AttendanceCheckInGuard(), middlewares.AttendanceNetworkGuard(), handlers.StudentCheckInHandler)
+	app.Post("/api/attendance/check-in", middlewares.NoStore(), middlewares.OptionalProtected(), middlewares.AttendanceCheckInGuard(), middlewares.AttendanceNetworkGuard(), handlers.StudentCheckInByPINHandler)
+	app.Post("/api/attendance/verify-pin", middlewares.NoStore(), handlers.VerifyAttendancePINHandler)
+	app.Post("/api/attendance/verify-student", middlewares.NoStore(), middlewares.OptionalProtected(), handlers.VerifyStudentHandler)
 	app.Post("/api/attendance/display/bootstrap", handlers.BootstrapAttendanceDisplayHandler)
 	app.Post("/api/attendance/display/confirm", handlers.ConfirmAttendanceDisplayHandler)
 	app.Get("/api/attendance/display/pairing-status", handlers.GetAttendanceDisplayPairingStatusHandler)

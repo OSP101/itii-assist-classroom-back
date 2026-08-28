@@ -40,62 +40,62 @@ var (
 	ErrAttendanceStudentNotEligiblePublic = newAttendancePublicError(
 		"ATTENDANCE_STUDENT_NOT_ELIGIBLE",
 		403,
-		"ไม่สามารถเช็คชื่อได้",
-		"คุณไม่ได้อยู่ในกลุ่มเรียนที่เปิดรับการเช็คชื่อรอบนี้",
+		"ไม่สามารถเช็กชื่อได้",
+		"คุณไม่ได้อยู่ในกลุ่มเรียนที่เปิดรับการเช็กชื่อรอบนี้",
 	)
 	ErrAttendanceSessionNotFoundPublic = newAttendancePublicError(
 		"ATTENDANCE_SESSION_NOT_FOUND",
 		404,
-		"ไม่พบรอบการเช็คชื่อ",
-		"ไม่พบรอบการเช็คชื่อนี้ หรือรอบนี้ถูกลบไปแล้ว",
+		"ไม่พบรอบการเช็กชื่อ",
+		"ไม่พบรอบการเช็กชื่อนี้ หรือรอบนี้ถูกลบไปแล้ว",
 	)
 	ErrAttendanceSessionNotStartedPublic = newAttendancePublicError(
 		"ATTENDANCE_SESSION_NOT_STARTED",
 		400,
-		"ยังไม่ถึงเวลาเช็คชื่อ",
-		"รอบการเช็คชื่อนี้ยังไม่เปิด กรุณารอให้ถึงเวลาแล้วลองใหม่อีกครั้ง",
+		"ยังไม่ถึงเวลาเช็กชื่อ",
+		"รอบการเช็กชื่อนี้ยังไม่เปิด กรุณารอให้ถึงเวลาแล้วลองใหม่อีกครั้ง",
 	)
 	ErrAttendanceSessionClosedPublic = newAttendancePublicError(
 		"ATTENDANCE_SESSION_CLOSED",
 		400,
-		"หมดเวลาเช็คชื่อแล้ว",
-		"รอบการเช็คชื่อนี้ปิดรับแล้ว จึงไม่สามารถเช็คชื่อได้",
+		"หมดเวลาเช็กชื่อแล้ว",
+		"รอบการเช็กชื่อนี้ปิดรับแล้ว จึงไม่สามารถเช็กชื่อได้",
 	)
 	ErrAttendancePINRequiredPublic = newAttendancePublicError(
 		"ATTENDANCE_PIN_REQUIRED",
 		400,
 		"กรุณากรอกรหัส PIN",
-		"ต้องกรอกรหัส PIN ของรอบเช็คชื่อนี้ก่อนดำเนินการต่อ",
+		"ต้องกรอกรหัส PIN ของรอบเช็กชื่อนี้ก่อนดำเนินการต่อ",
 	)
 	ErrAttendanceInvalidPINPublic = newAttendancePublicError(
 		"ATTENDANCE_INVALID_PIN",
 		400,
 		"รหัส PIN ไม่ถูกต้อง",
-		"รหัส PIN นี้ไม่ตรงกับรอบเช็คชื่อที่เปิดอยู่ กรุณาตรวจสอบแล้วลองใหม่",
+		"รหัส PIN นี้ไม่ตรงกับรอบเช็กชื่อที่เปิดอยู่ กรุณาตรวจสอบแล้วลองใหม่",
 	)
 	ErrAttendanceLocationRequiredPublic = newAttendancePublicError(
 		"ATTENDANCE_LOCATION_REQUIRED",
 		400,
 		"ต้องอนุญาตตำแหน่งก่อน",
-		"รอบนี้ต้องใช้ตำแหน่งในการเช็คชื่อ กรุณาอนุญาตการเข้าถึงตำแหน่งแล้วลองใหม่",
+		"รอบนี้ต้องใช้ตำแหน่งในการเช็กชื่อ กรุณาอนุญาตการเข้าถึงตำแหน่งแล้วลองใหม่",
 	)
 	ErrAttendanceSessionLocationNotConfiguredPublic = newAttendancePublicError(
 		"ATTENDANCE_SESSION_LOCATION_NOT_CONFIGURED",
 		400,
-		"รอบเช็คชื่อยังไม่พร้อม",
-		"รอบเช็คชื่อนี้ยังไม่ได้กำหนดตำแหน่งอ้างอิงสำหรับตรวจสอบ",
+		"รอบเช็กชื่อยังไม่พร้อม",
+		"รอบเช็กชื่อนี้ยังไม่ได้กำหนดตำแหน่งอ้างอิงสำหรับตรวจสอบ",
 	)
 	ErrAttendanceStudentNotFoundPublic = newAttendancePublicError(
 		"ATTENDANCE_STUDENT_NOT_FOUND",
 		404,
 		"ไม่พบข้อมูลนักศึกษา",
-		"ไม่พบบัญชีนักศึกษาที่ใช้เช็คชื่อในระบบ กรุณาติดต่อผู้สอน",
+		"ไม่พบบัญชีนักศึกษาที่ใช้เช็กชื่อในระบบ กรุณาติดต่อผู้สอน",
 	)
 	ErrAttendanceCourseNotRegisteredPublic = newAttendancePublicError(
 		"ATTENDANCE_COURSE_NOT_REGISTERED",
 		404,
-		"ไม่พบสิทธิ์เช็คชื่อในรายวิชานี้",
-		"บัญชีของคุณไม่ได้ลงทะเบียนอยู่ในรายวิชานี้ จึงไม่สามารถเช็คชื่อได้",
+		"ไม่พบสิทธิ์เช็กชื่อในรายวิชานี้",
+		"บัญชีของคุณไม่ได้ลงทะเบียนอยู่ในรายวิชานี้ จึงไม่สามารถเช็กชื่อได้",
 	)
 )
 
@@ -103,8 +103,8 @@ func NewAttendanceOutsideAllowedAreaError(distance int) *AttendancePublicError {
 	return newAttendancePublicError(
 		"ATTENDANCE_OUTSIDE_ALLOWED_AREA",
 		400,
-		"อยู่นอกพื้นที่เช็คชื่อ",
-		fmt.Sprintf("คุณอยู่นอกพื้นที่ที่อนุญาตสำหรับเช็คชื่อ โดยอยู่ห่างจากจุดที่กำหนด %d เมตร", distance),
+		"อยู่นอกพื้นที่เช็กชื่อ",
+		fmt.Sprintf("คุณอยู่นอกพื้นที่ที่อนุญาตสำหรับเช็กชื่อ โดยอยู่ห่างจากจุดที่กำหนด %d เมตร", distance),
 	)
 }
 
@@ -1435,6 +1435,22 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 
 	observability.RecordAttendanceCheckInSuccess(time.Since(startedAt))
 	return &result, nil
+}
+
+// GetAttendanceSessionType returns just the session_type column, for callers
+// (like the campus network guard) that only need to decide whether a
+// session is exempt (online) without paying for the full GetSessionInfo/PIN
+// state resolution.
+func GetAttendanceSessionType(sessionID uint) (string, error) {
+	var sessionType string
+	err := config.DB.Model(&models.AttendanceSession{}).
+		Select("session_type").
+		Where("id = ?", sessionID).
+		Take(&sessionType).Error
+	if err != nil {
+		return "", err
+	}
+	return sessionType, nil
 }
 
 func GetSessionInfo(sessionID uint) (*AttendanceSessionInfo, error) {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"itii-assist/config"
 	"itii-assist/observability"
+	"itii-assist/services"
 	"math"
 	"os"
 	"strconv"
@@ -38,10 +39,21 @@ var publicAttendanceLimiter = &attendanceRateLimiter{
 	entries: map[string]attendanceRateLimitEntry{},
 }
 
+// sessionAttendanceLimiter is a second, session-wide bucket. Where
+// publicAttendanceLimiter is scoped per (session|principal) and so is evaded by
+// an attacker rotating client_request_id, this one counts every attempt against
+// a single session regardless of who sends it — a backstop against bulk
+// scripting / PIN brute-forcing. It is opt-in (see attendanceSessionRateLimit)
+// because a whole class checking in at once is legitimately high-volume.
+var sessionAttendanceLimiter = &attendanceRateLimiter{
+	entries: map[string]attendanceRateLimitEntry{},
+}
+
 func AttendanceCheckInGuard() fiber.Handler {
 	enabled := attendanceRateLimitEnabled()
 	config := loadAttendanceRateLimitConfig()
 	backend := loadAttendanceRateLimitBackend()
+	sessionConfig, sessionEnabled := loadAttendanceSessionRateLimitConfig()
 
 	return func(c fiber.Ctx) error {
 		if c.Method() == fiber.MethodOptions {
@@ -54,21 +66,77 @@ func AttendanceCheckInGuard() fiber.Handler {
 
 		clientKey := attendanceClientKey(c)
 		retryAfter, allowed := allowAttendanceCheckIn(clientKey, config, backend)
-		if allowed {
-			return c.Next()
+		if !allowed {
+			return rejectAttendanceRateLimited(c, retryAfter)
 		}
 
-		observability.RecordAttendanceRateLimited()
-
-		if retryAfter > 0 {
-			c.Set("Retry-After", strconv.Itoa(retryAfter))
+		// Session-wide backstop: catches a script that rotates its identity to
+		// dodge the per-principal limit above.
+		if sessionEnabled {
+			sessionKey := "sess:" + attendanceSessionScope(c)
+			sessionRetryAfter, sessionAllowed := sessionAttendanceLimiter.Allow(sessionKey, sessionConfig)
+			if !sessionAllowed {
+				return rejectAttendanceRateLimited(c, sessionRetryAfter)
+			}
 		}
 
-		return c.Status(429).JSON(fiber.Map{
-			"success": false,
-			"message": "ส่งคำขอเช็คชื่อถี่เกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง",
-		})
+		return c.Next()
 	}
+}
+
+func rejectAttendanceRateLimited(c fiber.Ctx, retryAfter int) error {
+	observability.RecordAttendanceRateLimited()
+	logCheckInGuardEvent(c, sessionIDFromCheckInRequest(c), services.AttendanceResultRateLimited, nil, 429)
+
+	if retryAfter > 0 {
+		c.Set("Retry-After", strconv.Itoa(retryAfter))
+	}
+
+	return c.Status(429).JSON(fiber.Map{
+		"success": false,
+		"message": "ส่งคำขอเช็กชื่อถี่เกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง",
+	})
+}
+
+// attendanceSessionScope returns just the session portion of the rate-limit key
+// (route param, or the PIN hash when checking in by PIN).
+func attendanceSessionScope(c fiber.Ctx) string {
+	if sessionScope := strings.TrimSpace(c.Params("sessionId")); sessionScope != "" {
+		return strings.ToLower(sessionScope)
+	}
+	type pinOnly struct {
+		PinCode string `json:"pin_code"`
+	}
+	body := pinOnly{}
+	if raw := c.Body(); len(raw) > 0 {
+		_ = json.Unmarshal(raw, &body)
+	}
+	if hashed := hashedAttendanceKeyPart(body.PinCode); hashed != "" {
+		return hashed
+	}
+	return "session-unknown"
+}
+
+// loadAttendanceSessionRateLimitConfig reads the opt-in session-wide limit.
+// Disabled unless ATTENDANCE_CHECKIN_SESSION_RATE_LIMIT is set to a positive
+// number, so existing deployments are unaffected until an operator turns it on.
+// Set it comfortably above the largest class size expected to check in within
+// one window (default window matches the per-principal window).
+func loadAttendanceSessionRateLimitConfig() (attendanceRateLimitConfig, bool) {
+	limit := readAttendanceIntEnv("ATTENDANCE_CHECKIN_SESSION_RATE_LIMIT", 0)
+	if limit < 1 {
+		return attendanceRateLimitConfig{}, false
+	}
+
+	windowSeconds := readAttendanceIntEnv("ATTENDANCE_CHECKIN_SESSION_RATE_WINDOW_SECONDS", 60)
+	if windowSeconds < 15 {
+		windowSeconds = 15
+	}
+
+	return attendanceRateLimitConfig{
+		Limit:  limit,
+		Window: time.Duration(windowSeconds) * time.Second,
+	}, true
 }
 
 func attendanceRateLimitEnabled() bool {

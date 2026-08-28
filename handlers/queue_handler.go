@@ -1744,7 +1744,7 @@ func queueValidationContainsAttendanceError(validationErrors []fiber.Map) bool {
 	for _, validationError := range validationErrors {
 		field, _ := validationError["field"].(string)
 		message, _ := validationError["message"].(string)
-		if field == "student_id" && (strings.Contains(message, "เช็คชื่อ") || strings.Contains(strings.ToLower(message), "attendance")) {
+		if field == "student_id" && (strings.Contains(message, "เช็กชื่อ") || strings.Contains(strings.ToLower(message), "attendance")) {
 			return true
 		}
 	}
@@ -2127,9 +2127,9 @@ func validateQueueBookingCompatibility(session *models.QueueSession, studentCode
 				return nil, nil, nil, nil, nil, err
 			}
 			if !attendanceAllowed {
-				message := "นักศึกษายังไม่ได้เช็คชื่อในรอบการเรียนนี้"
+				message := "นักศึกษายังไม่ได้เช็กชื่อในรอบการเรียนนี้"
 				if mode == queueBookingValidationCreate {
-					message = "กรุณาเช็คชื่อก่อนจองคิว"
+					message = "กรุณาเช็กชื่อก่อนจองคิว"
 				}
 				validationErrors = append(validationErrors, fiber.Map{
 					"field":   "student_id",
