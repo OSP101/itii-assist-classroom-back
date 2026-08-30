@@ -180,19 +180,11 @@ func verifyGoogleIDToken(ctx context.Context, idToken string) (*googleTokenInfo,
 	return &info, nil
 }
 
+// authenticatedStudentIDFromContext is a thin alias kept for readability at the
+// call sites; the single implementation lives in services so the middleware
+// package can share it instead of maintaining a second copy.
 func authenticatedStudentIDFromContext(c fiber.Ctx) uint {
-	raw := c.Locals("student_id")
-	if raw == nil {
-		return 0
-	}
-	switch v := raw.(type) {
-	case uint:
-		return v
-	case float64:
-		return uint(v)
-	default:
-		return 0
-	}
+	return services.StudentIDFromContext(c)
 }
 
 func desiredAttendanceStudentIDs(courseID string, sectionIDs []uint) ([]uint, error) {
@@ -566,16 +558,17 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 	}
 
 	var input struct {
-		StudentID   *uint    `json:"student_id"`
-		PinCode     string   `json:"pin_code"`
-		ClientID    string   `json:"client_request_id"`
-		Lat         *float64 `json:"lat"`
-		Lng         *float64 `json:"lng"`
-		LocationLat *float64 `json:"location_lat"`
-		LocationLng *float64 `json:"location_lng"`
-		GoogleEmail string   `json:"google_email"`
-		GoogleID    string   `json:"google_id"`
-		GoogleToken string   `json:"google_token"`
+		StudentID     *uint                         `json:"student_id"`
+		PinCode       string                        `json:"pin_code"`
+		ClientID      string                        `json:"client_request_id"`
+		Lat           *float64                      `json:"lat"`
+		Lng           *float64                      `json:"lng"`
+		LocationLat   *float64                      `json:"location_lat"`
+		LocationLng   *float64                      `json:"location_lng"`
+		GoogleEmail   string                        `json:"google_email"`
+		GoogleID      string                        `json:"google_id"`
+		GoogleToken   string                        `json:"google_token"`
+		ClientSignals *services.ClientDeviceSignals `json:"client_signals"`
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
@@ -647,13 +640,14 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 	if err != nil {
 		statusCode, payload := attendancePublicErrorResponse(err, 400, "เช็กชื่อไม่สำเร็จ", "ไม่สามารถเช็กชื่อได้ในขณะนี้")
 		recordCheckInAttempt(c, services.AttendanceCheckInEvent{
-			SessionID:  uint(id),
-			StudentID:  studentID,
-			Email:      verifiedEmail,
-			GoogleID:   verifiedGoogleID,
-			Result:     services.AttendanceResultFailed,
-			FailCode:   attendanceErrCode(err),
-			StatusCode: statusCode,
+			SessionID:     uint(id),
+			StudentID:     studentID,
+			Email:         verifiedEmail,
+			GoogleID:      verifiedGoogleID,
+			Result:        services.AttendanceResultFailed,
+			FailCode:      attendanceErrCode(err),
+			StatusCode:    statusCode,
+			ClientSignals: input.ClientSignals,
 		})
 		return c.Status(statusCode).JSON(payload)
 	}
@@ -662,12 +656,13 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 		checkInResult = services.AttendanceResultDuplicate
 	}
 	recordCheckInAttempt(c, services.AttendanceCheckInEvent{
-		SessionID:  uint(id),
-		StudentID:  studentID,
-		Email:      verifiedEmail,
-		GoogleID:   verifiedGoogleID,
-		Result:     checkInResult,
-		StatusCode: 200,
+		SessionID:     uint(id),
+		StudentID:     studentID,
+		Email:         verifiedEmail,
+		GoogleID:      verifiedGoogleID,
+		Result:        checkInResult,
+		StatusCode:    200,
+		ClientSignals: input.ClientSignals,
 	})
 	if student.ID == 0 {
 		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("id = ?", studentID).First(&student).Error; err != nil {
@@ -1385,14 +1380,15 @@ func RotateAttendanceSessionPinHandler(c fiber.Ctx) error {
 
 func StudentCheckInByPINHandler(c fiber.Ctx) error {
 	var input struct {
-		PinCode     string   `json:"pin_code"`
-		ClientID    string   `json:"client_request_id"`
-		GoogleEmail string   `json:"google_email"`
-		GoogleID    string   `json:"google_id"`
-		GoogleToken string   `json:"google_token"`
-		StudentID   *uint    `json:"student_id"`
-		LocationLat *float64 `json:"location_lat"`
-		LocationLng *float64 `json:"location_lng"`
+		PinCode       string                        `json:"pin_code"`
+		ClientID      string                        `json:"client_request_id"`
+		GoogleEmail   string                        `json:"google_email"`
+		GoogleID      string                        `json:"google_id"`
+		GoogleToken   string                        `json:"google_token"`
+		StudentID     *uint                         `json:"student_id"`
+		LocationLat   *float64                      `json:"location_lat"`
+		LocationLng   *float64                      `json:"location_lng"`
+		ClientSignals *services.ClientDeviceSignals `json:"client_signals"`
 	}
 	if err := c.Bind().JSON(&input); err != nil || strings.TrimSpace(input.PinCode) == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "pin_code is required"})
@@ -1462,13 +1458,14 @@ func StudentCheckInByPINHandler(c fiber.Ctx) error {
 	if err != nil {
 		statusCode, payload := attendancePublicErrorResponse(err, 400, "เช็กชื่อไม่สำเร็จ", "ไม่สามารถเช็กชื่อได้ในขณะนี้")
 		recordCheckInAttempt(c, services.AttendanceCheckInEvent{
-			SessionID:  sessionID,
-			StudentID:  student.ID,
-			Email:      verifiedEmail,
-			GoogleID:   verifiedGoogleID,
-			Result:     services.AttendanceResultFailed,
-			FailCode:   attendanceErrCode(err),
-			StatusCode: statusCode,
+			SessionID:     sessionID,
+			StudentID:     student.ID,
+			Email:         verifiedEmail,
+			GoogleID:      verifiedGoogleID,
+			Result:        services.AttendanceResultFailed,
+			FailCode:      attendanceErrCode(err),
+			StatusCode:    statusCode,
+			ClientSignals: input.ClientSignals,
 		})
 		return c.Status(statusCode).JSON(payload)
 	}
@@ -1477,12 +1474,13 @@ func StudentCheckInByPINHandler(c fiber.Ctx) error {
 		checkInResult = services.AttendanceResultDuplicate
 	}
 	recordCheckInAttempt(c, services.AttendanceCheckInEvent{
-		SessionID:  sessionID,
-		StudentID:  student.ID,
-		Email:      verifiedEmail,
-		GoogleID:   verifiedGoogleID,
-		Result:     checkInResult,
-		StatusCode: 200,
+		SessionID:     sessionID,
+		StudentID:     student.ID,
+		Email:         verifiedEmail,
+		GoogleID:      verifiedGoogleID,
+		Result:        checkInResult,
+		StatusCode:    200,
+		ClientSignals: input.ClientSignals,
 	})
 
 	return c.JSON(fiber.Map{"success": true, "data": result})

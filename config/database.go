@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -438,6 +439,17 @@ func MigratePerformanceIndexes() {
 	indexes := []struct {
 		name string
 		sql  string
+		// object is the index's real name in Postgres. Required whenever
+		// concurrent is set, so a half-finished build left behind by an earlier
+		// crashed run can be found and cleaned up.
+		object string
+		// concurrent builds the index with CREATE INDEX CONCURRENTLY. A plain
+		// CREATE INDEX takes an ACCESS EXCLUSIVE lock for the whole build,
+		// which on a large, constantly-written table means every insert into it
+		// blocks until the build finishes — during startup, on every deploy.
+		// Set this for the big append-only tables; the ordinary ones build in
+		// milliseconds and are not worth the slower concurrent path.
+		concurrent bool
 	}{
 		{
 			name: "attendance_records_session_student",
@@ -571,6 +583,35 @@ func MigratePerformanceIndexes() {
 			name: "queue_sessions_group_pin_code",
 			sql:  `CREATE INDEX IF NOT EXISTS idx_queue_sessions_group_pin_code ON queue_sessions (group_pin_code) WHERE group_pin_code IS NOT NULL`,
 		},
+		{
+			// CheckAndLogDeviceGuardFlip runs on every allowed (non-exempt)
+			// check-in, looking for a prior network_blocked log from the same
+			// session+IP. Without this, it falls back to the single-column
+			// log_type/action indexes and filters resource_id/ip_address in
+			// memory over every matching row in a table that never stops
+			// growing. The partial index narrows to just the blocked rows
+			// this lookup ever cares about.
+			name:       "system_logs_device_guard_flip",
+			object:     "idx_system_logs_device_guard_flip",
+			concurrent: true,
+			sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_system_logs_device_guard_flip
+			      ON system_logs (resource_id, ip_address, created_at DESC)
+			      WHERE log_type = 'attendance_checkin' AND action IN ('attendance.checkin.network_blocked', 'attendance.checkin.suspicious_device_flip')`,
+		},
+		{
+			// GetAttendanceSessionSecurityFlagsHandler: the instructor-facing
+			// review list for one session. Without this it filters resource_id
+			// out of the whole of system_logs, which is the fastest-growing
+			// table here. The predicate is repeated verbatim in the query (see
+			// services.AttendanceSessionLogsPredicate) so Postgres can prove
+			// the partial index applies even under a generic plan.
+			name:       "system_logs_attendance_session",
+			object:     "idx_system_logs_attendance_session",
+			concurrent: true,
+			sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_system_logs_attendance_session
+			      ON system_logs (resource_id, created_at DESC)
+			      WHERE log_type = 'attendance_checkin'`,
+		},
 
 		// ── Retention support ────────────────────────────────────────────
 		//
@@ -656,6 +697,9 @@ func MigratePerformanceIndexes() {
 
 	ensuredCount := 0
 	for _, index := range indexes {
+		if index.concurrent {
+			dropInvalidIndex(index.object)
+		}
 		if err := DB.Exec(index.sql).Error; err != nil {
 			log.Printf("⚠️  Failed to ensure performance index %s: %v", index.name, err)
 			continue
@@ -664,6 +708,42 @@ func MigratePerformanceIndexes() {
 	}
 
 	log.Printf("✅ Ensured %d performance indexes", ensuredCount)
+}
+
+// safeIndexName guards the only place an identifier is interpolated into DDL.
+// Every caller passes a literal from the table above, so this is a tripwire for
+// a future edit rather than a defence against request data.
+var safeIndexName = regexp.MustCompile(`^[a-z0-9_]+$`)
+
+// dropInvalidIndex removes an index left behind in an invalid state by an
+// interrupted CREATE INDEX CONCURRENTLY. Postgres keeps that stub in the
+// catalog: it is never used for queries, but it IS maintained on every write,
+// and CREATE INDEX ... IF NOT EXISTS sees the name and skips. Without this
+// cleanup a single crashed deploy costs the index permanently, silently, while
+// still charging for it on every insert.
+func dropInvalidIndex(indexName string) {
+	if DB == nil || !safeIndexName.MatchString(indexName) {
+		return
+	}
+
+	var invalidCount int64
+	err := DB.Raw(`
+		SELECT COUNT(*)
+		FROM pg_index i
+		JOIN pg_class c ON c.oid = i.indexrelid
+		WHERE c.relname = ? AND NOT i.indisvalid`, indexName).Scan(&invalidCount).Error
+	if err != nil {
+		log.Printf("⚠️  Could not check index %s for validity: %v", indexName, err)
+		return
+	}
+	if invalidCount == 0 {
+		return
+	}
+
+	log.Printf("⚠️  Dropping invalid index %s left by an interrupted concurrent build", indexName)
+	if err := DB.Exec(`DROP INDEX CONCURRENTLY IF EXISTS ` + indexName).Error; err != nil {
+		log.Printf("⚠️  Failed to drop invalid index %s: %v", indexName, err)
+	}
 }
 
 func MigrateAttendancePinCompatibility() {

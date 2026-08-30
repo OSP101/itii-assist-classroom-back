@@ -16,6 +16,11 @@ import (
 // later spot a spoofed campus IP (a header that disagrees with c.IP()).
 func recordCheckInAttempt(c fiber.Ctx, ev services.AttendanceCheckInEvent) {
 	reqID, _, _ := services.ExtractMeta(c)
+	// Every caller of this helper has already parsed the request body, so the
+	// official web client will have supplied client_signals; a nil value here
+	// is therefore itself worth recording. Guard middleware logs without this
+	// helper precisely because it rejects before the body is read.
+	ev.ClientSignalsExpected = true
 	ev.IP = c.IP()
 	ev.RealIP = c.Get("X-Real-IP")
 	ev.ForwardedFor = c.Get(fiber.HeaderXForwardedFor)

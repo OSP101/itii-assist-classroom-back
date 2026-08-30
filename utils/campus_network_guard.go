@@ -55,6 +55,15 @@ func EvaluateCampusCheckIn(host, userAgent, clientIP, sessionType string) Campus
 	}
 }
 
+// CampusNetworkGuardEnabled reports whether the campus guard is actually
+// enforcing. Callers outside this file need it to decide how to behave when
+// the guard cannot reach a verdict: failing a request closed is only correct
+// while the guard is switched on, and skipping guard-only side work (the
+// device-flip probe) is pointless when it can never fire.
+func CampusNetworkGuardEnabled() bool {
+	return campusNetworkGuardEnabled()
+}
+
 func campusNetworkGuardEnabled() bool {
 	rawValue := strings.TrimSpace(os.Getenv("ATTENDANCE_NETWORK_GUARD_ENABLED"))
 	if rawValue == "" {

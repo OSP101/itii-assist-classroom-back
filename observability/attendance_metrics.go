@@ -38,6 +38,19 @@ type AttendanceMetricsSnapshot struct {
 		RedisSetFailures  uint64 `json:"redisSetFailures"`
 		DBInsertFailures  uint64 `json:"dbInsertFailures"`
 	} `json:"pin"`
+	Audit struct {
+		// WritesDropped counts forensic check-in records that were thrown away
+		// because the write lane was saturated. This is evidence loss, not a
+		// performance statistic: any non-zero value means the attendance log is
+		// incomplete for that period and should be treated as an alert.
+		WritesDropped uint64 `json:"writesDropped"`
+		// ProbesDropped counts skipped correlation probes (the device-flip
+		// heuristic). Losing these costs a hint, not evidence.
+		ProbesDropped uint64 `json:"probesDropped"`
+		// GuardUnavailable counts check-ins rejected with 503 because the campus
+		// guard could not resolve the session and therefore refused to fail open.
+		GuardUnavailable uint64 `json:"guardUnavailable"`
+	} `json:"audit"`
 	LastEventAt *time.Time `json:"lastEventAt,omitempty"`
 }
 
@@ -55,9 +68,14 @@ type attendanceMetrics struct {
 	collisions    uint64
 	redisFailures uint64
 	dbFailures    uint64
-	latenciesMs   []float64
-	maxSamples    int
-	lastEventAt   *time.Time
+
+	auditWritesDropped uint64
+	auditProbesDropped uint64
+	guardUnavailable   uint64
+
+	latenciesMs []float64
+	maxSamples  int
+	lastEventAt *time.Time
 }
 
 var globalAttendanceMetrics = &attendanceMetrics{
@@ -158,6 +176,33 @@ func RecordAttendanceDBInsertFailure() {
 	globalAttendanceMetrics.touchLocked(time.Now())
 }
 
+// RecordAttendanceAuditDropped records that a background attendance audit job
+// was discarded because its lane was full. `pool` is "write" for the primary
+// forensic record and "probe" for the correlation heuristic — the two are
+// counted separately because only the first one is lost evidence.
+func RecordAttendanceAuditDropped(pool string) {
+	globalAttendanceMetrics.mu.Lock()
+	defer globalAttendanceMetrics.mu.Unlock()
+
+	if pool == "probe" {
+		globalAttendanceMetrics.auditProbesDropped++
+	} else {
+		globalAttendanceMetrics.auditWritesDropped++
+	}
+	globalAttendanceMetrics.touchLocked(time.Now())
+}
+
+// RecordAttendanceGuardUnavailable records that the campus network guard could
+// not resolve the target session and rejected the request rather than passing
+// it through unchecked.
+func RecordAttendanceGuardUnavailable() {
+	globalAttendanceMetrics.mu.Lock()
+	defer globalAttendanceMetrics.mu.Unlock()
+
+	globalAttendanceMetrics.guardUnavailable++
+	globalAttendanceMetrics.touchLocked(time.Now())
+}
+
 func SnapshotAttendanceMetrics() AttendanceMetricsSnapshot {
 	globalAttendanceMetrics.mu.Lock()
 	defer globalAttendanceMetrics.mu.Unlock()
@@ -177,6 +222,9 @@ func SnapshotAttendanceMetrics() AttendanceMetricsSnapshot {
 	snapshot.Pin.Collisions = globalAttendanceMetrics.collisions
 	snapshot.Pin.RedisSetFailures = globalAttendanceMetrics.redisFailures
 	snapshot.Pin.DBInsertFailures = globalAttendanceMetrics.dbFailures
+	snapshot.Audit.WritesDropped = globalAttendanceMetrics.auditWritesDropped
+	snapshot.Audit.ProbesDropped = globalAttendanceMetrics.auditProbesDropped
+	snapshot.Audit.GuardUnavailable = globalAttendanceMetrics.guardUnavailable
 	snapshot.LastEventAt = globalAttendanceMetrics.lastEventAt
 	snapshot.Latency = buildLatencySnapshot(globalAttendanceMetrics.latenciesMs)
 	return snapshot

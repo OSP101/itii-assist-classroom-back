@@ -1442,8 +1442,16 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 // session is exempt (online) without paying for the full GetSessionInfo/PIN
 // state resolution.
 func GetAttendanceSessionType(sessionID uint) (string, error) {
+	return GetAttendanceSessionTypeCtx(context.Background(), sessionID)
+}
+
+// GetAttendanceSessionTypeCtx is GetAttendanceSessionType with a caller-supplied
+// context. The campus network guard needs the deadline: it now fails a check-in
+// closed when this lookup errors, so an unbounded query here would turn a slow
+// database into a hung request instead of a fast, retryable 503.
+func GetAttendanceSessionTypeCtx(ctx context.Context, sessionID uint) (string, error) {
 	var sessionType string
-	err := config.DB.Model(&models.AttendanceSession{}).
+	err := config.DB.WithContext(ctx).Model(&models.AttendanceSession{}).
 		Select("session_type").
 		Where("id = ?", sessionID).
 		Take(&sessionType).Error

@@ -5,3 +5,9 @@
 # bind-mounted uploads/ (owned by whatever UID the backend runs as) conflict
 # with git's own writes on every pull that touches a path here.
 /uploads/
+
+# Compiled Go binaries. api.exe alone is 43MB and changes on every build, so
+# tracking these made every rebuild show up as a diff and bloated the repo.
+# Untracking does not shrink existing history — that needs a history rewrite,
+# which is a separate, coordinated decision.
+*.exe
