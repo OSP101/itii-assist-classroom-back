@@ -1,6 +1,7 @@
 /.env
 /.env.example
 /.env.backend
+/.env.save
 # Runtime upload data, not source — committing it makes the container's
 # bind-mounted uploads/ (owned by whatever UID the backend runs as) conflict
 # with git's own writes on every pull that touches a path here.
