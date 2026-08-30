@@ -12,9 +12,6 @@ func SetupSystemRoutes(app *fiber.App) {
 	system.Use(middlewares.RequireAdminFeature("menu.monitoring"))
 
 	system.Get("/metrics", handlers.GetSystemMetricsHandler)
-	system.Get("/cpu", handlers.GetCpuUsageHandler)
-	system.Get("/memory", handlers.GetMemoryUsageHandler)
-	system.Get("/info", handlers.GetServerInfoHandler)
 	system.Get("/cloud/overview", handlers.GetCloudOverviewHandler)
 	system.Get("/cloud/cost", handlers.GetCloudCostHandler)
 	system.Get("/trends", handlers.GetMonitoringTrendsHandler)

@@ -12,10 +12,5 @@ func SetupOAuthRoutes(app *fiber.App) {
 
 	// Protected — current user
 	oauth.Get("/linked", middlewares.Protected(), handlers.GetLinkedAccountsHandler)
-	oauth.Post("/link", middlewares.Protected(), handlers.LinkAccountHandler)
 	oauth.Delete("/unlink/:provider", middlewares.Protected(), handlers.UnlinkAccountHandler)
-
-	// Admin only
-	oauth.Get("/admin/user/:userId", middlewares.Protected(), middlewares.RequireRole("admin"), handlers.AdminGetLinkedAccountsHandler)
-	oauth.Delete("/admin/user/:userId/:provider", middlewares.Protected(), middlewares.RequireRole("admin"), handlers.AdminUnlinkAccountHandler)
 }

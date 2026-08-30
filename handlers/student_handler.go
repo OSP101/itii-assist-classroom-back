@@ -88,16 +88,20 @@ func GetStudentByIDHandler(c fiber.Ctx) error {
 }
 
 // =============================================================================
-// GET /api/students/lookup/:student_id  (public — นักศึกษาตรวจสอบด้วยตัวเอง)
+// GET /api/students/me/lookup  (ต้อง login — นักศึกษาตรวจสอบข้อมูลของตัวเองเท่านั้น)
 // =============================================================================
 
-func LookupStudentHandler(c fiber.Ctx) error {
-	sid := c.Params("student_id")
-	if sid == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "กรุณาระบุรหัสนักศึกษา"})
+func LookupMyStudentHandler(c fiber.Ctx) error {
+	studentID, ok := middlewares.GetStudentID(c)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูล session นักศึกษา"})
+	}
+	student, err := repositories.FindStudentByID(studentID)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูลนักศึกษา"})
 	}
 
-	result, err := repositories.LookupStudentScores(sid)
+	result, err := repositories.LookupStudentScores(student.StudentID)
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูลนักศึกษา"})
 	}

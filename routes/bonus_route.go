@@ -17,8 +17,5 @@ func SetupBonusScoreRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	api.Get("/course/:courseId/summary", middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), handlers.GetBonusScoreSummaryHandler)
 	api.Get("/course/:courseId/student/:studentId", middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), handlers.GetStudentBonusHistoryHandler)
 	api.Get("/course/:courseId", middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), handlers.GetBonusScoresHandler)
-	api.Get("/", middlewares.RequireCourseAccess(middlewares.CourseIDFromQuery("course_id"), "instructor", "ta"), handlers.GetBonusScoresHandler)
-	api.Get("/summary", middlewares.RequireCourseAccess(middlewares.CourseIDFromQuery("course_id"), "instructor", "ta"), handlers.GetBonusScoreSummaryHandler)
-	api.Get("/student", middlewares.RequireCourseAccess(middlewares.CourseIDFromQuery("course_id"), "instructor", "ta"), handlers.GetStudentBonusHistoryHandler)
 	api.Delete("/:id", middlewares.RequireCourseAccess(middlewares.CourseIDFromBonusScoreParam("id"), "instructor", "ta"), bonusHandler.DeleteBonusScore)
 }

@@ -76,7 +76,6 @@
 | POST | `/api/auth/validate-reset-token` | ตรวจสอบ token รีเซ็ต |
 | POST | `/api/auth/reset-password` | รีเซ็ตรหัสผ่าน |
 | GET | `/api/oauth/linked` | ดูบัญชี OAuth ที่เชื่อม |
-| POST | `/api/oauth/link` | เชื่อมบัญชี OAuth |
 | DELETE | `/api/oauth/unlink/:provider` | ยกเลิกเชื่อม OAuth |
 
 ### หน้าจอ (Frontend)
@@ -194,7 +193,7 @@
 | PUT | `/api/students/:id` | แก้ไข |
 | DELETE | `/api/students/:id` | ลบ |
 | PATCH | `/api/students/:id/status` | Toggle สถานะ |
-| GET | `/api/students/lookup/:student_id` | ค้นหาคะแนนรายบุคคล (public) |
+| GET | `/api/students/me/lookup` | ค้นหาคะแนนของตัวเอง (ต้อง login เป็น student) |
 | POST | `/api/students/search-by-ids` | ค้นหาหลายรหัส (bulk) |
 
 ### หน้าจอ (Frontend)
@@ -202,7 +201,7 @@
 | เส้นทาง | คำอธิบาย |
 |---|---|
 | `/admin/students` | หน้าจัดการนักศึกษา |
-| `/myscore` | หน้าตรวจสอบคะแนนตัวเอง |
+| `/student/courses` | หน้าตรวจสอบคะแนนตัวเอง (ต้อง login) |
 
 ---
 
@@ -472,10 +471,8 @@ TA สามารถส่งคำขอแก้ไขคะแนน ไป�
 | GET | `/api/courses/:courseId/exam-settings` | ดูตั้งค่าการสอบ |
 | PUT | `/api/courses/:courseId/exam-settings/:settingId` | แก้ไขตั้งค่า |
 | GET | `/api/courses/:courseId/exam-scores` | ดูคะแนนสอบ |
-| GET | `/api/courses/:courseId/exam-scores/stats` | สถิติคะแนน |
 | POST | `/api/courses/:courseId/exam-scores` | บันทึกคะแนน |
 | POST | `/api/courses/:courseId/exam-scores/bulk` | บันทึก bulk |
-| DELETE | `/api/courses/:courseId/exam-scores/:scoreId` | ลบ |
 
 ---
 
@@ -573,7 +570,7 @@ TA สามารถส่งคำขอแก้ไขคะแนน ไป�
 | GET | `/api/queue/bookings/:bookingId/status` | ดูสถานะคิว |
 | POST | `/api/queue/bookings/:bookingId/cancel` | ยกเลิกคิว |
 | GET | `/api/queue/sessions/:sessionId/desk-statuses` | สถานะโต๊ะ (projector) |
-| POST | `/api/queue/sessions/:sessionId/status` | เปลี่ยนสถานะ (projector) |
+| POST | `/api/queue/sessions/:sessionId/status` | เปลี่ยนสถานะ (projector, public แต่จำกัด rate ต่อ session+IP) |
 
 ### หน้าจอ (Frontend)
 
@@ -633,10 +630,8 @@ TA สามารถส่งคำขอแก้ไขคะแนน ไป�
 | Method | Endpoint | คำอธิบาย |
 |---|---|---|
 | POST | `/api/feedback` | ส่ง feedback |
-| GET | `/api/feedback/my` | ดูของตนเอง |
 | GET | `/api/feedback/stats` | สถิติ (admin) |
 | GET | `/api/feedback` | ดูทั้งหมด (admin) |
-| GET | `/api/feedback/:id` | ดูรายตัว |
 | PUT | `/api/feedback/:id` | ตอบกลับ/อัปเดต |
 | DELETE | `/api/feedback/:id` | ลบ |
 
@@ -669,9 +664,6 @@ TA สามารถส่งคำขอแก้ไขคะแนน ไป�
 
 | Method | Endpoint | คำอธิบาย |
 |---|---|---|
-| POST | `/api/notifications/register` | ลงทะเบียน token |
-| POST | `/api/notifications/unregister` | ยกเลิก token |
-| POST | `/api/notifications/update-booking` | อัปเดต booking ref |
 | GET | `/api/notifications/tokens` | ดู token ที่ลงทะเบียน |
 | GET | `/api/notifications/logs` | ดู log การส่ง |
 
@@ -743,9 +735,6 @@ TA สามารถส่งคำขอแก้ไขคะแนน ไป�
 | Method | Endpoint | คำอธิบาย |
 |---|---|---|
 | GET | `/api/system/metrics` | System metrics ทั้งหมด |
-| GET | `/api/system/cpu` | CPU usage |
-| GET | `/api/system/memory` | Memory usage |
-| GET | `/api/system/info` | Server info |
 | GET | `/api/logs` | ดู log ทั้งหมด |
 | GET | `/api/logs/filters` | ตัวเลือก filter |
 | GET | `/api/logs/stats` | สถิติ log |

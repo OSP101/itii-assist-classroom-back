@@ -10,11 +10,6 @@ import (
 func SetupNotificationRoutes(api *fiber.App) {
 	notifications := api.Group("/api/notifications")
 
-	// Public routes (legacy-compatible: student devices may not be authenticated)
-	notifications.Post("/register", handlers.RegisterTokenHandler)
-	notifications.Post("/unregister", handlers.UnregisterTokenHandler)
-	notifications.Post("/update-booking", handlers.UpdateBookingTokenHandler)
-
 	// Protected routes
 	protected := notifications.Group("/", middlewares.Protected())
 	protected.Get("/tokens", handlers.GetUserTokensHandler)

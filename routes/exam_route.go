@@ -34,13 +34,6 @@ func SetupExamRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 		middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("courseId"), repositories.PermissionViewExamScores, "instructor", "ta"),
 		handlers.GetExamScoresHandler,
 	)
-	app.Get(coursePrefix+"/exam-scores/stats",
-		middlewares.Protected(),
-		middlewares.RequireRole("admin", "instructor", "ta"),
-		middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"),
-		middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("courseId"), repositories.PermissionViewExamScores, "instructor", "ta"),
-		handlers.GetExamScoreStatsHandler,
-	)
 	app.Post(coursePrefix+"/exam-scores",
 		middlewares.Protected(),
 		middlewares.RequireRole("admin", "instructor", "ta"),
@@ -55,14 +48,6 @@ func SetupExamRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 		middlewares.RequireAnyCoursePermission(middlewares.CourseIDFromParam("courseId"), []string{repositories.PermissionCreateExamScores, repositories.PermissionUpdateExamScores}, "instructor", "ta"),
 		handlers.BulkUpsertExamScoresHandler,
 	)
-	app.Delete(coursePrefix+"/exam-scores/:scoreId",
-		middlewares.Protected(),
-		middlewares.RequireRole("admin", "instructor", "ta"),
-		middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"),
-		middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("courseId"), repositories.PermissionDeleteExamScores, "instructor", "ta"),
-		handlers.DeleteExamScoreHandler,
-	)
-
 	app.Get(coursePrefix+"/exam-sessions", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), handlers.GetExamSessionsHandler)
 	app.Post(coursePrefix+"/exam-sessions", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), handlers.CreateExamSessionHandler)
 	app.Post(coursePrefix+"/exam-sessions/import/preview", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), handlers.ImportExamSeatsPreviewHandler)
