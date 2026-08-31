@@ -616,6 +616,13 @@ func RotateAttendanceSessionPIN(ctx context.Context, sessionID uint, reason stri
 		if state == nil {
 			return ErrAttendancePinUnavailable
 		}
+		if desiredMode := attendanceModeForSession(&session); state.Mode != desiredMode {
+			reconciled, err := reconcileAttendanceRuntimeMode(ctx, tx, session.ID, desiredMode, state)
+			if err != nil {
+				return err
+			}
+			state = reconciled
+		}
 		if state.Mode != "rotating" {
 			rotatedState = state
 			return nil
@@ -808,7 +815,22 @@ func SyncAttendanceRuntimeAutoRotate(ctx context.Context, sessionID uint, autoRo
 	if autoRotate && observability.AttendancePinAutoRotateEnabled() {
 		desiredMode = "rotating"
 	}
-	if state.Mode == desiredMode {
+	return reconcileAttendanceRuntimeMode(ctx, config.DB, sessionID, desiredMode, state)
+}
+
+// reconcileAttendanceRuntimeMode switches the Redis-cached runtime state (and
+// the DB's pin_mode/auto_rotate_pin/pin_rotates_at columns) to desiredMode
+// when it disagrees with the cached state.Mode. SyncAttendanceRuntimeAutoRotate
+// is the fast path, called right when an instructor toggles auto_rotate_pin —
+// but that call is best-effort (a transient Redis error there is only logged,
+// never surfaced), so the cache can get stuck on the old mode for the rest of
+// the session. MaintainAttendanceRuntimeSessions and RotateAttendanceSessionPIN
+// both call this with the mode freshly computed from the DB-locked session
+// right before deciding whether to rotate, so a stale "rotating" cache
+// self-heals on the very next tick instead of rotating the PIN against a
+// setting the instructor already turned off.
+func reconcileAttendanceRuntimeMode(ctx context.Context, db *gorm.DB, sessionID uint, desiredMode string, state *AttendanceRuntimeState) (*AttendanceRuntimeState, error) {
+	if state == nil || state.Mode == desiredMode {
 		return state, nil
 	}
 
@@ -832,7 +854,10 @@ func SyncAttendanceRuntimeAutoRotate(ctx context.Context, sessionID uint, autoRo
 		state.NextRotationAt = &rotationAt
 	}
 
-	if err := config.DB.Model(&models.AttendanceSession{}).Where("id = ?", sessionID).Updates(map[string]interface{}{
+	if db == nil {
+		db = config.DB
+	}
+	if err := db.Model(&models.AttendanceSession{}).Where("id = ?", sessionID).Updates(map[string]interface{}{
 		"pin_mode":        state.Mode,
 		"auto_rotate_pin": desiredMode == "rotating",
 		"pin_rotates_at":  state.NextRotationAt,
@@ -844,7 +869,7 @@ func SyncAttendanceRuntimeAutoRotate(ctx context.Context, sessionID uint, autoRo
 		return nil, err
 	}
 
-	log.Printf("event=attendance_runtime_mode_synced session_id=%d mode=%s", sessionID, state.Mode)
+	log.Printf("event=attendance_runtime_mode_reconciled session_id=%d mode=%s", sessionID, state.Mode)
 	return state, nil
 }
 
@@ -922,7 +947,18 @@ func MaintainAttendanceRuntimeSessions(ctx context.Context, now time.Time) ([]At
 		if err != nil {
 			return nil, err
 		}
-		if state == nil || state.Mode != "rotating" || state.NextRotationAt == nil || state.NextRotationAt.After(now) {
+		if state == nil {
+			continue
+		}
+		if desiredMode := attendanceModeForSession(&session); state.Mode != desiredMode {
+			reconciled, err := reconcileAttendanceRuntimeMode(ctx, config.DB, session.ID, desiredMode, state)
+			if err != nil {
+				log.Printf("event=attendance_runtime_reconcile_failed session_id=%d err=%v", session.ID, err)
+				continue
+			}
+			state = reconciled
+		}
+		if state.Mode != "rotating" || state.NextRotationAt == nil || state.NextRotationAt.After(now) {
 			continue
 		}
 		rotatedState, err := RotateAttendanceSessionPIN(ctx, session.ID, "rotation")

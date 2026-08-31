@@ -175,7 +175,7 @@ func main() {
 	// cookies" vs the mobile app's Bearer-only requests) and X-CSRF-Token
 	// (the double-submit CSRF header, checked inside Protected()/
 	// OptionalProtected() — see middlewares/auth_middleware.go).
-	corsAllowHeaders := []string{"Origin", "Content-Type", "Accept", "Authorization", utils.WebClientHeader, utils.CSRFHeaderName}
+	corsAllowHeaders := []string{"Origin", "Content-Type", "Accept", "Authorization", utils.WebClientHeader, utils.CSRFHeaderName, utils.DeviceHintsHeader}
 
 	if rawOrigins == "" || rawOrigins == "*" {
 		// Allow all origins via func to avoid Fiber v3 strict URL validation.

@@ -505,7 +505,16 @@ func GetSessionInfoHandler(c fiber.Ctx) error {
 	// check-in screen can still stay in step with the projector.
 	info.PinCode = ""
 
-	guard := utils.EvaluateCampusCheckIn(c.Get(fiber.HeaderHost), c.Get(fiber.HeaderUserAgent), c.IP(), info.SessionType)
+	// The device hints ride on a header because this route is a GET with no
+	// body, and its verdict is what the check-in page renders before the
+	// student can do anything — an iPad rejected here never reaches the POST.
+	guard := utils.EvaluateCampusCheckIn(
+		c.Get(fiber.HeaderHost),
+		c.Get(fiber.HeaderUserAgent),
+		c.IP(),
+		info.SessionType,
+		utils.ParseDeviceHints(c.Get(utils.DeviceHintsHeader)),
+	)
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data":    info,

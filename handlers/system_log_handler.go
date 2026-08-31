@@ -197,7 +197,7 @@ func ExportLogsHandler(c fiber.Ctx) error {
 
 	buffer := &bytes.Buffer{}
 	writer := csv.NewWriter(buffer)
-	_ = writer.Write([]string{"ID", "Log Type", "Severity", "Action", "HTTP Method", "URL", "Status Code", "Response Time (ms)", "IP Address", "User", "User Agent", "Browser", "OS", "Error Message", "Created At"})
+	_ = writer.Write([]string{"ID", "Log Type", "Severity", "Action", "HTTP Method", "URL", "Status Code", "Error Code", "Response Time (ms)", "IP Address", "User", "User Agent", "Browser", "OS", "Error Message", "Created At"})
 	for _, item := range result.Logs {
 		userLabel := ""
 		if item.ActorUserID != nil {
@@ -237,6 +237,7 @@ func ExportLogsHandler(c fiber.Ctx) error {
 			item.HTTPMethod,
 			item.URL,
 			statusCode,
+			item.ErrorCode,
 			responseTime,
 			item.IPAddress,
 			userLabel,

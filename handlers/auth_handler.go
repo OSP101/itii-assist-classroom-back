@@ -418,6 +418,7 @@ func RefreshHandler(c fiber.Ctx) error {
 func (h *AuthHandler) Logout(c fiber.Ctx) error {
 	var jti string
 	var actorID uint
+	var kind string
 	var input LogoutInput
 	_ = c.Bind().JSON(&input)
 
@@ -430,6 +431,7 @@ func (h *AuthHandler) Logout(c fiber.Ctx) error {
 		if err == nil {
 			jti = claims.JTI
 			actorID = claims.UserID
+			kind = claims.Kind
 			_ = repositories.RevokeRefreshToken(claims.JTI)
 		}
 	}
@@ -437,17 +439,46 @@ func (h *AuthHandler) Logout(c fiber.Ctx) error {
 		utils.ClearAuthCookies(c)
 	}
 	reqID, traceID, ip := services.ExtractMeta(c)
-	h.auditLogger.LogSystem(c.Context(), services.SystemEvent{
-		ActorUserID: actorID,
-		Action:      services.ActionAuthLogout,
-		LogType:     "auth",
-		Severity:    "info",
-		IPAddress:   ip,
-		UserAgent:   c.Get("User-Agent"),
-		RequestID:   reqID,
-		TraceID:     traceID,
-		Detail:      map[string]any{"session_jti": jti},
-	})
+
+	if kind == "s" && actorID > 0 {
+		// Student session — students live outside the `users` table, so the
+		// identity must ride in Detail (same shape as auth.login.success)
+		// instead of ActorUserID, or the log/export views can't resolve a name.
+		detail := map[string]any{"session_jti": jti}
+		if student, err := repositories.FindStudentByID(actorID); err == nil {
+			detail["student_id"] = student.ID
+			detail["student_no"] = student.StudentID
+			detail["full_name"] = student.FullName
+			detail["email"] = student.Email
+		}
+		detailJSON, _ := json.Marshal(detail)
+		dt, br, osn := utils.ParseUserAgent(c.Get("User-Agent"))
+		config.DB.Create(&models.SystemLog{
+			LogType:    "auth",
+			Severity:   "info",
+			Action:     services.ActionAuthLogout,
+			Detail:     datatypes.JSON(detailJSON),
+			IPAddress:  ip,
+			UserAgent:  c.Get("User-Agent"),
+			DeviceType: dt,
+			Browser:    br,
+			OS:         osn,
+			RequestID:  reqID,
+			TraceID:    traceID,
+		})
+	} else {
+		h.auditLogger.LogSystem(c.Context(), services.SystemEvent{
+			ActorUserID: actorID,
+			Action:      services.ActionAuthLogout,
+			LogType:     "auth",
+			Severity:    "info",
+			IPAddress:   ip,
+			UserAgent:   c.Get("User-Agent"),
+			RequestID:   reqID,
+			TraceID:     traceID,
+			Detail:      map[string]any{"session_jti": jti},
+		})
+	}
 	return c.JSON(fiber.Map{"success": true, "message": "ออกจากระบบสำเร็จ"})
 }
 

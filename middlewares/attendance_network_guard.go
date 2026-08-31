@@ -110,7 +110,13 @@ func AttendanceNetworkGuard() fiber.Handler {
 			return c.Next()
 		}
 
-		result := utils.EvaluateCampusCheckIn(c.Get(fiber.HeaderHost), c.Get(fiber.HeaderUserAgent), c.IP(), sessionType)
+		result := utils.EvaluateCampusCheckIn(
+			c.Get(fiber.HeaderHost),
+			c.Get(fiber.HeaderUserAgent),
+			c.IP(),
+			sessionType,
+			utils.ParseDeviceHints(c.Get(utils.DeviceHintsHeader)),
+		)
 		if result.Allowed || result.Exempt {
 			nextErr := c.Next()
 
