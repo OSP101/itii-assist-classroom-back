@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	queueOfferTimeoutSeconds      = 30 * time.Second
+	queueOfferTimeoutSeconds      = 90 * time.Second
 	queueOfferPauseDuration       = 1 * time.Minute
 	queueOfferReassignGraceWindow = 90 * time.Second
 	queueOfferPauseThreshold      = 3
