@@ -58,6 +58,21 @@ func attendancePublicErrorResponse(err error, fallbackStatus int, fallbackTitle 
 		}
 	}
 
+	// Defence in depth for the wrong-PIN sentinel. Its Error() is the internal
+	// English string "attendance invalid pin", which the fallback below would
+	// hand straight to the student as the on-screen message. The repository now
+	// converts it at source; this keeps any future path that forgets to from
+	// putting an internal string in front of a student again.
+	if errors.Is(err, repositories.ErrAttendanceInvalidPIN) {
+		publicErr = repositories.ErrAttendanceInvalidPINPublic
+		return publicErr.HTTPStatus, fiber.Map{
+			"success": false,
+			"code":    publicErr.Code,
+			"title":   publicErr.Title,
+			"message": publicErr.Message,
+		}
+	}
+
 	message := fallbackMessage
 	if trimmed := strings.TrimSpace(err.Error()); trimmed != "" {
 		message = trimmed

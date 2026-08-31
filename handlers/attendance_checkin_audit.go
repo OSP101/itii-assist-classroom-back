@@ -43,5 +43,12 @@ func attendanceErrCode(err error) string {
 	if err == nil {
 		return ""
 	}
+	// Same sentinel as attendancePublicErrorResponse: without this a wrong PIN
+	// is filed under the catch-all code, which is what hid 42 wrong-PIN
+	// failures across 19 students behind "ATTENDANCE_ERROR" on 2026-08-31 and
+	// made the incident unreadable from the logs.
+	if errors.Is(err, repositories.ErrAttendanceInvalidPIN) {
+		return repositories.ErrAttendanceInvalidPINPublic.Code
+	}
 	return "ATTENDANCE_ERROR"
 }

@@ -1307,6 +1307,18 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 	lookupSessionID, err := LookupAttendanceSessionIDByPIN(ctx, pin)
 	if err != nil {
 		observability.RecordAttendanceWrongPin(time.Since(startedAt))
+		// A PIN that matches no open session is a wrong PIN, and must surface as
+		// the public wrong-PIN error like every other PIN failure in this
+		// function. Returning the bare sentinel let handlers fall through to
+		// their generic branch, so students who typed a rotated-out PIN were
+		// shown the raw English "attendance invalid pin" under the title
+		// "เช็กชื่อไม่สำเร็จ", with the audit log recording the catch-all
+		// ATTENDANCE_ERROR. Nothing told them to re-read the projector, so they
+		// retried the same dead PIN instead — 42 failures across 19 students in
+		// one session on 2026-08-31.
+		if errors.Is(err, ErrAttendanceInvalidPIN) {
+			return nil, ErrAttendanceInvalidPINPublic
+		}
 		return nil, err
 	}
 	if lookupSessionID != sessionID {
