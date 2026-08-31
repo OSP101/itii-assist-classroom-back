@@ -139,8 +139,31 @@ func Handler() fiber.Handler {
 			defaultHub.register(client)
 			client.send <- outgoingMessage{Event: "socket-ready", Data: fiber.Map{"id": client.id}}
 
-			go client.writePump()
+			// writePump MUST be finished before this callback returns.
+			// fasthttp closes the hijacked connection and recycles its
+			// *hijackConn into a sync.Pool the moment the hijack handler
+			// returns (server.go releaseHijackConn sets Conn = nil). writePump
+			// runs in its own goroutine holding that same pointer, so any use
+			// of it afterwards — even SetWriteDeadline — dereferences a nil
+			// net.Conn. That is a SIGSEGV in a goroutine no recover() covers,
+			// so it kills the whole process and drops every other client's
+			// socket with it, and the recycled struct could just as easily
+			// have been handed to a different connection by then.
+			//
+			// Seen in production on 2026-08-31: the backend had restarted 165
+			// times, every crash the same panic at the close-frame write below.
+			// A student closing a tab or losing Wi-Fi was enough to trigger it.
+			writePumpDone := make(chan struct{})
+			go func() {
+				defer close(writePumpDone)
+				client.writePump()
+			}()
+
 			client.readPump()
+
+			// readPump's defer has already closed c.done, so writePump is on
+			// its way out; this only waits for it to actually be out.
+			<-writePumpDone
 		})
 	}
 }
@@ -267,6 +290,13 @@ func (c *client) readPump() {
 func (c *client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
+		// Backstop only. Handler now joins this goroutine before fasthttp can
+		// recycle the connection, which is what actually keeps the writes below
+		// safe; this is here so that a panic from any future path still costs
+		// one client instead of the whole server.
+		if r := recover(); r != nil {
+			log.Printf("realtime: writePump panic for client %s: %v", c.id, r)
+		}
 		ticker.Stop()
 		// Closing the connection here is what unblocks readPump when the write
 		// side is the one that failed; otherwise readPump would sit in ReadJSON
