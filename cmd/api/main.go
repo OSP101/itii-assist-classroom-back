@@ -326,6 +326,18 @@ func startAttendancePinLifecycleWorker() {
 					}
 					realtime.EmitToInstructor(change.SessionID, "attendance-pin-updated", payload)
 					realtime.EmitToAttendanceDisplay(change.SessionID, "attendance-pin-updated", payload)
+
+					// Students get the rotation timings but never the code —
+					// see emitAttendancePinUpdated in handlers/attendance_handler.go.
+					realtime.EmitToAttendanceStudents(change.SessionID, "attendance-pin-updated", fiber.Map{
+						"session_id":      change.SessionID,
+						"auto_rotate_pin": change.PinRotatesAt != nil,
+						"pin_mode":        pinMode,
+						"pin_issued":      strings.TrimSpace(change.PinCode) != "",
+						"pin_issued_at":   change.PinIssuedAt,
+						"pin_rotates_at":  change.PinRotatesAt,
+						"status":          change.Status,
+					})
 				}
 
 				if change.Status == "closed" && change.StatusChanged {

@@ -37,6 +37,10 @@ func SetupAttendanceRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	api.Use(middlewares.RequireAdminFeature("menu.attendance"))
 	api.Post("/sessions/start", handlers.StartAttendanceSessionHandler)
 	api.Get("/sessions/:id/pin", middlewares.RequireCourseAccess(middlewares.CourseIDFromAttendanceSessionParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromAttendanceSessionParam("id"), repositories.PermissionViewAttendance, "instructor", "ta"), handlers.GetAttendanceSessionPinHandler)
+	// Same guards as /sessions/:id/pin — holding this ticket must prove exactly
+	// what being allowed to open the live view proves, since the room it opens
+	// streams the PIN and every check-in record.
+	api.Get("/sessions/:id/socket-ticket", middlewares.RequireCourseAccess(middlewares.CourseIDFromAttendanceSessionParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromAttendanceSessionParam("id"), repositories.PermissionViewAttendance, "instructor", "ta"), handlers.GetAttendanceSessionSocketTicketHandler)
 	api.Post("/sessions/:id/rotate", middlewares.RequireCourseAccess(middlewares.CourseIDFromAttendanceSessionParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromAttendanceSessionParam("id"), repositories.PermissionUpdateAttendanceSessions, "instructor", "ta"), handlers.RotateAttendanceSessionPinHandler)
 	api.Post("/sessions/:id/close", middlewares.RequireCourseAccess(middlewares.CourseIDFromAttendanceSessionParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromAttendanceSessionParam("id"), repositories.PermissionUpdateAttendanceSessions, "instructor", "ta"), handlers.CloseAttendanceSessionHandler)
 	api.Get("/", middlewares.RequireCourseAccess(middlewares.CourseIDFromQuery("course_id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromQuery("course_id"), repositories.PermissionViewAttendance, "instructor", "ta"), handlers.GetAttendanceSessionsHandler)

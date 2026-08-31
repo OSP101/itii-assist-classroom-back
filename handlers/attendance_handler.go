@@ -498,6 +498,13 @@ func GetSessionInfoHandler(c fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
 	}
 
+	// This route is public — no auth middleware, anyone who knows a session id
+	// can call it. Withhold the PIN itself and let info.PinIssued carry the
+	// only thing a student's UI actually needs to know about it. Everything
+	// else (pin_issued_at / pin_rotates_at) stays, so the countdown on the
+	// check-in screen can still stay in step with the projector.
+	info.PinCode = ""
+
 	guard := utils.EvaluateCampusCheckIn(c.Get(fiber.HeaderHost), c.Get(fiber.HeaderUserAgent), c.IP(), info.SessionType)
 	return c.JSON(fiber.Map{
 		"success": true,
@@ -1314,6 +1321,37 @@ func StartAttendanceSessionHandler(c fiber.Ctx) error {
 	})
 }
 
+// instructorSocketTicketTTL matches the classroom-display ticket: long enough
+// to carry a page from "fetch ticket" to "socket joined", short enough that a
+// leaked ticket is worthless by the time anyone could reuse it.
+const instructorSocketTicketTTL = time.Minute
+
+// GET /api/attendance/sessions/:id/socket-ticket
+//
+// Mints the ticket the instructor live view needs to join its realtime room.
+// The room carries the live PIN and every check-in record as it lands, so it
+// used to be the weak link: the WebSocket hub let anyone join instructor-<id>
+// just by knowing the session id. The route sits behind the same course-access
+// and view-attendance permission checks as the live view itself (see
+// routes/attendance_route.go), so holding a ticket now proves the same thing
+// as being allowed to open that page.
+func GetAttendanceSessionSocketTicketHandler(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid ID"})
+	}
+
+	ticket, expiresAt, err := realtime.IssueSocketTicket(fmt.Sprintf("instructor-%d", id), instructorSocketTicketTTL)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to issue socket ticket"})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    fiber.Map{"ticket": ticket, "expires_at": expiresAt},
+	})
+}
+
 func GetAttendanceSessionPinHandler(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil {
@@ -1521,6 +1559,19 @@ func emitAttendancePinUpdated(session models.AttendanceSession) {
 	}
 	realtime.EmitToInstructor(session.ID, "attendance-pin-updated", payload)
 	realtime.EmitToAttendanceDisplay(session.ID, "attendance-pin-updated", payload)
+
+	// Students get the rotation timings but never the code, so their countdown
+	// can follow the projector without the room becoming a way to read the PIN
+	// from outside the classroom.
+	realtime.EmitToAttendanceStudents(session.ID, "attendance-pin-updated", fiber.Map{
+		"session_id":      session.ID,
+		"auto_rotate_pin": session.AutoRotatePin,
+		"pin_mode":        session.PinMode,
+		"pin_issued":      strings.TrimSpace(session.PinCode) != "",
+		"pin_issued_at":   session.PinIssuedAt,
+		"pin_rotates_at":  session.PinRotatesAt,
+		"status":          session.Status,
+	})
 }
 
 func VerifyStudentHandler(c fiber.Ctx) error {

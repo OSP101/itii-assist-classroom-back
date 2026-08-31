@@ -179,7 +179,17 @@ type AttendanceSessionInfo struct {
 	CheckLocation        bool                    `json:"check_location"`
 	AutoRotatePin        bool                    `json:"auto_rotate_pin"`
 	PinMode              string                  `json:"pin_mode"`
-	PinCode              string                  `json:"pin_code"`
+	// PinCode is for privileged consumers only — the instructor live view and
+	// the paired classroom display. GetSessionInfoHandler blanks it before
+	// answering the public check-in route: the rotating PIN is what forces a
+	// student to actually be in the room reading the projector, so serving it
+	// over an unauthenticated API would nullify the device, campus-network and
+	// canonical-domain guards that sit in front of check-in. omitempty keeps it
+	// off the wire entirely rather than sending an empty string.
+	PinCode string `json:"pin_code,omitempty"`
+	// PinIssued lets a caller that is not allowed to see the code still tell
+	// "no PIN generated yet" apart from "PIN withheld".
+	PinIssued            bool                    `json:"pin_issued"`
 	PinIssuedAt          *time.Time              `json:"pin_issued_at,omitempty"`
 	PinRotatesAt         *time.Time              `json:"pin_rotates_at,omitempty"`
 	LateThresholdMinutes int                     `json:"late_threshold_minutes"`
@@ -1491,6 +1501,7 @@ func GetSessionInfo(sessionID uint) (*AttendanceSessionInfo, error) {
 		AutoRotatePin:        session.AutoRotatePin != nil && *session.AutoRotatePin,
 		PinMode:              session.PinMode,
 		PinCode:              session.PinCode,
+		PinIssued:            strings.TrimSpace(session.PinCode) != "",
 		PinIssuedAt:          session.PinIssuedAt,
 		PinRotatesAt:         session.PinRotatesAt,
 		LateThresholdMinutes: session.LateThresholdMinutes,

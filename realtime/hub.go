@@ -61,6 +61,23 @@ func (c *client) markDone() {
 	c.closeOnce.Do(func() { close(c.done) })
 }
 
+// sendDirect delivers one event to this client alone, with the same
+// drop-rather-than-block policy broadcast() uses: a client that is not draining
+// its buffer gets unregistered instead of stalling the caller.
+func (c *client) sendDirect(event string, data interface{}) {
+	select {
+	case <-c.done:
+		return
+	default:
+	}
+
+	select {
+	case c.send <- outgoingMessage{Event: event, Data: data}:
+	default:
+		go c.hub.unregister(c)
+	}
+}
+
 type hub struct {
 	mu      sync.RWMutex
 	clients map[*client]struct{}
@@ -77,7 +94,12 @@ type socketTicket struct {
 	expiresAt time.Time
 }
 
-var displaySocketTickets = struct {
+// socketTickets gates the rooms that carry privileged data. A ticket is minted
+// only behind an authenticated HTTP route and names the exact room it opens, so
+// a ticket for one room can never be replayed against another. Rooms without a
+// ticket (attendance-, queue-, classroom-, …) are joinable by anyone and must
+// only ever carry data that is safe for an anonymous listener.
+var socketTickets = struct {
 	mu    sync.Mutex
 	items map[string]socketTicket
 }{
@@ -279,8 +301,22 @@ func (c *client) handleMessage(message incomingMessage) {
 	case "leave-attendance":
 		c.hub.leave(c, "attendance-"+rawString(message.Data))
 	case "join-instructor":
-		c.hub.join(c, "instructor-"+rawString(message.Data))
+		// Ticket-gated: this room carries the live attendance PIN and every
+		// check-in record as it lands (student name, email, Google id). It used
+		// to be joinable by anyone who knew a session id, which made both of
+		// those readable from outside the classroom. The ticket comes from
+		// GET /api/attendance/sessions/:id/socket-ticket, which runs the same
+		// course-access and view-attendance checks as the live view itself.
+		payload := rawMap(message.Data)
+		ticket := strings.TrimSpace(fmt.Sprint(payload["ticket"]))
+		room, ok := validateSocketTicket(ticket)
+		if !ok || !strings.HasPrefix(room, "instructor-") {
+			c.sendDirect("instructor-join-rejected", fiber.Map{"reason": "invalid_ticket"})
+			return
+		}
+		c.hub.join(c, room)
 	case "leave-instructor":
+		// Leaving needs no ticket — a client can only ever remove itself.
 		c.hub.leave(c, "instructor-"+rawString(message.Data))
 	case "join-user-courses":
 		c.hub.join(c, "user-courses-"+rawString(message.Data))
@@ -328,7 +364,11 @@ func (c *client) handleMessage(message incomingMessage) {
 	case "join-display":
 		payload := rawMap(message.Data)
 		ticket := strings.TrimSpace(fmt.Sprint(payload["ticket"]))
-		if room, ok := validateDisplaySocketTicket(ticket); ok {
+		// The prefix check keeps each join event tied to the room class it is
+		// named for. A ticket is only minted for a room its holder was already
+		// authorised for, so this is not what stops an escalation — it stops a
+		// future room class from silently inheriting this entry point.
+		if room, ok := validateSocketTicket(ticket); ok && strings.HasPrefix(room, "display-") {
 			c.hub.join(c, room)
 		}
 	case "leave-display":
@@ -363,6 +403,15 @@ func EmitToRoom(room string, event string, data interface{}) {
 func EmitToAttendance(sessionID interface{}, event string, data interface{}) {
 	EmitToRoom("attendance-"+fmt.Sprint(sessionID), event, data)
 	EmitToRoom("instructor-"+fmt.Sprint(sessionID), event, data)
+}
+
+// EmitToAttendanceStudents reaches only the room students join from the
+// check-in screen ("join-attendance"), unlike EmitToAttendance which also
+// fans out to the instructor room. Room membership is not authenticated, so
+// anything sent here must be safe for an anonymous listener to read — in
+// particular it must never carry the attendance PIN.
+func EmitToAttendanceStudents(sessionID interface{}, event string, data interface{}) {
+	EmitToRoom("attendance-"+fmt.Sprint(sessionID), event, data)
 }
 
 func EmitToInstructor(sessionID interface{}, event string, data interface{}) {
@@ -408,7 +457,9 @@ func EmitToUser(userID interface{}, event string, data interface{}) {
 	EmitToRoom(fmt.Sprintf("user-%v", userID), event, data)
 }
 
-func IssueDisplaySocketTicket(room string, ttl time.Duration) (string, time.Time, error) {
+// IssueSocketTicket mints a short-lived, single-room ticket. Call it only from
+// a route that has already authorised the caller for that room.
+func IssueSocketTicket(room string, ttl time.Duration) (string, time.Time, error) {
 	room = strings.TrimSpace(room)
 	if room == "" {
 		return "", time.Time{}, fmt.Errorf("room required")
@@ -419,36 +470,46 @@ func IssueDisplaySocketTicket(room string, ttl time.Duration) (string, time.Time
 	}
 	ticket := fmt.Sprintf("%x", buffer)
 	expiresAt := time.Now().Add(ttl)
-	displaySocketTickets.mu.Lock()
-	defer displaySocketTickets.mu.Unlock()
-	cleanupExpiredDisplayTicketsLocked()
-	displaySocketTickets.items[ticket] = socketTicket{room: room, expiresAt: expiresAt}
+	socketTickets.mu.Lock()
+	defer socketTickets.mu.Unlock()
+	cleanupExpiredTicketsLocked()
+	socketTickets.items[ticket] = socketTicket{room: room, expiresAt: expiresAt}
 	return ticket, expiresAt, nil
 }
 
-func validateDisplaySocketTicket(ticket string) (string, bool) {
+// IssueDisplaySocketTicket is the classroom-display spelling of
+// IssueSocketTicket, kept so the display handler reads the way it always has.
+func IssueDisplaySocketTicket(room string, ttl time.Duration) (string, time.Time, error) {
+	return IssueSocketTicket(room, ttl)
+}
+
+// validateSocketTicket returns the one room the ticket was minted for. The
+// caller must still check that room is the kind it expects — see the
+// prefix check in handleMessage — so a ticket for a display room can never be
+// used to walk into an instructor room.
+func validateSocketTicket(ticket string) (string, bool) {
 	ticket = strings.TrimSpace(ticket)
 	if ticket == "" {
 		return "", false
 	}
-	displaySocketTickets.mu.Lock()
-	defer displaySocketTickets.mu.Unlock()
-	cleanupExpiredDisplayTicketsLocked()
-	item, ok := displaySocketTickets.items[ticket]
+	socketTickets.mu.Lock()
+	defer socketTickets.mu.Unlock()
+	cleanupExpiredTicketsLocked()
+	item, ok := socketTickets.items[ticket]
 	if !ok || time.Now().After(item.expiresAt) {
 		if ok {
-			delete(displaySocketTickets.items, ticket)
+			delete(socketTickets.items, ticket)
 		}
 		return "", false
 	}
 	return item.room, true
 }
 
-func cleanupExpiredDisplayTicketsLocked() {
+func cleanupExpiredTicketsLocked() {
 	now := time.Now()
-	for ticket, item := range displaySocketTickets.items {
+	for ticket, item := range socketTickets.items {
 		if now.After(item.expiresAt) {
-			delete(displaySocketTickets.items, ticket)
+			delete(socketTickets.items, ticket)
 		}
 	}
 }
