@@ -1092,10 +1092,16 @@ func (h *AttendanceHandler) UpdateAttendanceRecord(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
 	}
-	if err := repositories.UpdateAttendanceRecord(uint(sessionID), uint(studentID), input.Status, input.Note, updatedBy); err != nil {
+	previous, err := repositories.UpdateAttendanceRecordReturningPrevious(uint(sessionID), uint(studentID), input.Status, input.Note, updatedBy)
+	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update record"})
 	}
-	logCourseActivity(c, detail.CourseID, updatedBy, "update_attendance_record", "attendance", "attendance_session", detail.ID, detail.Title, fiber.Map{"student_id": studentID, "status": input.Status})
+	recordDetail := withChanges(
+		fiber.Map{"student_id": studentID, "status": input.Status},
+		map[string]interface{}{"status": previous.Status, "note": previous.Note},
+		map[string]interface{}{"status": input.Status, "note": input.Note},
+	)
+	logCourseActivity(c, detail.CourseID, updatedBy, "update_attendance_record", "attendance", "attendance_session", detail.ID, detail.Title, recordDetail)
 	reqID, traceID, ip := services.ExtractMeta(c)
 	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
 		CourseID:    detail.CourseID,
@@ -2049,6 +2055,11 @@ func BulkUpdateAttendanceRecordsHandler(c fiber.Ctx) error {
 	if err := repositories.BulkUpdateAttendanceRecords(uint(sessionID), input.Updates, updatedBy); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to bulk update records"})
 	}
-	logCourseActivity(c, detail.CourseID, updatedBy, "bulk_update_attendance_records", "attendance", "attendance_session", detail.ID, detail.Title, fiber.Map{"count": len(input.Updates)})
+	attendanceEntries := make([]fiber.Map, 0, len(input.Updates))
+	for _, update := range input.Updates {
+		attendanceEntries = append(attendanceEntries, fiber.Map{"student_id": update.StudentID, "status": update.Status})
+	}
+	logCourseActivity(c, detail.CourseID, updatedBy, "bulk_update_attendance_records", "attendance", "attendance_session", detail.ID, detail.Title,
+		withItemEntries(fiber.Map{"count": len(input.Updates)}, "record_updates", attendanceEntries))
 	return c.JSON(fiber.Map{"success": true, "message": "Records updated"})
 }

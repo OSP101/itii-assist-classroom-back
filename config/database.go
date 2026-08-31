@@ -624,6 +624,42 @@ func MigratePerformanceIndexes() {
 		// system_logs and course_activity_logs already carry a created_at index
 		// from their model tags and are deliberately not repeated here.
 		{
+			// The activity log's subject view asks "everything about this one
+			// student/assignment". Half that question is answered by the target
+			// columns, which without this index means a full scan of the
+			// course's history for every lookup.
+			name:       "course_activity_logs_target",
+			object:     "idx_course_activity_logs_target",
+			concurrent: true,
+			sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_course_activity_logs_target
+			      ON course_activity_logs (course_id, target_type, target_id, created_at DESC)
+			      WHERE target_type <> ''`,
+		},
+		{
+			// The other half of the subject view is jsonb containment against
+			// detail (see handlers/course_activity_log_subject.go), which only
+			// the @> operator class can serve. jsonb_path_ops is the smaller of
+			// the two and supports containment, which is all this query uses.
+			name:       "course_activity_logs_detail_gin",
+			object:     "idx_course_activity_logs_detail_gin",
+			concurrent: true,
+			sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_course_activity_logs_detail_gin
+			      ON course_activity_logs USING gin (detail jsonb_path_ops)`,
+		},
+		{
+			// The access-log purge deletes only category = 'access'. The plain
+			// created_at index cannot serve that: it would have to walk every
+			// row of every category to find the access ones. This partial index
+			// covers exactly the purge predicate, and stays small because it
+			// indexes one category rather than the whole table.
+			name:       "course_activity_logs_access_created_at",
+			object:     "idx_course_activity_logs_access_created_at",
+			concurrent: true,
+			sql: `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_course_activity_logs_access_created_at
+			      ON course_activity_logs (created_at)
+			      WHERE category = 'access'`,
+		},
+		{
 			name: "attendance_pin_histories_created_at",
 			sql:  `CREATE INDEX IF NOT EXISTS idx_attendance_pin_histories_created_at ON attendance_pin_histories (created_at)`,
 		},

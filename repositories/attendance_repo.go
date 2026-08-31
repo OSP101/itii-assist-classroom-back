@@ -1205,7 +1205,28 @@ func DeleteAttendanceSession(id uint) error {
 // ============================================================
 
 func UpdateAttendanceRecord(sessionID uint, studentID uint, status string, note string, updatedBy uint) error {
-	return config.DB.Transaction(func(tx *gorm.DB) error {
+	_, err := UpdateAttendanceRecordReturningPrevious(sessionID, studentID, status, note, updatedBy)
+	return err
+}
+
+// AttendanceRecordSnapshot is a record's state before an instructor edited it.
+//
+// A student with no record yet is materialised as "absent" by
+// ensureAttendanceRecordInTx before the edit lands, and that is reported as the
+// previous status rather than as an empty one: absent is exactly what the
+// student counted as up to that moment.
+type AttendanceRecordSnapshot struct {
+	Status string
+	Note   string
+}
+
+// UpdateAttendanceRecordReturningPrevious changes a record and reports what it
+// held before. The previous state is read inside the same locked transaction as
+// the write, so it is always the state that was actually replaced.
+func UpdateAttendanceRecordReturningPrevious(sessionID uint, studentID uint, status string, note string, updatedBy uint) (AttendanceRecordSnapshot, error) {
+	var previous AttendanceRecordSnapshot
+
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
 		var session models.AttendanceSession
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&session, sessionID).Error; err != nil {
 			return err
@@ -1214,6 +1235,9 @@ func UpdateAttendanceRecord(sessionID uint, studentID uint, status string, note 
 		record, err := ensureAttendanceRecordInTx(tx, &session, studentID)
 		if err != nil {
 			return err
+		}
+		if record != nil {
+			previous = AttendanceRecordSnapshot{Status: record.Status, Note: record.Note}
 		}
 
 		sectionIDs, err := attendanceSessionSectionIDsWithDB(tx, &session)
@@ -1239,6 +1263,8 @@ func UpdateAttendanceRecord(sessionID uint, studentID uint, status string, note 
 				"updated_at": now,
 			}).Error
 	})
+
+	return previous, err
 }
 
 func BulkUpdateAttendanceRecords(sessionID uint, updates []AttendanceRecordUpdate, updatedBy uint) error {

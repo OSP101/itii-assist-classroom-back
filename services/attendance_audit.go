@@ -316,6 +316,11 @@ func LogAttendanceCheckIn(db *gorm.DB, ev AttendanceCheckInEvent) {
 		return
 	}
 
+	// The forensic record below is for operators. Refused check-ins are also
+	// mirrored into the course's own activity log so the instructor running the
+	// class sees them without going through system_logs.
+	MirrorAttendanceCheckIn(db, ev)
+
 	writeAttendanceSystemLog(auditWritePool, db, "audit: failed to write attendance check-in log", []any{"result", ev.Result, "session_id", ev.SessionID}, func(ctx context.Context) (models.SystemLog, map[string]any, bool) {
 		severity := "info"
 		switch ev.Result {

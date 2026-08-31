@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"itii-assist/config"
 	"itii-assist/models"
+	"itii-assist/services"
 	"strconv"
 	"time"
 
@@ -88,17 +89,19 @@ func buildScoreDistribution(scores []models.Score, maxScore float64) []fiber.Map
 	return result
 }
 
-// GET /api/courses/:courseId/activity-logs
-func GetCourseActivityLogsHandler(c fiber.Ctx) error {
-	courseID := c.Params("courseId")
-	page := parsePositiveIntQuery(c.Query("page"), 1)
-	limit := parsePositiveIntQuery(c.Query("limit"), 30)
-	if limit > 100 {
-		limit = 100
+// applyActivityLogFilters applies every query-string filter the list and export
+// endpoints share, so the two can never drift apart and export a different set
+// of rows than the screen showed.
+func applyActivityLogFilters(query *gorm.DB, c fiber.Ctx) *gorm.DB {
+	// eventType separates the two kinds of row now stored in this table:
+	// "changes" is everything that modified something, "access" is the read
+	// audit. Empty means both, which is the default view.
+	switch c.Query("eventType") {
+	case "access":
+		query = query.Where("category = ?", services.CourseAccessCategory)
+	case "changes":
+		query = query.Where("category <> ?", services.CourseAccessCategory)
 	}
-	offset := (page - 1) * limit
-
-	query := config.DB.Model(&models.CourseActivityLog{}).Where("course_id = ?", courseID)
 	if category := c.Query("category"); category != "" {
 		query = query.Where("category = ?", category)
 	}
@@ -108,6 +111,10 @@ func GetCourseActivityLogsHandler(c fiber.Ctx) error {
 	if actorID := c.Query("actorId"); actorID != "" {
 		query = query.Where("actor_user_id = ?", actorID)
 	}
+	if role := c.Query("actorRole"); role != "" {
+		query = query.Where("actor_role = ?", role)
+	}
+	query = applySubjectFilter(query, c.Query("subjectType"), c.Query("subjectId"))
 	if startDate := c.Query("startDate"); startDate != "" {
 		if parsed, err := time.Parse("2006-01-02", startDate); err == nil {
 			query = query.Where("created_at >= ?", parsed)
@@ -122,6 +129,21 @@ func GetCourseActivityLogsHandler(c fiber.Ctx) error {
 		like := "%" + search + "%"
 		query = query.Where("target_name ILIKE ? OR action ILIKE ?", like, like)
 	}
+	return query
+}
+
+// GET /api/courses/:courseId/activity-logs
+func GetCourseActivityLogsHandler(c fiber.Ctx) error {
+	courseID := c.Params("courseId")
+	page := parsePositiveIntQuery(c.Query("page"), 1)
+	limit := parsePositiveIntQuery(c.Query("limit"), 30)
+	if limit > 100 {
+		limit = 100
+	}
+	offset := (page - 1) * limit
+
+	query := config.DB.Model(&models.CourseActivityLog{}).Where("course_id = ?", courseID)
+	query = applyActivityLogFilters(query, c)
 
 	var total int64
 	if err := query.Count(&total).Error; err != nil {
@@ -133,42 +155,9 @@ func GetCourseActivityLogsHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch activity logs"})
 	}
 
-	actorIDs := make([]uint, 0, len(logs))
-	actorSet := map[uint]struct{}{}
-	for _, log := range logs {
-		if _, ok := actorSet[log.ActorUserID]; !ok {
-			actorSet[log.ActorUserID] = struct{}{}
-			actorIDs = append(actorIDs, log.ActorUserID)
-		}
-	}
-
-	usersByID, err := fetchUsersByID(actorIDs)
+	items, err := buildActivityLogItems(logs)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch activity logs"})
-	}
-
-	items := make([]fiber.Map, 0, len(logs))
-	for _, log := range logs {
-		item := fiber.Map{
-			"id":            log.ID,
-			"course_id":     log.CourseID,
-			"actor_user_id": log.ActorUserID,
-			"actor_email":   log.ActorEmail,
-			"actor_role":    log.ActorRole,
-			"action":        log.Action,
-			"category":      log.Category,
-			"target_type":   log.TargetType,
-			"target_id":     log.TargetID,
-			"target_name":   log.TargetName,
-			"detail":        log.Detail,
-			"ip_address":    log.IPAddress,
-			"user_agent":    log.UserAgent,
-			"created_at":    log.CreatedAt,
-		}
-		if actor, ok := usersByID[log.ActorUserID]; ok {
-			item["actor"] = buildActorPayload(actor)
-		}
-		items = append(items, item)
 	}
 
 	totalPages := 0
@@ -195,68 +184,16 @@ func ExportCourseActivityLogsHandler(c fiber.Ctx) error {
 	courseID := c.Params("courseId")
 
 	query := config.DB.Model(&models.CourseActivityLog{}).Where("course_id = ?", courseID)
-	if category := c.Query("category"); category != "" {
-		query = query.Where("category = ?", category)
-	}
-	if action := c.Query("action"); action != "" {
-		query = query.Where("action = ?", action)
-	}
-	if actorID := c.Query("actorId"); actorID != "" {
-		query = query.Where("actor_user_id = ?", actorID)
-	}
-	if startDate := c.Query("startDate"); startDate != "" {
-		if parsed, err := time.Parse("2006-01-02", startDate); err == nil {
-			query = query.Where("created_at >= ?", parsed)
-		}
-	}
-	if endDate := c.Query("endDate"); endDate != "" {
-		if parsed, err := time.Parse("2006-01-02", endDate); err == nil {
-			query = query.Where("created_at <= ?", parsed.Add(24*time.Hour-time.Nanosecond))
-		}
-	}
-	if search := c.Query("search"); search != "" {
-		like := "%" + search + "%"
-		query = query.Where("target_name ILIKE ? OR action ILIKE ?", like, like)
-	}
+	query = applyActivityLogFilters(query, c)
 
 	var logs []models.CourseActivityLog
 	if err := query.Order("created_at ASC").Limit(10000).Find(&logs).Error; err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to export activity logs"})
 	}
 
-	actorIDs := make([]uint, 0, len(logs))
-	actorSet := map[uint]struct{}{}
-	for _, log := range logs {
-		if _, ok := actorSet[log.ActorUserID]; !ok {
-			actorSet[log.ActorUserID] = struct{}{}
-			actorIDs = append(actorIDs, log.ActorUserID)
-		}
-	}
-
-	usersByID, _ := fetchUsersByID(actorIDs)
-
-	items := make([]fiber.Map, 0, len(logs))
-	for _, log := range logs {
-		item := fiber.Map{
-			"id":            log.ID,
-			"course_id":     log.CourseID,
-			"actor_user_id": log.ActorUserID,
-			"actor_email":   log.ActorEmail,
-			"actor_role":    log.ActorRole,
-			"action":        log.Action,
-			"category":      log.Category,
-			"target_type":   log.TargetType,
-			"target_id":     log.TargetID,
-			"target_name":   log.TargetName,
-			"detail":        log.Detail,
-			"ip_address":    log.IPAddress,
-			"user_agent":    log.UserAgent,
-			"created_at":    log.CreatedAt,
-		}
-		if actor, ok := usersByID[log.ActorUserID]; ok {
-			item["actor"] = buildActorPayload(actor)
-		}
-		items = append(items, item)
+	items, err := buildActivityLogItems(logs)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to export activity logs"})
 	}
 
 	return c.JSON(fiber.Map{
@@ -428,9 +365,12 @@ func GetCourseActivityFiltersHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch activity filters"})
 	}
 
+	// actor_user_id 0 marks an event no user account performed (a student's
+	// blocked check-in, say); it must not become a phantom entry in the
+	// "who did it" filter.
 	if err := config.DB.Model(&models.CourseActivityLog{}).
 		Distinct("actor_user_id").
-		Where("course_id = ?", courseID).
+		Where("course_id = ? AND actor_user_id <> 0", courseID).
 		Scan(&actors).Error; err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch activity filters"})
 	}

@@ -62,10 +62,19 @@ func GetOrCreateExamSettings(courseID string) ([]models.ExamSetting, error) {
 }
 
 func UpdateExamSetting(settingID uint, courseID string, maxScore *float64, isVisible *bool, isActive *bool) (*models.ExamSetting, error) {
+	_, updated, err := UpdateExamSettingReturningPrevious(settingID, courseID, maxScore, isVisible, isActive)
+	return updated, err
+}
+
+// UpdateExamSettingReturningPrevious updates a setting and returns both the row
+// as it was and the row as it now is, so callers can log what actually changed.
+func UpdateExamSettingReturningPrevious(settingID uint, courseID string, maxScore *float64, isVisible *bool, isActive *bool) (*models.ExamSetting, *models.ExamSetting, error) {
 	var setting models.ExamSetting
 	if err := config.DB.Where("id = ? AND course_id = ?", settingID, courseID).First(&setting).Error; err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	previous := setting
+
 	if maxScore != nil {
 		setting.MaxScore = *maxScore
 	}
@@ -76,7 +85,7 @@ func UpdateExamSetting(settingID uint, courseID string, maxScore *float64, isVis
 		setting.IsActive = *isActive
 	}
 	config.DB.Save(&setting)
-	return &setting, nil
+	return &previous, &setting, nil
 }
 
 // ============================================================
@@ -243,17 +252,27 @@ func GetExamSettingByCourse(courseID string, settingID uint) (*models.ExamSettin
 }
 
 func SaveExamScore(settingID uint, studentID uint, score *float64, comment string, gradedBy uint) (*ExamScoreViewEntry, error) {
+	entry, _, err := SaveExamScoreReturningPrevious(settingID, studentID, score, comment, gradedBy)
+	return entry, err
+}
+
+// SaveExamScoreReturningPrevious upserts an exam score and hands back the row as
+// it was before the write, or nil when this is the first entry for the pair.
+func SaveExamScoreReturningPrevious(settingID uint, studentID uint, score *float64, comment string, gradedBy uint) (*ExamScoreViewEntry, *models.ExamScore, error) {
 	var examScore models.ExamScore
+	var previous *models.ExamScore
 	now := time.Now()
 
 	err := config.DB.Where("exam_setting_id = ? AND student_id = ?", settingID, studentID).First(&examScore).Error
 	if err == nil {
+		snapshot := examScore
+		previous = &snapshot
 		examScore.Score = score
 		examScore.Comment = comment
 		examScore.GradedBy = &gradedBy
 		examScore.GradedAt = &now
 		if err := config.DB.Save(&examScore).Error; err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	} else if errors.Is(err, gorm.ErrRecordNotFound) {
 		examScore = models.ExamScore{
@@ -266,10 +285,10 @@ func SaveExamScore(settingID uint, studentID uint, score *float64, comment strin
 			CreatedAt:     now,
 		}
 		if err := config.DB.Create(&examScore).Error; err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	} else {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var graderName *string
@@ -289,7 +308,7 @@ func SaveExamScore(settingID uint, studentID uint, score *float64, comment strin
 		GraderID:      examScore.GradedBy,
 		GraderName:    graderName,
 		GradedAt:      examScore.GradedAt,
-	}, nil
+	}, previous, nil
 }
 
 func GetCourseStudentIDMap(courseID string) (map[string]uint, error) {

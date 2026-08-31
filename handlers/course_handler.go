@@ -527,6 +527,21 @@ func CreateCourseHandler(c fiber.Ctx) error {
 // PUT /api/courses/:id
 // =============================================================================
 
+// courseChangeFields is the slice of a course an instructor would want to see
+// an edit of. Cosmetic fields (cover position, zoom) are left out on purpose:
+// they change often and say nothing about how the course is run.
+func courseChangeFields(course models.Course) map[string]interface{} {
+	return map[string]interface{}{
+		"code":                course.Code,
+		"name":                course.Name,
+		"year":                course.Year,
+		"semester":            course.Semester,
+		"description":         course.Description,
+		"is_active":           course.IsActive,
+		"attention_threshold": course.AttentionThreshold,
+	}
+}
+
 func UpdateCourseHandler(c fiber.Ctx) error {
 	id := c.Params("id")
 	actorID := c.Locals("user_id").(uint)
@@ -657,6 +672,9 @@ func UpdateCourseHandler(c fiber.Ctx) error {
 	if shouldUpdateInstructors {
 		logDetail["instructor_ids"] = instructorIDs
 	}
+	// course.Course is the row as it was loaded, before the field-by-field
+	// updates above were applied to the copy.
+	logDetail = withChanges(logDetail, courseChangeFields(course.Course), courseChangeFields(updated))
 	logCourseActivity(c, id, actorID, "update_course", "course", "course", id, updated.Name, logDetail)
 	logPrivilegedAdminAction(c, actorID, "update_course", "warn", "courses", id, fiber.Map{
 		"target_type": "course",
@@ -1084,7 +1102,8 @@ func BulkAddTAsHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": message})
 	}
 	log.Printf("[courses] bulk add TAs result course=%s actor=%d added=%d skipped=%d added_user_ids=%v", courseID, actorID, len(addedUsers), skipped, userIDs)
-	logCourseActivity(c, courseID, actorID, "bulk_add_tas", "member", "course", courseID, "", fiber.Map{"added": len(addedUsers), "skipped": skipped})
+	logCourseActivity(c, courseID, actorID, "bulk_add_tas", "member", "course", courseID, "",
+		withItemIDs(fiber.Map{"added": len(addedUsers), "skipped": skipped}, "added_user_ids", userIDsOf(addedUsers)))
 	logPrivilegedAdminAction(c, actorID, "bulk_add_course_tas", "warn", "course_members", courseID, fiber.Map{
 		"target_type":   "course_member_bulk",
 		"course_id":     courseID,
@@ -1232,7 +1251,8 @@ func BulkAddInstructorsHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "เพิ่มอาจารย์ไม่สำเร็จ"})
 	}
-	logCourseActivity(c, courseID, actorID, "bulk_add_instructors", "member", "course", courseID, "", fiber.Map{"added": len(addedUsers), "skipped": skipped})
+	logCourseActivity(c, courseID, actorID, "bulk_add_instructors", "member", "course", courseID, "",
+		withItemIDs(fiber.Map{"added": len(addedUsers), "skipped": skipped}, "added_user_ids", userIDsOf(addedUsers)))
 	logPrivilegedAdminAction(c, actorID, "bulk_add_course_instructors", "warn", "course_members", courseID, fiber.Map{
 		"target_type":   "course_member_bulk",
 		"course_id":     courseID,
@@ -1474,7 +1494,11 @@ func BulkAddStudentsToSectionHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "เพิ่มนักศึกษาไม่สำเร็จ"})
 	}
-	logCourseActivity(c, courseID, actorID, "bulk_add_students", "member", "section", sectionID, "", fiber.Map{"added": bulkResult.Added, "moved": bulkResult.Moved, "skipped": bulkResult.Skipped})
+	studentsDetail := fiber.Map{"added": bulkResult.Added, "moved": bulkResult.Moved, "skipped": bulkResult.Skipped}
+	studentsDetail = withItemIDs(studentsDetail, "added_student_ids", bulkResult.AddedIDs)
+	studentsDetail = withItemIDs(studentsDetail, "moved_student_ids", bulkResult.MovedIDs)
+	studentsDetail = withItemIDs(studentsDetail, "skipped_student_ids", bulkResult.SkippedIDs)
+	logCourseActivity(c, courseID, actorID, "bulk_add_students", "member", "section", sectionID, "", studentsDetail)
 	return c.Status(201).JSON(fiber.Map{
 		"success": true,
 		"message": "เพิ่มนักศึกษาสำเร็จ",
@@ -1558,10 +1582,14 @@ func (h *CourseHandler) MoveStudentToSection(c fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบนักศึกษาในกลุ่มเรียนต้นทาง"})
 	}
 
-	logCourseActivity(c, courseID, actorID, "move_student", "member", "student", studentID, "", fiber.Map{
-		"from_section_id": fromSectionID,
-		"to_section_id":   input.TargetSectionID,
-	})
+	logCourseActivity(c, courseID, actorID, "move_student", "member", "student", studentID, "", withChanges(
+		fiber.Map{
+			"from_section_id": fromSectionID,
+			"to_section_id":   input.TargetSectionID,
+		},
+		map[string]interface{}{"section_id": fromSectionID},
+		map[string]interface{}{"section_id": input.TargetSectionID},
+	))
 
 	reqID, _, ip := services.ExtractMeta(c)
 	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{

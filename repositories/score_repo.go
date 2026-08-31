@@ -35,6 +35,16 @@ func GetScoresForAssignment(assignmentID uint) ([]models.Score, error) {
 }
 
 func SubmitScore(score *models.Score) error {
+	_, err := SubmitScoreReturningPrevious(score)
+	return err
+}
+
+// SubmitScoreReturningPrevious upserts a score and hands back the row as it was
+// before the write, or nil when this is the first grade for the pair. The
+// previous value is only knowable inside this function's own lookup: a caller
+// that queried for it separately would race with a concurrent grader and could
+// report a "from" value that was never the one being replaced.
+func SubmitScoreReturningPrevious(score *models.Score) (*models.Score, error) {
 	db := config.DB
 	now := time.Now()
 	score.GradedAt = &now
@@ -51,9 +61,11 @@ func SubmitScore(score *models.Score) error {
 
 	result := q.Limit(1).Find(&existing)
 	if result.Error != nil {
-		return result.Error
+		return nil, result.Error
 	}
 	if result.RowsAffected > 0 {
+		previous := existing
+
 		// Update
 		existing.Score = score.Score
 		existing.Comment = score.Comment
@@ -61,17 +73,17 @@ func SubmitScore(score *models.Score) error {
 		existing.GradedAt = &now
 		existing.Status = "graded"
 		if err := db.Save(&existing).Error; err != nil {
-			return err
+			return nil, err
 		}
 		InvalidateCourseOverviewCacheByAssignment(score.AssignmentID)
-		return nil
+		return &previous, nil
 	}
 
 	if err := db.Create(score).Error; err != nil {
-		return err
+		return nil, err
 	}
 	InvalidateCourseOverviewCacheByAssignment(score.AssignmentID)
-	return nil
+	return nil, nil
 }
 
 func BulkUpsertScores(scores []models.Score) error {

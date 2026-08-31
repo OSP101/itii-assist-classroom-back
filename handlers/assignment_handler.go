@@ -198,6 +198,26 @@ func buildUpdateSubItems(subItems *[]assignmentSubItemInput, replaceSubItems *[]
 }
 
 // PUT /api/assignments/:id
+// assignmentChangeFields is the slice of an assignment worth diffing in the
+// activity log. Max score, due date and draft status are the edits students
+// notice, so they are the edits an instructor may need to account for later.
+func assignmentChangeFields(assignment models.Assignment) map[string]interface{} {
+	fields := map[string]interface{}{
+		"name":              assignment.Name,
+		"description":       assignment.Description,
+		"assignment_type":   assignment.AssignmentType,
+		"max_score":         assignment.MaxScore,
+		"week_number":       assignment.WeekNumber,
+		"is_score_visible":  assignment.IsScoreVisible,
+		"is_draft":          assignment.IsDraft,
+		"attendance_policy": assignment.AttendanceCondition,
+	}
+	if assignment.DueDate != nil {
+		fields["due_date"] = assignment.DueDate.Format(time.RFC3339)
+	}
+	return fields
+}
+
 func UpdateAssignmentHandler(c fiber.Ctx) error {
 	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
 	if err != nil {
@@ -302,14 +322,21 @@ func UpdateAssignmentHandler(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load updated assignment"})
 	}
-	logCourseActivity(c, a.CourseID, actorID, "update_assignment", "assignment", "assignment", a.ID, a.Name, fiber.Map{
+	assignmentDetail := fiber.Map{
 		"assignment_type":   a.AssignmentType,
 		"week_number":       a.WeekNumber,
 		"max_score":         a.MaxScore,
 		"replace_sub_items": subItemsPtr != nil,
 		"attendance_links":  sessionIDsToSave,
 		"attendance_policy": a.AttendanceCondition,
-	})
+	}
+	// existingAssignment.Assignment is the row as loaded, before the field-by-field
+	// updates above were applied to the copy in `a`.
+	assignmentDetail = withChanges(assignmentDetail,
+		assignmentChangeFields(existingAssignment.Assignment),
+		assignmentChangeFields(a),
+	)
+	logCourseActivity(c, a.CourseID, actorID, "update_assignment", "assignment", "assignment", a.ID, a.Name, assignmentDetail)
 	wasPublished := existingAssignment.IsDraft && !a.IsDraft
 	realtime.EmitDataUpdate("assignment", "update", a.ID, fiber.Map{
 		"courseId":     a.CourseID,

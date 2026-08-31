@@ -22,6 +22,11 @@ import (
 // accumulated rows can be spread over several days instead of stalling the
 // database for hours.
 
+// courseAccessLogCategory mirrors services.CourseAccessCategory. It is repeated
+// here rather than imported because services depends on repositories, and the
+// value is bound as a parameter, never interpolated.
+const courseAccessLogCategory = "access"
+
 const (
 	retentionBatchSize  = 5000
 	retentionMaxBatches = 200 // ceiling per table per run: 1M rows
@@ -33,17 +38,44 @@ type RetentionPolicy struct {
 	// Table is interpolated into SQL, so it must never come from user input.
 	// Every value lives in retentionPolicies() below.
 	Table string
+	// Name identifies the policy when one table has more than one window (the
+	// activity log expires read events sooner than changes). Empty means Table.
+	Name string
 	// EnvVar overrides AgeDays at runtime, e.g. RETENTION_SYSTEM_LOGS_DAYS=30.
 	EnvVar  string
 	AgeDays int
 	// Where is an extra predicate ANDed onto the age check. Same rule as Table:
-	// literals only.
+	// literals only, and any value it compares against must be a `?` bound
+	// through WhereArgs rather than written into the string.
 	Where string
+	// WhereArgs are bound to the placeholders in Where, in order.
+	WhereArgs []any
+}
+
+// Key is the policy's identity for logging and for the uniqueness check in the
+// tests. Two policies may share a table only if they have distinct names.
+func (p RetentionPolicy) Key() string {
+	if strings.TrimSpace(p.Name) != "" {
+		return p.Name
+	}
+	return p.Table
 }
 
 func retentionPolicies() []RetentionPolicy {
 	return []RetentionPolicy{
 		{Table: "system_logs", EnvVar: "RETENTION_SYSTEM_LOGS_DAYS", AgeDays: 90},
+		// Read events (who opened what) are far more numerous than changes and
+		// lose their value quickly, so they expire well before the change
+		// history below. Listed first so these cheap rows go before the general
+		// 180-day pass spends its batch ceiling on them.
+		{
+			Table:     "course_activity_logs",
+			Name:      "course_activity_logs_access",
+			EnvVar:    "RETENTION_COURSE_ACCESS_LOGS_DAYS",
+			AgeDays:   90,
+			Where:     "category = ?",
+			WhereArgs: []any{courseAccessLogCategory},
+		},
 		{Table: "course_activity_logs", EnvVar: "RETENTION_COURSE_ACTIVITY_LOGS_DAYS", AgeDays: 180},
 		{Table: "attendance_pin_histories", EnvVar: "RETENTION_ATTENDANCE_PIN_HISTORIES_DAYS", AgeDays: 30},
 		{Table: "notification_logs", EnvVar: "RETENTION_NOTIFICATION_LOGS_DAYS", AgeDays: 60},
@@ -94,7 +126,7 @@ func PurgeExpiredLogs() []RetentionResult {
 	for _, policy := range retentionPolicies() {
 		result, err := purgeTable(policy)
 		if err != nil {
-			log.Printf("⚠️  Retention purge failed for %s: %v", policy.Table, err)
+			log.Printf("⚠️  Retention purge failed for %s: %v", policy.Key(), err)
 			continue
 		}
 		results = append(results, result)
@@ -104,12 +136,13 @@ func PurgeExpiredLogs() []RetentionResult {
 
 func purgeTable(policy RetentionPolicy) (RetentionResult, error) {
 	cutoff := time.Now().AddDate(0, 0, -policy.resolveAgeDays())
-	result := RetentionResult{Table: policy.Table}
+	result := RetentionResult{Table: policy.Key()}
 
 	statement := buildPurgeStatement(policy)
+	args := append([]any{cutoff}, policy.WhereArgs...)
 
 	for batch := 0; batch < retentionMaxBatches; batch++ {
-		execution := config.DB.Exec(statement, cutoff)
+		execution := config.DB.Exec(statement, args...)
 		if execution.Error != nil {
 			return result, execution.Error
 		}
@@ -130,7 +163,7 @@ func purgeTable(policy RetentionPolicy) (RetentionResult, error) {
 
 // buildPurgeStatement renders the batched delete for one policy. Table and
 // Where are interpolated rather than bound, so they must stay literals owned by
-// retentionPolicies(); only the cutoff timestamp is a bound parameter.
+// retentionPolicies(); the cutoff timestamp and any WhereArgs are bound.
 //
 // ctid is PostgreSQL-specific and is used on purpose: it lets the subquery pick
 // an arbitrary batch of matching rows without sorting, and without depending on

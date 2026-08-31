@@ -57,18 +57,26 @@ func TestRetentionPoliciesAreWellFormed(t *testing.T) {
 		if policy.Table == "" || policy.EnvVar == "" {
 			t.Fatalf("policy %+v is missing Table or EnvVar", policy)
 		}
-		if seen[policy.Table] {
-			t.Fatalf("duplicate policy for table %q", policy.Table)
+		// One table may carry several windows (the activity log expires read
+		// events sooner than changes), but each must be distinctly named.
+		if seen[policy.Key()] {
+			t.Fatalf("duplicate policy %q", policy.Key())
 		}
-		seen[policy.Table] = true
+		seen[policy.Key()] = true
 
 		if policy.AgeDays < retentionMinAgeDays {
 			t.Fatalf("policy for %q has AgeDays=%d, below the %d-day floor", policy.Table, policy.AgeDays, retentionMinAgeDays)
 		}
 		for _, forbidden := range []string{";", "--", "'", "/*"} {
 			if strings.Contains(policy.Table, forbidden) || strings.Contains(policy.Where, forbidden) {
-				t.Fatalf("policy for %q contains %q, which must never reach interpolated SQL", policy.Table, forbidden)
+				t.Fatalf("policy for %q contains %q, which must never reach interpolated SQL", policy.Key(), forbidden)
 			}
+		}
+
+		// Every placeholder in Where must have a bound argument, and no policy
+		// may bind arguments it has no placeholders for.
+		if got, want := strings.Count(policy.Where, "?"), len(policy.WhereArgs); got != want {
+			t.Fatalf("policy for %q has %d placeholders but %d bound args", policy.Key(), got, want)
 		}
 	}
 

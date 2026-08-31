@@ -3,6 +3,7 @@ package handlers
 import (
 	"errors"
 	"fmt"
+	"itii-assist/models"
 	"itii-assist/repositories"
 	"itii-assist/services"
 	"strconv"
@@ -31,6 +32,19 @@ func GetExamSettingsHandler(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "data": settings})
 }
 
+// examSettingChangeFields is the part of an exam setting worth diffing: the
+// score ceiling and whether students can see the result.
+func examSettingChangeFields(setting *models.ExamSetting) map[string]interface{} {
+	if setting == nil {
+		return nil
+	}
+	return map[string]interface{}{
+		"max_score":  setting.MaxScore,
+		"is_visible": setting.IsVisible,
+		"is_active":  setting.IsActive,
+	}
+}
+
 // PUT /api/courses/:courseId/exam-settings/:id
 func UpdateExamSettingHandler(c fiber.Ctx) error {
 	settingIDStr := c.Params("id")
@@ -49,12 +63,17 @@ func UpdateExamSettingHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
 	}
 
-	setting, err2 := repositories.UpdateExamSetting(uint(settingID), courseID, input.MaxScore, input.IsVisible, input.IsActive)
+	previousSetting, setting, err2 := repositories.UpdateExamSettingReturningPrevious(uint(settingID), courseID, input.MaxScore, input.IsVisible, input.IsActive)
 	if err2 != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update exam setting"})
 	}
 	actorID, _ := c.Locals("user_id").(uint)
-	logCourseActivity(c, courseID, actorID, "update_exam_setting", "score", "exam_setting", settingID, "", fiber.Map{"max_score": input.MaxScore, "is_visible": input.IsVisible, "is_active": input.IsActive})
+	settingDetail := withChanges(
+		fiber.Map{"max_score": input.MaxScore, "is_visible": input.IsVisible, "is_active": input.IsActive},
+		examSettingChangeFields(previousSetting),
+		examSettingChangeFields(setting),
+	)
+	logCourseActivity(c, courseID, actorID, "update_exam_setting", "score", "exam_setting", settingID, "", settingDetail)
 	return c.JSON(fiber.Map{"success": true, "data": setting})
 }
 
@@ -109,12 +128,21 @@ func (h *ExamHandler) UpsertExamScore(c fiber.Ctx) error {
 	}
 
 	gradedBy := c.Locals("user_id").(uint)
-	saved, err := repositories.SaveExamScore(input.ExamSettingID, input.StudentID, input.Score, input.Comment, gradedBy)
+	saved, previousExamScore, err := repositories.SaveExamScoreReturningPrevious(input.ExamSettingID, input.StudentID, input.Score, input.Comment, gradedBy)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to upsert exam score"})
 	}
 	courseID := c.Params("courseId")
-	logCourseActivity(c, courseID, gradedBy, "submit_exam_score", "score", "student", input.StudentID, "", fiber.Map{"exam_setting_id": input.ExamSettingID, "score": input.Score})
+	examScoreDetail := fiber.Map{"exam_setting_id": input.ExamSettingID, "score": input.Score}
+	if previousExamScore != nil {
+		examScoreDetail = withChanges(examScoreDetail,
+			map[string]interface{}{"score": previousExamScore.Score, "comment": previousExamScore.Comment},
+			map[string]interface{}{"score": input.Score, "comment": input.Comment},
+		)
+	} else {
+		examScoreDetail["first_grade"] = true
+	}
+	logCourseActivity(c, courseID, gradedBy, "submit_exam_score", "score", "student", input.StudentID, "", examScoreDetail)
 	reqID, _, ip := services.ExtractMeta(c)
 	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
 		CourseID:    courseID,
@@ -151,6 +179,7 @@ func BulkUpsertExamScoresHandler(c fiber.Ctx) error {
 	gradedBy := c.Locals("user_id").(uint)
 	savedCount := 0
 	errorsList := []fiber.Map{}
+	savedEntries := []fiber.Map{}
 	courseID := c.Params("courseId")
 
 	if input.ExamSettingID > 0 && len(input.Scores) > 0 {
@@ -190,6 +219,7 @@ func BulkUpsertExamScoresHandler(c fiber.Ctx) error {
 				errorsList = append(errorsList, fiber.Map{"student_id": entry.StudentCode, "reason": "บันทึกคะแนนไม่สำเร็จ"})
 				continue
 			}
+			savedEntries = append(savedEntries, fiber.Map{"student_id": studentID, "score": entry.Score, "exam_setting_id": input.ExamSettingID})
 			savedCount++
 		}
 	} else if len(input.Entries) > 0 {
@@ -215,6 +245,7 @@ func BulkUpsertExamScoresHandler(c fiber.Ctx) error {
 				errorsList = append(errorsList, fiber.Map{"student_id": entry.StudentID, "reason": "บันทึกคะแนนไม่สำเร็จ"})
 				continue
 			}
+			savedEntries = append(savedEntries, fiber.Map{"student_id": entry.StudentID, "score": entry.Score, "exam_setting_id": entry.SettingID})
 			savedCount++
 		}
 	} else {
@@ -222,7 +253,11 @@ func BulkUpsertExamScoresHandler(c fiber.Ctx) error {
 	}
 
 	if savedCount > 0 {
-		logCourseActivity(c, courseID, gradedBy, "bulk_submit_exam_scores", "score", "course", courseID, "", fiber.Map{"saved": savedCount, "errors": len(errorsList)})
+		examDetail := withItemEntries(fiber.Map{"saved": savedCount, "errors": len(errorsList)}, "graded_scores", savedEntries)
+		// Rejected rows are the ones an instructor chases up, so they are kept
+		// alongside the saved ones rather than reduced to a count.
+		examDetail = withItemEntries(examDetail, "rejected_entries", errorsList)
+		logCourseActivity(c, courseID, gradedBy, "bulk_submit_exam_scores", "score", "course", courseID, "", examDetail)
 	}
 	return c.JSON(fiber.Map{
 		"success": true,

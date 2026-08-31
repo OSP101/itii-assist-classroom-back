@@ -134,7 +134,8 @@ func BulkCreateTeamsHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "สร้างกลุ่มไม่สำเร็จ"})
 	}
 	actorID, _ := c.Locals("user_id").(uint)
-	logCourseActivity(c, courseID, actorID, "bulk_create_teams", "course", "course", courseID, "", fiber.Map{"created_count": len(created), "group_type": groupType})
+	logCourseActivity(c, courseID, actorID, "bulk_create_teams", "course", "course", courseID, "",
+		withItemIDs(fiber.Map{"created_count": len(created), "group_type": groupType}, "created_team_ids", teamIDsOf(created)))
 	return c.Status(201).JSON(fiber.Map{
 		"success": true,
 		"message": "สร้างกลุ่มสำเร็จ",
@@ -190,11 +191,12 @@ func RandomizeTeamsHandler(c fiber.Ctx) error {
 	}
 
 	actorID, _ := c.Locals("user_id").(uint)
-	logCourseActivity(c, courseID, actorID, "randomize_teams", "course", "course", courseID, "", fiber.Map{
-		"created_count": len(created),
-		"group_type":    groupType,
-		"group_size":    input.GroupSize,
-	})
+	logCourseActivity(c, courseID, actorID, "randomize_teams", "course", "course", courseID, "",
+		withItemIDs(fiber.Map{
+			"created_count": len(created),
+			"group_type":    groupType,
+			"group_size":    input.GroupSize,
+		}, "created_team_ids", teamIDsOf(created)))
 
 	return c.Status(201).JSON(fiber.Map{
 		"success": true,

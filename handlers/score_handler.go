@@ -1288,10 +1288,23 @@ func (h *ScoreHandler) SubmitScore(c fiber.Ctx) error {
 		GradedAt:     &now,
 		Status:       "graded",
 	}
-	if err := repositories.SubmitScore(&score); err != nil {
+	previous, err := repositories.SubmitScoreReturningPrevious(&score)
+	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to submit score"})
 	}
-	logCourseActivity(c, assignment.CourseID, userID, "submit_score", "score", "assignment", input.AssignmentID, assignment.Name, fiber.Map{"student_id": input.StudentID, "group_id": input.GroupID, "sub_item_id": input.SubItemID, "score": input.Score})
+
+	scoreDetail := fiber.Map{"student_id": input.StudentID, "group_id": input.GroupID, "sub_item_id": input.SubItemID, "score": input.Score}
+	// A first grade has no previous value to diff against; only a regrade does,
+	// and that is the case an instructor asks about.
+	if previous != nil {
+		scoreDetail = withChanges(scoreDetail,
+			map[string]interface{}{"score": previous.Score, "comment": previous.Comment},
+			map[string]interface{}{"score": input.Score, "comment": input.Comment},
+		)
+	} else {
+		scoreDetail["first_grade"] = true
+	}
+	logCourseActivity(c, assignment.CourseID, userID, "submit_score", "score", "assignment", input.AssignmentID, assignment.Name, scoreDetail)
 	reqID, traceID, ip := services.ExtractMeta(c)
 	h.auditLogger.LogCourse(c.Context(), services.CourseEvent{
 		CourseID:    assignment.CourseID,
@@ -1361,7 +1374,19 @@ func BulkSubmitScoresHandler(c fiber.Ctx) error {
 	if err := repositories.BulkUpsertScores(scores); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to bulk submit scores"})
 	}
-	logCourseActivity(c, assignment.CourseID, userID, "bulk_submit_scores", "score", "assignment", input.AssignmentID, assignment.Name, fiber.Map{"count": len(scores)})
+	gradedEntries := make([]fiber.Map, 0, len(scores))
+	for _, saved := range scores {
+		entry := fiber.Map{"score": saved.Score}
+		if saved.StudentID != nil {
+			entry["student_id"] = *saved.StudentID
+		}
+		if saved.SubItemID != nil {
+			entry["sub_item_id"] = *saved.SubItemID
+		}
+		gradedEntries = append(gradedEntries, entry)
+	}
+	logCourseActivity(c, assignment.CourseID, userID, "bulk_submit_scores", "score", "assignment", input.AssignmentID, assignment.Name,
+		withItemEntries(fiber.Map{"count": len(scores)}, "graded_scores", gradedEntries))
 	return c.JSON(fiber.Map{"success": true, "message": "Scores submitted", "count": len(scores)})
 }
 

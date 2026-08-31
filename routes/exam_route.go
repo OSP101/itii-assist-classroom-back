@@ -32,6 +32,7 @@ func SetupExamRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 		middlewares.RequireRole("admin", "instructor", "ta"),
 		middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"),
 		middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("courseId"), repositories.PermissionViewExamScores, "instructor", "ta"),
+		middlewares.AuditCourseView(services.ActionViewExam, middlewares.CourseIDFromParam("courseId")),
 		handlers.GetExamScoresHandler,
 	)
 	app.Post(coursePrefix+"/exam-scores",
@@ -56,14 +57,14 @@ func SetupExamRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	app.Put(coursePrefix+"/exam-sessions/:sessionId/classrooms", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), handlers.UpdateExamSessionClassroomsHandler)
 	app.Delete(coursePrefix+"/exam-sessions/:sessionId", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), handlers.DeleteExamSessionHandler)
 
-	app.Get(coursePrefix+"/exam-sessions/:sessionId/seats", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), handlers.GetExamSeatsHandler)
+	app.Get(coursePrefix+"/exam-sessions/:sessionId/seats", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), middlewares.AuditCourseView(services.ActionViewExam, middlewares.CourseIDFromParam("courseId"), middlewares.WithViewTarget("exam_session", "sessionId")), handlers.GetExamSeatsHandler)
 	app.Post(coursePrefix+"/exam-sessions/:sessionId/seats", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), handlers.AssignExamSeatHandler)
 	app.Post(coursePrefix+"/exam-sessions/:sessionId/seats/auto-assign", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), handlers.AutoAssignExamSeatsHandler)
 	app.Put(coursePrefix+"/exam-sessions/:sessionId/seats", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), handlers.ReplaceExamSeatsHandler)
 	app.Delete(coursePrefix+"/exam-sessions/:sessionId/seats", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), handlers.ClearExamSeatsHandler)
 	app.Delete(coursePrefix+"/exam-sessions/:sessionId/seats/:seatId", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), handlers.UnassignExamSeatHandler)
 
-	app.Get(coursePrefix+"/exam-sessions/:sessionId/export", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), handlers.GetExamSeatingExportHandler)
+	app.Get(coursePrefix+"/exam-sessions/:sessionId/export", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"), middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"), middlewares.AuditCourseView(services.ActionExportExamSeats, middlewares.CourseIDFromParam("courseId"), middlewares.WithViewTarget("exam_session", "sessionId")), handlers.GetExamSeatingExportHandler)
 
 	app.Get(coursePrefix+"/my-exam-seats", middlewares.Protected(), middlewares.RequireRole("student"), handlers.GetMyExamSeatsHandler)
 }

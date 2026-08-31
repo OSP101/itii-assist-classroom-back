@@ -1083,6 +1083,13 @@ type BulkAddStudentsResult struct {
 	Moved     int                     `json:"moved"`
 	Skipped   int                     `json:"skipped"`
 	Conflicts []StudentImportConflict `json:"conflicts"`
+
+	// Per-outcome student IDs, for the activity log. Excluded from the HTTP
+	// response: the counts and conflicts above are what the import screen
+	// shows, and these would only duplicate them on the wire.
+	AddedIDs   []uint `json:"-"`
+	MovedIDs   []uint `json:"-"`
+	SkippedIDs []uint `json:"-"`
 }
 
 func GetSectionStudents(sectionID uint) ([]SectionStudentRow, error) {
@@ -1234,6 +1241,7 @@ func BulkAddStudentsToSection(courseID string, sectionID uint, studentIDs []uint
 		if email != "" {
 			if _, conflict := taEmailSet[strings.ToLower(email)]; conflict {
 				result.Skipped++
+				result.SkippedIDs = append(result.SkippedIDs, sid)
 				continue
 			}
 		}
@@ -1242,6 +1250,7 @@ func BulkAddStudentsToSection(courseID string, sectionID uint, studentIDs []uint
 		if alreadyInCourse {
 			if enrollment.SectionID == sectionID {
 				result.Skipped++
+				result.SkippedIDs = append(result.SkippedIDs, sid)
 				continue
 			}
 
@@ -1258,11 +1267,14 @@ func BulkAddStudentsToSection(courseID string, sectionID uint, studentIDs []uint
 				}
 				if moved {
 					result.Moved++
+					result.MovedIDs = append(result.MovedIDs, sid)
 				} else {
 					result.Skipped++
+					result.SkippedIDs = append(result.SkippedIDs, sid)
 				}
 			} else {
 				result.Skipped++
+				result.SkippedIDs = append(result.SkippedIDs, sid)
 			}
 			continue
 		}
@@ -1300,6 +1312,9 @@ func BulkAddStudentsToSection(courseID string, sectionID uint, studentIDs []uint
 			return result, err
 		}
 		result.Added = len(toCreate)
+		for _, student := range toCreate {
+			result.AddedIDs = append(result.AddedIDs, student.StudentID)
+		}
 	}
 
 	return result, nil
