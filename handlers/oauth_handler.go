@@ -61,7 +61,7 @@ type LinkAccountInput struct {
 	ProviderAvatar string `json:"provider_avatar"`
 }
 
-var validProviders = map[string]bool{"google": true, "github": true, "apple": true}
+var validProviders = map[string]bool{"google": true, "github": true, "apple": true, "kku": true}
 
 func LinkAccountHandler(c fiber.Ctx) error {
 	userID, ok := middlewares.GetUserID(c)

@@ -426,12 +426,21 @@ func (h *AuthHandler) Logout(c fiber.Ctx) error {
 	if refreshToken == "" {
 		refreshToken = c.Cookies(utils.RefreshTokenCookieName)
 	}
+	// provider ของเซสชันนี้ อ่านจาก meta ของ refresh token ก่อนเพิกถอน เพื่อบอก
+	// หน้าเว็บว่าต้องพาผู้ใช้ไปปิดเซสชันกลางที่ KKU SSO ต่อหรือไม่
+	sessionProvider := ""
 	if refreshToken != "" {
 		claims, err := utils.ValidateRefreshToken(refreshToken)
 		if err == nil {
 			jti = claims.JTI
 			actorID = claims.UserID
 			kind = claims.Kind
+			if record, ferr := repositories.FindRefreshTokenByJTI(claims.JTI); ferr == nil && record != nil && len(record.Meta) > 0 {
+				var meta sessionMeta
+				if json.Unmarshal(record.Meta, &meta) == nil {
+					sessionProvider = meta.Provider
+				}
+			}
 			_ = repositories.RevokeRefreshToken(claims.JTI)
 		}
 	}
@@ -479,7 +488,16 @@ func (h *AuthHandler) Logout(c fiber.Ctx) error {
 			Detail:      map[string]any{"session_jti": jti},
 		})
 	}
-	return c.JSON(fiber.Map{"success": true, "message": "ออกจากระบบสำเร็จ"})
+	// เซสชันที่มาจาก KKU SSO ต้องปิดเซสชันกลางด้วย ไม่งั้นกดเข้าสู่ระบบอีกครั้ง
+	// จะเด้งกลับเข้ามาทันทีโดยไม่ถามรหัสผ่าน
+	data := fiber.Map{}
+	if strings.EqualFold(sessionProvider, "kku") {
+		if cfg := services.LoadKKUSSOConfig(); cfg.Configured() {
+			data["ssoLogoutUrl"] = cfg.LogoutURL()
+			data["ssoProvider"] = "kku"
+		}
+	}
+	return c.JSON(fiber.Map{"success": true, "message": "ออกจากระบบสำเร็จ", "data": data})
 }
 
 // =============================================================================
