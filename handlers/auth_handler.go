@@ -488,11 +488,13 @@ func (h *AuthHandler) Logout(c fiber.Ctx) error {
 			Detail:      map[string]any{"session_jti": jti},
 		})
 	}
-	// เซสชันที่มาจาก KKU SSO ต้องปิดเซสชันกลางด้วย ไม่งั้นกดเข้าสู่ระบบอีกครั้ง
-	// จะเด้งกลับเข้ามาทันทีโดยไม่ถามรหัสผ่าน
+	// ค่าเริ่มต้น: ออกจากระบบเฉพาะเว็บนี้ (เพิกถอน refresh token + ล้างคุกกี้เท่านั้น)
+	// ไม่แตะเซสชันกลางของมหาวิทยาลัย เพราะการปิดเซสชันกลางเท่ากับเตะผู้ใช้ออกจาก
+	// ทุกบริการที่ใช้ KKU SSO ร่วมกัน ทั้งที่เขาตั้งใจออกจากระบบนี้ระบบเดียว
+	// ตั้ง KKU_SSO_SINGLE_LOGOUT=true เมื่อต้องการพฤติกรรมแบบ single logout
 	data := fiber.Map{}
 	if strings.EqualFold(sessionProvider, "kku") {
-		if cfg := services.LoadKKUSSOConfig(); cfg.Configured() {
+		if cfg := services.LoadKKUSSOConfig(); cfg.Configured() && cfg.SingleLogout {
 			data["ssoLogoutUrl"] = cfg.LogoutURL()
 			data["ssoProvider"] = "kku"
 		}

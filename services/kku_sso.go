@@ -50,6 +50,11 @@ type KKUSSOConfig struct {
 	LogoutRedirectURL string
 	WebBaseURL        string
 	APIBaseURL        string
+
+	// SingleLogout เปิดเมื่อต้องการให้การกดออกจากระบบของเรา ไปปิดเซสชันกลางของ
+	// มหาวิทยาลัยด้วย ค่าเริ่มต้นคือปิด เพราะการปิดเซสชันกลางจะทำให้ผู้ใช้หลุด
+	// จากทุกบริการที่ใช้ KKU SSO ร่วมกัน ทั้งที่เขาตั้งใจออกจากระบบนี้ระบบเดียว
+	SingleLogout bool
 }
 
 // Configured บอกว่าตั้งค่าครบพอจะเริ่ม flow ได้หรือยัง
@@ -115,6 +120,7 @@ func LoadKKUSSOConfig() KKUSSOConfig {
 		ClientSecret:      strings.TrimSpace(os.Getenv("KKU_SSO_CLIENT_SECRET")),
 		RedirectURL:       strings.TrimSpace(os.Getenv("KKU_SSO_REDIRECT_URL")),
 		LogoutRedirectURL: strings.TrimSpace(os.Getenv("KKU_SSO_LOGOUT_REDIRECT_URL")),
+		SingleLogout:      strings.EqualFold(strings.TrimSpace(os.Getenv("KKU_SSO_SINGLE_LOGOUT")), "true"),
 		WebBaseURL:        webBase,
 		APIBaseURL:        apiBase,
 	}

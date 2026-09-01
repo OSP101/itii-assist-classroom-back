@@ -146,3 +146,15 @@ func TestFetchKKUAuthStatus(t *testing.T) {
 		t.Fatalf("unexpected status user: %+v", user)
 	}
 }
+
+func TestSingleLogoutDefaultsOff(t *testing.T) {
+	t.Setenv("KKU_SSO_SINGLE_LOGOUT", "")
+	if LoadKKUSSOConfig().SingleLogout {
+		t.Fatal("single logout ต้องปิดไว้เป็นค่าเริ่มต้น ไม่งั้นการออกจากระบบจะเตะผู้ใช้ออกจากทุกบริการของ มข.")
+	}
+
+	t.Setenv("KKU_SSO_SINGLE_LOGOUT", "true")
+	if !LoadKKUSSOConfig().SingleLogout {
+		t.Fatal("expected single logout to be enabled")
+	}
+}

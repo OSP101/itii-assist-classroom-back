@@ -233,6 +233,34 @@ func kkuProfileMetadata(profile *services.KKUProfile) map[string]any {
 	}
 }
 
+// kkuRequestOnRegisteredDomain บอกว่า request นี้เข้ามาทางโดเมนเดียวกับ
+// Redirect Login URL ที่ลงทะเบียนไว้หรือไม่
+//
+// ระบบเปิดสองประตู คือโดเมนหลักของมหาวิทยาลัยกับโดเมนสำรองผ่าน Cloudflare Tunnel
+// แต่ KKU SSO ผูก redirect ไว้กับโดเมนหลักตัวต่อตัว ถ้าเริ่ม flow จากโดเมนสำรอง
+// ผู้ใช้จะถูกเด้งกลับไปโดเมนหลักซึ่งตอนนั้นมักล่มอยู่พอดี (เหตุผลที่ต้องมีโดเมน
+// สำรองตั้งแต่แรก) จึงตัดจบตรงนี้พร้อมบอกให้ไปใช้ Google แทน
+func kkuRequestOnRegisteredDomain(c fiber.Ctx, cfg services.KKUSSOConfig) bool {
+	if cfg.RedirectURL == "" {
+		return true // ไม่ได้ตั้ง env ไว้ (dev) ปล่อยผ่าน
+	}
+	registered, err := url.Parse(cfg.RedirectURL)
+	if err != nil || registered.Host == "" {
+		return true
+	}
+
+	current := getRequestPublicBaseURL(c)
+	if current == "" {
+		return true
+	}
+	currentURL, err := url.Parse(current)
+	if err != nil || currentURL.Host == "" {
+		return true
+	}
+
+	return strings.EqualFold(currentURL.Hostname(), registered.Hostname())
+}
+
 // =============================================================================
 // GET /api/auth/kku
 // พาเบราว์เซอร์ไปหน้าล็อกอินของ SSONext
@@ -250,6 +278,14 @@ func KKULoginHandler(c fiber.Ctx) error {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
 			"success": false,
 			"message": "KKU SSO ยังไม่ได้ตั้งค่า (ขาด " + strings.Join(cfg.MissingEnvKeys(), ", ") + ")",
+		})
+	}
+
+	if !kkuRequestOnRegisteredDomain(c, cfg) {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+			"success": false,
+			"message": "โดเมนนี้เป็นโดเมนสำรอง ยังใช้ KKU SSO ไม่ได้ กรุณาเข้าสู่ระบบด้วยบัญชี Google",
+			"code":    "KKU_SSO_WRONG_DOMAIN",
 		})
 	}
 
@@ -467,8 +503,12 @@ func KKUCallbackHandler(c fiber.Ctx) error {
 
 // =============================================================================
 // GET /api/auth/kku/logout
-// ล้างเซสชันฝั่งเรา แล้วส่งต่อไปหน้า logout ของ SSONext เพื่อปิดเซสชันกลาง
-// (SSO จะ redirect กลับมาที่ Redirect Logout URL ที่ลงทะเบียนไว้)
+// ออกจากระบบแบบ single logout: ล้างเซสชันฝั่งเรา แล้วส่งต่อไปหน้า logout ของ
+// SSONext เพื่อปิดเซสชันกลางด้วย (SSO จะ redirect กลับมาที่ Redirect Logout URL)
+//
+// ปุ่มออกจากระบบปกติของเว็บไม่เรียกเส้นทางนี้ เพราะการปิดเซสชันกลางจะเตะผู้ใช้
+// ออกจากทุกบริการที่ใช้ KKU SSO ร่วมกัน เส้นทางนี้ไว้ใช้เมื่อผู้ใช้ตั้งใจออกจาก
+// ทุกบริการจริง ๆ เช่น เครื่องคอมพิวเตอร์ส่วนกลาง
 // =============================================================================
 
 func KKULogoutHandler(c fiber.Ctx) error {
@@ -503,9 +543,11 @@ func KKUSSOConfigHandler(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data": fiber.Map{
-			"enabled":   cfg.Configured(),
-			"loginUrl":  "/api/auth/kku",
-			"logoutUrl": "/api/auth/kku/logout",
+			"enabled": cfg.Configured(),
+			// false เมื่อเปิดผ่านโดเมนสำรอง ซึ่งใช้ KKU SSO ไม่ได้
+			"domainSupported": kkuRequestOnRegisteredDomain(c, cfg),
+			"loginUrl":        "/api/auth/kku",
+			"logoutUrl":       "/api/auth/kku/logout",
 		},
 	})
 }
