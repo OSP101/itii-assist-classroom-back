@@ -6,8 +6,10 @@ import (
 	"itii-assist/config"
 	"itii-assist/middlewares"
 	"itii-assist/models"
+	"itii-assist/realtime"
 	"itii-assist/repositories"
 	"itii-assist/services"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -39,6 +41,23 @@ type announcementPayload struct {
 	DisplayPaths       []string   `json:"display_paths"`
 	RequireAcknowledge bool       `json:"require_acknowledge"`
 	IsActive           *bool      `json:"is_active"`
+	Severity           string     `json:"severity"`
+	Priority           int        `json:"priority"`
+	Status             string     `json:"status"`
+	NotifyInbox        *bool      `json:"notify_inbox"`
+}
+
+// announcementBatchPayload is how the composer sends several announcements at
+// once. Shared defaults are applied to every item that leaves the field empty,
+// so a run of notices that differ only in wording does not have to repeat the
+// audience, schedule and display settings for each one.
+type announcementBatchPayload struct {
+	Defaults *announcementPayload  `json:"defaults"`
+	Items    []announcementPayload `json:"items"`
+}
+
+type announcementStatusPayload struct {
+	Status string `json:"status"`
 }
 
 type featureFlagPayload struct {
@@ -225,8 +244,12 @@ func GetBackupDownloadURLHandler(c fiber.Ctx) error {
 }
 
 func ListAnnouncementsHandler(c fiber.Ctx) error {
-	includeExpired := strings.EqualFold(c.Query("includeExpired"), "true")
-	rows, err := repositories.ListAnnouncements(includeExpired)
+	rows, err := repositories.ListAnnouncements(repositories.AnnouncementListFilter{
+		IncludeExpired: strings.EqualFold(c.Query("includeExpired"), "true"),
+		Status:         c.Query("status"),
+		Severity:       c.Query("severity"),
+		Search:         c.Query("search"),
+	})
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ไม่สามารถดึงประกาศได้"})
 	}
@@ -292,15 +315,11 @@ func UploadAnnouncementImageHandler(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"url": publicPath}})
 }
 
-func CreateAnnouncementHandler(c fiber.Ctx) error {
-	actorID, ok := middlewares.GetUserID(c)
-	if !ok {
-		return c.Status(401).JSON(fiber.Map{"success": false, "message": "ไม่พบผู้ใช้ใน session"})
-	}
-
-	var payload announcementPayload
-	if err := c.Bind().JSON(&payload); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
+// toAnnouncementInput turns one request payload into repository input,
+// applying the optional shared defaults a batch request carries.
+func toAnnouncementInput(payload announcementPayload, defaults *announcementPayload) repositories.AnnouncementInput {
+	if defaults != nil {
+		payload = mergeAnnouncementPayload(payload, *defaults)
 	}
 
 	isActive := true
@@ -313,7 +332,12 @@ func CreateAnnouncementHandler(c fiber.Ctx) error {
 		isDismissible = *payload.IsDismissible
 	}
 
-	created, err := repositories.CreateAnnouncement(repositories.AnnouncementInput{
+	notifyInbox := true
+	if payload.NotifyInbox != nil {
+		notifyInbox = *payload.NotifyInbox
+	}
+
+	return repositories.AnnouncementInput{
 		Title:              payload.Title,
 		TitleTH:            payload.TitleTH,
 		TitleEN:            payload.TitleEN,
@@ -333,25 +357,214 @@ func CreateAnnouncementHandler(c fiber.Ctx) error {
 		ExpiresAt:          payload.ExpiresAt,
 		Audience:           payload.Audience,
 		RequireAcknowledge: payload.RequireAcknowledge,
+		Severity:           payload.Severity,
+		Priority:           payload.Priority,
+		Status:             payload.Status,
+		NotifyInbox:        notifyInbox,
 		IsActive:           isActive,
-	}, actorID)
+	}
+}
+
+// mergeAnnouncementPayload fills the fields an item left empty from the batch
+// defaults. Only the settings that sensibly apply to a whole batch are
+// inherited; title, message and image always come from the item itself, since
+// sharing those would just produce identical announcements.
+func mergeAnnouncementPayload(item announcementPayload, defaults announcementPayload) announcementPayload {
+	if strings.TrimSpace(item.ContentType) == "" {
+		item.ContentType = defaults.ContentType
+	}
+	if strings.TrimSpace(item.DisplayMode) == "" {
+		item.DisplayMode = defaults.DisplayMode
+	}
+	if strings.TrimSpace(item.Severity) == "" {
+		item.Severity = defaults.Severity
+	}
+	if strings.TrimSpace(item.Status) == "" {
+		item.Status = defaults.Status
+	}
+	if item.Priority == 0 {
+		item.Priority = defaults.Priority
+	}
+	if len(item.Audience) == 0 {
+		item.Audience = defaults.Audience
+	}
+	if len(item.DisplayPaths) == 0 {
+		item.DisplayPaths = defaults.DisplayPaths
+	}
+	if item.ScheduledAt == nil {
+		item.ScheduledAt = defaults.ScheduledAt
+	}
+	if item.ExpiresAt == nil {
+		item.ExpiresAt = defaults.ExpiresAt
+	}
+	if item.IsActive == nil {
+		item.IsActive = defaults.IsActive
+	}
+	if item.IsDismissible == nil {
+		item.IsDismissible = defaults.IsDismissible
+	}
+	if item.NotifyInbox == nil {
+		item.NotifyInbox = defaults.NotifyInbox
+	}
+	if !item.RequireAcknowledge {
+		item.RequireAcknowledge = defaults.RequireAcknowledge
+	}
+	return item
+}
+
+func CreateAnnouncementHandler(c fiber.Ctx) error {
+	actorID, ok := middlewares.GetUserID(c)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "ไม่พบผู้ใช้ใน session"})
+	}
+
+	var payload announcementPayload
+	if err := c.Bind().JSON(&payload); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
+	}
+
+	input := toAnnouncementInput(payload, nil)
+	created, err := repositories.CreateAnnouncement(input, actorID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
 
 	logPrivilegedAdminAction(c, actorID, "create_system_announcement", "info", "system_settings", strconv.FormatUint(uint64(created.ID), 10), fiber.Map{
-		"title": created.Title,
+		"title":    created.Title,
+		"severity": created.Severity,
+		"status":   created.Status,
 	})
 
-	if created.IsActive {
-		audienceRoles := payload.Audience
-		if len(audienceRoles) == 0 {
-			audienceRoles = []string{"all"}
-		}
-		fanoutAnnouncementNotification(actorID, created, audienceRoles)
+	publishAnnouncement(actorID, created, input.Audience)
+
+	return c.Status(201).JSON(fiber.Map{"success": true, "data": created})
+}
+
+// CreateAnnouncementsBatchHandler publishes several announcements in one go.
+// Writing them one request at a time meant an admin preparing a set of term
+// notices sat through the fan-out for each; here the whole set is written in a
+// single transaction and the notifications go out behind it.
+func CreateAnnouncementsBatchHandler(c fiber.Ctx) error {
+	actorID, ok := middlewares.GetUserID(c)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "ไม่พบผู้ใช้ใน session"})
+	}
+
+	var payload announcementBatchPayload
+	if err := c.Bind().JSON(&payload); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
+	}
+
+	if len(payload.Items) == 0 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไม่พบรายการประกาศที่จะสร้าง"})
+	}
+	if len(payload.Items) > repositories.AnnouncementBatchLimit {
+		return c.Status(400).JSON(fiber.Map{
+			"success": false,
+			"message": fmt.Sprintf("สร้างประกาศพร้อมกันได้สูงสุด %d รายการ", repositories.AnnouncementBatchLimit),
+		})
+	}
+
+	inputs := make([]repositories.AnnouncementInput, 0, len(payload.Items))
+	for _, item := range payload.Items {
+		inputs = append(inputs, toAnnouncementInput(item, payload.Defaults))
+	}
+
+	created, err := repositories.CreateAnnouncementsBatch(inputs, actorID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
+	}
+
+	createdIDs := make([]uint, 0, len(created))
+	for _, row := range created {
+		createdIDs = append(createdIDs, row.ID)
+	}
+	logPrivilegedAdminAction(c, actorID, "create_system_announcement_batch", "info", "system_settings", "", fiber.Map{
+		"count": len(created),
+		"ids":   createdIDs,
+	})
+
+	for index := range created {
+		publishAnnouncement(actorID, &created[index], inputs[index].Audience)
 	}
 
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": created})
+}
+
+// SetAnnouncementStatusHandler archives, republishes or returns an
+// announcement to draft without touching its content.
+func SetAnnouncementStatusHandler(c fiber.Ctx) error {
+	actorID, ok := middlewares.GetUserID(c)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "ไม่พบผู้ใช้ใน session"})
+	}
+
+	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "id ไม่ถูกต้อง"})
+	}
+
+	var payload announcementStatusPayload
+	if err := c.Bind().JSON(&payload); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
+	}
+
+	updated, statusErr := repositories.SetAnnouncementStatus(uint(id), payload.Status)
+	if statusErr != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": statusErr.Error()})
+	}
+
+	logPrivilegedAdminAction(c, actorID, "set_system_announcement_status", "info", "system_settings", strconv.FormatUint(id, 10), fiber.Map{
+		"status": updated.Status,
+	})
+
+	return c.JSON(fiber.Map{"success": true, "data": updated})
+}
+
+// DeleteAnnouncementHandler permanently removes an announcement. Archiving is
+// the reversible option and is what the UI offers first; this is for clearing
+// out mistakes.
+func DeleteAnnouncementHandler(c fiber.Ctx) error {
+	actorID, ok := middlewares.GetUserID(c)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "ไม่พบผู้ใช้ใน session"})
+	}
+
+	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "id ไม่ถูกต้อง"})
+	}
+
+	existing, lookupErr := repositories.GetAnnouncementByID(uint(id))
+	if lookupErr != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบประกาศที่ต้องการลบ"})
+	}
+
+	if deleteErr := repositories.DeleteAnnouncement(uint(id)); deleteErr != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไม่สามารถลบประกาศได้"})
+	}
+
+	logPrivilegedAdminAction(c, actorID, "delete_system_announcement", "warning", "system_settings", strconv.FormatUint(id, 10), fiber.Map{
+		"title": existing.Title,
+	})
+
+	return c.JSON(fiber.Map{"success": true})
+}
+
+// GetAnnouncementStatsHandler reports reach: how many people the announcement
+// was addressed to, how many acknowledged it, and who is still outstanding.
+func GetAnnouncementStatsHandler(c fiber.Ctx) error {
+	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "id ไม่ถูกต้อง"})
+	}
+
+	stats, statsErr := repositories.GetAnnouncementStats(uint(id))
+	if statsErr != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบประกาศที่ต้องการ"})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "data": stats})
 }
 
 func UpdateAnnouncementHandler(c fiber.Ctx) error {
@@ -370,45 +583,30 @@ func UpdateAnnouncementHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
 	}
 
-	isActive := true
-	if payload.IsActive != nil {
-		isActive = *payload.IsActive
+	previous, lookupErr := repositories.GetAnnouncementByID(uint(id))
+	if lookupErr != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบประกาศที่ต้องการแก้ไข"})
 	}
 
-	isDismissible := true
-	if payload.IsDismissible != nil {
-		isDismissible = *payload.IsDismissible
-	}
-
-	updated, updateErr := repositories.UpdateAnnouncement(uint(id), repositories.AnnouncementInput{
-		Title:              payload.Title,
-		TitleTH:            payload.TitleTH,
-		TitleEN:            payload.TitleEN,
-		Message:            payload.Message,
-		MessageTH:          payload.MessageTH,
-		MessageEN:          payload.MessageEN,
-		ContentType:        payload.ContentType,
-		DisplayMode:        payload.DisplayMode,
-		ImageURL:           payload.ImageURL,
-		ActionLabel:        payload.ActionLabel,
-		ActionLabelTH:      payload.ActionLabelTH,
-		ActionLabelEN:      payload.ActionLabelEN,
-		ActionURL:          payload.ActionURL,
-		IsDismissible:      isDismissible,
-		DisplayPaths:       payload.DisplayPaths,
-		ScheduledAt:        payload.ScheduledAt,
-		ExpiresAt:          payload.ExpiresAt,
-		Audience:           payload.Audience,
-		RequireAcknowledge: payload.RequireAcknowledge,
-		IsActive:           isActive,
-	})
+	input := toAnnouncementInput(payload, nil)
+	updated, updateErr := repositories.UpdateAnnouncement(uint(id), input)
 	if updateErr != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": updateErr.Error()})
 	}
 
 	logPrivilegedAdminAction(c, actorID, "update_system_announcement", "info", "system_settings", strconv.FormatUint(id, 10), fiber.Map{
-		"title": updated.Title,
+		"title":    updated.Title,
+		"severity": updated.Severity,
+		"status":   updated.Status,
 	})
+
+	// An announcement that was a draft (or archived) until now has never
+	// reached anyone, so publishing it from the editor has to fan out the same
+	// way creating it live would. One that was already published does not, or
+	// every wording fix would land in everybody's inbox again.
+	if !previous.IsActive && updated.IsActive {
+		publishAnnouncement(actorID, updated, input.Audience)
+	}
 
 	return c.JSON(fiber.Map{"success": true, "data": updated})
 }
@@ -628,6 +826,39 @@ func GetServiceHealthHandler(c fiber.Ctx) error {
 	})
 }
 
+// publishAnnouncement sends an announcement to every recipient's notification
+// inbox, in the background.
+//
+// This used to run inline in the create request, one insert plus one unread
+// count plus one websocket emit per recipient. With a few thousand active
+// users that is a few thousand round trips an admin waited through before the
+// composer would close, and long enough to hit the proxy's timeout. Now the
+// request returns as soon as the announcement is stored and the fan-out
+// continues behind it.
+func publishAnnouncement(actorID uint, announcement *models.SystemAnnouncement, audienceRoles []string) {
+	if announcement == nil || !announcement.IsActive || !announcement.NotifyInbox {
+		return
+	}
+	// A scheduled announcement has not started yet; notifying about it now
+	// would arrive before the thing it announces is visible.
+	if announcement.ScheduledAt != nil && announcement.ScheduledAt.After(time.Now()) {
+		return
+	}
+
+	if len(audienceRoles) == 0 {
+		audienceRoles = []string{"all"}
+	}
+
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Printf("⚠️  announcement fan-out panicked for announcement %d: %v", announcement.ID, recovered)
+			}
+		}()
+		fanoutAnnouncementNotification(actorID, announcement, audienceRoles)
+	}()
+}
+
 func fanoutAnnouncementNotification(actorID uint, announcement *models.SystemAnnouncement, audienceRoles []string) {
 	if announcement == nil {
 		return
@@ -638,26 +869,71 @@ func fanoutAnnouncementNotification(actorID uint, announcement *models.SystemAnn
 		return
 	}
 
+	// Both language variants ride along in the payload so the inbox can render
+	// the announcement in the reader's language instead of whichever one the
+	// admin happened to type into the primary field.
 	payload, _ := json.Marshal(fiber.Map{
 		"announcement_id":     announcement.ID,
 		"require_acknowledge": announcement.RequireAcknowledge,
+		"severity":            announcement.Severity,
+		"title_th":            announcement.TitleTH,
+		"title_en":            announcement.TitleEN,
+		"message_th":          announcement.MessageTH,
+		"message_en":          announcement.MessageEN,
 	})
 	data := datatypes.JSON(payload)
 	link := "/student/notifications"
+	createdAt := time.Now()
 
+	notifications := make([]models.UserNotification, 0, len(userIDs))
+	recipients := make([]uint, 0, len(userIDs))
 	for _, userID := range userIDs {
 		if userID == actorID {
 			continue
 		}
-		createNotificationForUser(
-			userID,
-			"",
-			"announcement",
-			announcement.Title,
-			announcement.Message,
-			link,
-			data,
-		)
+		notifications = append(notifications, models.UserNotification{
+			UserID:    userID,
+			Type:      "announcement",
+			Title:     announcement.Title,
+			Message:   announcement.Message,
+			Link:      link,
+			Data:      data,
+			IsRead:    false,
+			CreatedAt: createdAt,
+		})
+		recipients = append(recipients, userID)
+	}
+
+	if len(notifications) == 0 {
+		return
+	}
+
+	// One multi-row insert per chunk instead of one statement per recipient.
+	const insertChunkSize = 500
+	for start := 0; start < len(notifications); start += insertChunkSize {
+		end := start + insertChunkSize
+		if end > len(notifications) {
+			end = len(notifications)
+		}
+		if err := repositories.CreateUserNotifications(notifications[start:end]); err != nil {
+			log.Printf("⚠️  failed to write announcement notifications: %v", err)
+			return
+		}
+	}
+
+	for index, userID := range recipients {
+		count, _ := repositories.GetUnreadNotificationCount(userID)
+		realtime.EmitToUser(userID, "notification", fiber.Map{
+			"id":           notifications[index].ID,
+			"type":         notifications[index].Type,
+			"title":        notifications[index].Title,
+			"message":      notifications[index].Message,
+			"link":         notifications[index].Link,
+			"data":         notifications[index].Data,
+			"is_read":      false,
+			"created_at":   notifications[index].CreatedAt,
+			"unread_count": count,
+		})
 	}
 }
 

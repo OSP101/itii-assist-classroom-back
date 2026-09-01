@@ -3,8 +3,10 @@ package repositories
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"itii-assist/config"
 	"itii-assist/models"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,8 +25,50 @@ const (
 	announcementContentMixed = "mixed"
 	announcementModeBanner   = "banner_top"
 	announcementModeFull     = "fullscreen"
-	announcementAllPages     = "all_pages"
+	// announcementModeTopbar is the thin full-width ribbon across the top of
+	// the page, the shape most product sites use for a standing notice.
+	announcementModeTopbar = "topbar"
+	// announcementModeFullImage shows the image edge to edge with the text
+	// laid over it, for posters and graphics that carry the message
+	// themselves.
+	announcementModeFullImage = "fullscreen_image"
+	// announcementModeCorner is the small card that floats in the bottom-left
+	// corner: visible while the reader keeps working, rather than blocking the
+	// page or taking a line off the top of it.
+	announcementModeCorner = "corner_card"
+	announcementAllPages   = "all_pages"
+
+	announcementSeverityInfo    = "info"
+	announcementSeveritySuccess = "success"
+	announcementSeverityWarning = "warning"
+	announcementSeverityUrgent  = "urgent"
+
+	announcementStatusDraft     = "draft"
+	announcementStatusScheduled = "scheduled"
+	announcementStatusPublished = "published"
+	announcementStatusArchived  = "archived"
+
+	// AnnouncementBatchLimit caps one batch create call. Each announcement in
+	// a batch fans out to every recipient, so an unbounded batch is an
+	// unbounded amount of work behind a single request.
+	AnnouncementBatchLimit = 20
 )
+
+// announcementWritableColumns lists every column CreateAnnouncement writes.
+// GORM omits zero-valued fields that carry a `default:` tag from the INSERT,
+// which for is_active, is_dismissible and notify_inbox means saving one as
+// false silently stores true instead — a draft would go out live. Naming the
+// columns in Select forces them all into the statement.
+var announcementWritableColumns = []string{
+	"title", "title_th", "title_en",
+	"message", "message_th", "message_en",
+	"content_type", "display_mode", "severity", "priority", "status",
+	"image_url",
+	"action_label", "action_label_th", "action_label_en", "action_url",
+	"is_dismissible", "notify_inbox", "display_paths",
+	"scheduled_at", "expires_at", "audience",
+	"require_acknowledge", "is_active", "created_by", "created_at", "updated_at",
+}
 
 type FeatureFlagState struct {
 	Key         string    `json:"key"`
@@ -72,16 +116,54 @@ type AnnouncementInput struct {
 	Audience           []string
 	RequireAcknowledge bool
 	IsActive           bool
+	Severity           string
+	Priority           int
+	Status             string
+	NotifyInbox        bool
 }
 
 type AnnouncementWithAck struct {
 	models.SystemAnnouncement
-	AckCount int64 `json:"ack_count"`
+	AckCount      int64 `json:"ack_count"`
+	DismissCount  int64 `json:"dismiss_count"`
+	AudienceCount int64 `json:"audience_count"`
 }
 
 type ActiveAnnouncementForUser struct {
 	models.SystemAnnouncement
 	IsAcknowledged bool `json:"is_acknowledged"`
+}
+
+// AnnouncementListFilter is what the admin list screen can ask for. The list
+// used to be hard-filtered to is_active = true, so the screen's own
+// "deactivated" filter could never match anything and an announcement that had
+// been switched off could not be found again to edit.
+type AnnouncementListFilter struct {
+	IncludeExpired bool
+	Status         string
+	Severity       string
+	Search         string
+}
+
+// AnnouncementRecipient is one person an announcement was addressed to, with
+// whether they have acknowledged it yet.
+type AnnouncementRecipient struct {
+	UserID         uint       `json:"user_id"`
+	FullName       string     `json:"full_name"`
+	Email          string     `json:"email"`
+	Role           string     `json:"role"`
+	AcknowledgedAt *time.Time `json:"acknowledged_at,omitempty"`
+}
+
+// AnnouncementStats is the reach summary shown next to an announcement.
+type AnnouncementStats struct {
+	AnnouncementID uint                    `json:"announcement_id"`
+	AudienceCount  int64                   `json:"audience_count"`
+	AckCount       int64                   `json:"ack_count"`
+	DismissCount   int64                   `json:"dismiss_count"`
+	AckPercent     float64                 `json:"ack_percent"`
+	Pending        []AnnouncementRecipient `json:"pending"`
+	Acknowledged   []AnnouncementRecipient `json:"acknowledged"`
 }
 
 type featureFlagDefinition struct {
@@ -526,31 +608,166 @@ func CreateDatabaseBackupRecord(record models.DatabaseBackupRecord) (models.Data
 	return record, nil
 }
 
-func ListAnnouncements(includeExpired bool) ([]AnnouncementWithAck, error) {
+func ListAnnouncements(filter AnnouncementListFilter) ([]AnnouncementWithAck, error) {
 	rows := make([]models.SystemAnnouncement, 0)
-	query := config.DB.Model(&models.SystemAnnouncement{}).Where("is_active = ?", true)
-	if !includeExpired {
+	query := config.DB.Model(&models.SystemAnnouncement{})
+
+	switch normalizeAnnouncementStatusFilter(filter.Status) {
+	case announcementStatusDraft:
+		query = query.Where("status = ?", announcementStatusDraft)
+	case announcementStatusScheduled:
+		query = query.Where("status = ?", announcementStatusScheduled)
+	case announcementStatusPublished:
+		query = query.Where("status = ?", announcementStatusPublished)
+	case announcementStatusArchived:
+		query = query.Where("status = ?", announcementStatusArchived)
+	case "live":
+		query = query.Where("status IN ?", []string{announcementStatusPublished, announcementStatusScheduled})
+	}
+
+	if severity := normalizeAnnouncementSeverityFilter(filter.Severity); severity != "" {
+		query = query.Where("severity = ?", severity)
+	}
+
+	if !filter.IncludeExpired {
 		query = query.Where("expires_at IS NULL OR expires_at > ?", time.Now())
 	}
-	query = query.Order("COALESCE(scheduled_at, created_at) DESC")
+
+	if search := strings.TrimSpace(filter.Search); search != "" {
+		like := "%" + strings.ToLower(search) + "%"
+		query = query.Where(
+			"LOWER(title) LIKE ? OR LOWER(title_th) LIKE ? OR LOWER(title_en) LIKE ? OR LOWER(message) LIKE ? OR LOWER(message_th) LIKE ? OR LOWER(message_en) LIKE ?",
+			like, like, like, like, like, like,
+		)
+	}
+
+	query = query.Order("priority DESC").Order("COALESCE(scheduled_at, created_at) DESC")
 
 	if err := query.Find(&rows).Error; err != nil {
 		return nil, err
 	}
 
+	if len(rows) == 0 {
+		return []AnnouncementWithAck{}, nil
+	}
+
+	announcementIDs := make([]uint, 0, len(rows))
+	for _, row := range rows {
+		announcementIDs = append(announcementIDs, row.ID)
+	}
+
+	// One grouped count each, instead of the two-queries-per-row this used to
+	// run. The admin list loads every announcement at once, so the old shape
+	// meant the screen got slower with every announcement ever written.
+	ackCounts, err := countByAnnouncement(&models.SystemAnnouncementAck{}, announcementIDs)
+	if err != nil {
+		return nil, err
+	}
+	dismissCounts, err := countByAnnouncement(&models.SystemAnnouncementDismissal{}, announcementIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	audienceCache := make(map[string]int64)
 	result := make([]AnnouncementWithAck, 0, len(rows))
 	for _, row := range rows {
-		count := int64(0)
-		if err := config.DB.Model(&models.SystemAnnouncementAck{}).Where("announcement_id = ?", row.ID).Count(&count).Error; err != nil {
-			return nil, err
+		roles := decodeAnnouncementAudience(row.Audience)
+		cacheKey := strings.Join(roles, ",")
+		audienceCount, cached := audienceCache[cacheKey]
+		if !cached {
+			audienceCount, err = CountAnnouncementAudience(roles)
+			if err != nil {
+				return nil, err
+			}
+			audienceCache[cacheKey] = audienceCount
 		}
+
 		result = append(result, AnnouncementWithAck{
 			SystemAnnouncement: row,
-			AckCount:           count,
+			AckCount:           ackCounts[row.ID],
+			DismissCount:       dismissCounts[row.ID],
+			AudienceCount:      audienceCount,
 		})
 	}
 
 	return result, nil
+}
+
+func countByAnnouncement(model any, announcementIDs []uint) (map[uint]int64, error) {
+	type countRow struct {
+		AnnouncementID uint
+		Total          int64
+	}
+
+	counts := make([]countRow, 0, len(announcementIDs))
+	err := config.DB.Model(model).
+		Select("announcement_id, COUNT(*) AS total").
+		Where("announcement_id IN ?", announcementIDs).
+		Group("announcement_id").
+		Scan(&counts).Error
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[uint]int64, len(counts))
+	for _, row := range counts {
+		result[row.AnnouncementID] = row.Total
+	}
+	return result, nil
+}
+
+func decodeAnnouncementAudience(raw []byte) []string {
+	stored := make([]string, 0, 4)
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &stored)
+	}
+
+	// Lower-cased here so every caller can compare against "all" and against
+	// the users table's role values without repeating the normalisation.
+	roles := make([]string, 0, len(stored))
+	for _, role := range stored {
+		role = strings.ToLower(strings.TrimSpace(role))
+		if role != "" {
+			roles = append(roles, role)
+		}
+	}
+
+	if len(roles) == 0 {
+		return []string{"all"}
+	}
+	return roles
+}
+
+// CountAnnouncementAudience counts the active users an announcement addressed
+// to these roles reaches, so the admin list can show acknowledgements as a
+// share of the audience rather than a bare number with nothing to compare it
+// against.
+func CountAnnouncementAudience(roles []string) (int64, error) {
+	normalized := make([]string, 0, len(roles))
+	for _, role := range roles {
+		role = strings.ToLower(strings.TrimSpace(role))
+		if role == "" {
+			continue
+		}
+		if role == "all" {
+			var total int64
+			err := config.DB.Model(&models.User{}).Where("is_active = ?", true).Count(&total).Error
+			return total, err
+		}
+		normalized = append(normalized, role)
+	}
+
+	if len(normalized) == 0 {
+		var total int64
+		err := config.DB.Model(&models.User{}).Where("is_active = ?", true).Count(&total).Error
+		return total, err
+	}
+
+	var total int64
+	err := config.DB.Model(&models.User{}).
+		Where("is_active = ? AND LOWER(role) IN ?", true, normalized).
+		Count(&total).Error
+	return total, err
 }
 
 func ListActiveAnnouncementsForUser(userID uint, studentID uint, role string) ([]ActiveAnnouncementForUser, error) {
@@ -566,10 +783,18 @@ func ListActiveAnnouncementsForUser(userID uint, studentID uint, role string) ([
 	rows := make([]models.SystemAnnouncement, 0)
 	query := config.DB.Model(&models.SystemAnnouncement{}).
 		Where("is_active = ?", true).
+		Where("status IN ?", []string{announcementStatusPublished, announcementStatusScheduled}).
 		Where("scheduled_at IS NULL OR scheduled_at <= ?", now).
 		Where("expires_at IS NULL OR expires_at > ?", now).
 		Where("audience @> ?::jsonb OR audience @> ?::jsonb", string(allAudienceRaw), string(roleAudienceRaw)).
-		Order("CASE WHEN display_mode = 'fullscreen' THEN 0 ELSE 1 END").
+		// Urgent first, then whatever the admin pinned, then newest. The
+		// display layer walks this order straight down the page, so the order
+		// chosen here is the order people read.
+		Order("CASE severity WHEN 'urgent' THEN 0 WHEN 'warning' THEN 1 WHEN 'success' THEN 2 ELSE 3 END").
+		Order("priority DESC").
+		// Both fullscreen shapes block the page, so they lead; the topbar
+		// ribbon is the least intrusive and sorts last.
+		Order("CASE display_mode WHEN 'fullscreen' THEN 0 WHEN 'fullscreen_image' THEN 0 WHEN 'banner_top' THEN 1 WHEN 'corner_card' THEN 2 ELSE 3 END").
 		Order("COALESCE(scheduled_at, created_at) DESC")
 
 	if err := query.Find(&rows).Error; err != nil {
@@ -577,22 +802,31 @@ func ListActiveAnnouncementsForUser(userID uint, studentID uint, role string) ([
 	}
 
 	ackRows := make([]models.SystemAnnouncementAck, 0)
+	dismissRows := make([]models.SystemAnnouncementDismissal, 0)
 	if len(rows) > 0 {
 		announcementIDs := make([]uint, 0, len(rows))
 		for _, row := range rows {
 			announcementIDs = append(announcementIDs, row.ID)
 		}
-		ackQuery := config.DB.Where("announcement_id IN ?", announcementIDs)
-		switch {
-		case userID > 0:
-			ackQuery = ackQuery.Where("user_id = ?", userID)
-		case studentID > 0:
-			ackQuery = ackQuery.Where("student_id = ?", studentID)
-		default:
-			ackQuery = nil
+
+		scopeToActor := func(query *gorm.DB) *gorm.DB {
+			switch {
+			case userID > 0:
+				return query.Where("user_id = ?", userID)
+			case studentID > 0:
+				return query.Where("student_id = ?", studentID)
+			default:
+				return nil
+			}
 		}
-		if ackQuery != nil {
+
+		if ackQuery := scopeToActor(config.DB.Where("announcement_id IN ?", announcementIDs)); ackQuery != nil {
 			if err := ackQuery.Find(&ackRows).Error; err != nil {
+				return nil, err
+			}
+		}
+		if dismissQuery := scopeToActor(config.DB.Where("announcement_id IN ?", announcementIDs)); dismissQuery != nil {
+			if err := dismissQuery.Find(&dismissRows).Error; err != nil {
 				return nil, err
 			}
 		}
@@ -602,9 +836,20 @@ func ListActiveAnnouncementsForUser(userID uint, studentID uint, role string) ([
 	for _, ack := range ackRows {
 		ackSet[ack.AnnouncementID] = struct{}{}
 	}
+	dismissedSet := make(map[uint]struct{}, len(dismissRows))
+	for _, dismissal := range dismissRows {
+		dismissedSet[dismissal.AnnouncementID] = struct{}{}
+	}
 
 	result := make([]ActiveAnnouncementForUser, 0, len(rows))
 	for _, row := range rows {
+		// A dismissal only counts for announcements that can be dismissed and
+		// do not demand an acknowledgement; anything else stays on screen no
+		// matter what the viewer clicked before.
+		if _, dismissed := dismissedSet[row.ID]; dismissed && row.IsDismissible && !row.RequireAcknowledge {
+			continue
+		}
+
 		_, acknowledged := ackSet[row.ID]
 		result = append(result, ActiveAnnouncementForUser{
 			SystemAnnouncement: row,
@@ -630,9 +875,98 @@ func normalizeAnnouncementDisplayMode(displayMode string) string {
 	switch strings.ToLower(strings.TrimSpace(displayMode)) {
 	case announcementModeFull:
 		return announcementModeFull
+	case announcementModeTopbar:
+		return announcementModeTopbar
+	case announcementModeFullImage:
+		return announcementModeFullImage
+	case announcementModeCorner:
+		return announcementModeCorner
 	default:
 		return announcementModeBanner
 	}
+}
+
+func normalizeAnnouncementSeverity(severity string) string {
+	switch strings.ToLower(strings.TrimSpace(severity)) {
+	case announcementSeveritySuccess:
+		return announcementSeveritySuccess
+	case announcementSeverityWarning:
+		return announcementSeverityWarning
+	case announcementSeverityUrgent:
+		return announcementSeverityUrgent
+	default:
+		return announcementSeverityInfo
+	}
+}
+
+func normalizeAnnouncementSeverityFilter(severity string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(severity))
+	if trimmed == "" || trimmed == "all" {
+		return ""
+	}
+	return normalizeAnnouncementSeverity(trimmed)
+}
+
+// normalizeAnnouncementStatusFilter maps what the list screen can ask for.
+// "live" covers published plus scheduled, which is what an admin means by
+// "currently in use"; an unrecognised value means no status filter at all.
+func normalizeAnnouncementStatusFilter(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case announcementStatusDraft:
+		return announcementStatusDraft
+	case announcementStatusScheduled:
+		return announcementStatusScheduled
+	case announcementStatusPublished:
+		return announcementStatusPublished
+	case announcementStatusArchived:
+		return announcementStatusArchived
+	case "live", "active":
+		return "live"
+	default:
+		return ""
+	}
+}
+
+// resolveAnnouncementStatus decides the stored state. An explicit status wins;
+// otherwise it is derived from the legacy is_active flag so an older client
+// that only sends is_active keeps behaving the way it always did. A published
+// announcement with a future start date is stored as scheduled, which is what
+// the list screen shows and what makes "what is live right now" answerable.
+func resolveAnnouncementStatus(status string, isActive bool, scheduledAt *time.Time) string {
+	normalized := strings.ToLower(strings.TrimSpace(status))
+	switch normalized {
+	case announcementStatusDraft, announcementStatusArchived:
+		return normalized
+	case announcementStatusScheduled, announcementStatusPublished:
+		if scheduledAt != nil && scheduledAt.After(time.Now()) {
+			return announcementStatusScheduled
+		}
+		return announcementStatusPublished
+	}
+
+	if !isActive {
+		return announcementStatusArchived
+	}
+	if scheduledAt != nil && scheduledAt.After(time.Now()) {
+		return announcementStatusScheduled
+	}
+	return announcementStatusPublished
+}
+
+// announcementStatusIsLive reports whether a status should keep is_active set,
+// which is the flag every older reader of this table still checks.
+func announcementStatusIsLive(status string) bool {
+	return status == announcementStatusPublished || status == announcementStatusScheduled
+}
+
+func normalizeAnnouncementPriority(priority int) int {
+	if priority < 0 {
+		return 0
+	}
+	if priority > 100 {
+		return 100
+	}
+	return priority
 }
 
 func normalizeAnnouncementDisplayPaths(displayPaths []string) []string {
@@ -726,6 +1060,8 @@ func CreateAnnouncement(input AnnouncementInput, createdBy uint) (*models.System
 		return nil, err
 	}
 
+	status := resolveAnnouncementStatus(input.Status, input.IsActive, input.ScheduledAt)
+
 	announcement := models.SystemAnnouncement{
 		Title:              firstNonEmpty(input.Title, input.TitleTH, input.TitleEN),
 		TitleTH:            strings.TrimSpace(input.TitleTH),
@@ -746,13 +1082,108 @@ func CreateAnnouncement(input AnnouncementInput, createdBy uint) (*models.System
 		ExpiresAt:          input.ExpiresAt,
 		Audience:           rawAudience,
 		RequireAcknowledge: input.RequireAcknowledge,
-		IsActive:           input.IsActive,
+		Severity:           normalizeAnnouncementSeverity(input.Severity),
+		Priority:           normalizeAnnouncementPriority(input.Priority),
+		Status:             status,
+		NotifyInbox:        input.NotifyInbox,
+		IsActive:           announcementStatusIsLive(status),
 		CreatedBy:          &createdBy,
+		CreatedAt:          time.Now(),
+		UpdatedAt:          time.Now(),
 	}
-	if err := config.DB.Create(&announcement).Error; err != nil {
+	// Select is what makes the false values stick — see
+	// announcementWritableColumns.
+	if err := config.DB.Select(announcementWritableColumns).Create(&announcement).Error; err != nil {
 		return nil, err
 	}
 	return &announcement, nil
+}
+
+// CreateAnnouncementsBatch writes several announcements in one transaction so a
+// set that belongs together (the same notice in several variants, a run of
+// term-start notices) either all lands or none of it does. It returns the
+// created rows in input order.
+func CreateAnnouncementsBatch(inputs []AnnouncementInput, createdBy uint) ([]models.SystemAnnouncement, error) {
+	if len(inputs) == 0 {
+		return nil, errors.New("no announcements to create")
+	}
+	if len(inputs) > AnnouncementBatchLimit {
+		return nil, fmt.Errorf("batch is limited to %d announcements", AnnouncementBatchLimit)
+	}
+
+	for index, input := range inputs {
+		if err := validateAnnouncementInput(input); err != nil {
+			return nil, fmt.Errorf("announcement %d: %w", index+1, err)
+		}
+	}
+
+	created := make([]models.SystemAnnouncement, 0, len(inputs))
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
+		for _, input := range inputs {
+			row, buildErr := buildAnnouncementForCreate(input, createdBy)
+			if buildErr != nil {
+				return buildErr
+			}
+			if createErr := tx.Select(announcementWritableColumns).Create(row).Error; createErr != nil {
+				return createErr
+			}
+			created = append(created, *row)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return created, nil
+}
+
+func buildAnnouncementForCreate(input AnnouncementInput, createdBy uint) (*models.SystemAnnouncement, error) {
+	audience := input.Audience
+	if len(audience) == 0 {
+		audience = []string{"all"}
+	}
+	rawAudience, err := json.Marshal(audience)
+	if err != nil {
+		return nil, err
+	}
+	rawDisplayPaths, err := json.Marshal(normalizeAnnouncementDisplayPaths(input.DisplayPaths))
+	if err != nil {
+		return nil, err
+	}
+
+	status := resolveAnnouncementStatus(input.Status, input.IsActive, input.ScheduledAt)
+	now := time.Now()
+
+	return &models.SystemAnnouncement{
+		Title:              firstNonEmpty(input.Title, input.TitleTH, input.TitleEN),
+		TitleTH:            strings.TrimSpace(input.TitleTH),
+		TitleEN:            strings.TrimSpace(input.TitleEN),
+		Message:            firstNonEmpty(input.Message, input.MessageTH, input.MessageEN),
+		MessageTH:          strings.TrimSpace(input.MessageTH),
+		MessageEN:          strings.TrimSpace(input.MessageEN),
+		ContentType:        normalizeAnnouncementContentType(input.ContentType),
+		DisplayMode:        normalizeAnnouncementDisplayMode(input.DisplayMode),
+		ImageURL:           strings.TrimSpace(input.ImageURL),
+		ActionLabel:        firstNonEmpty(input.ActionLabel, input.ActionLabelTH, input.ActionLabelEN),
+		ActionLabelTH:      strings.TrimSpace(input.ActionLabelTH),
+		ActionLabelEN:      strings.TrimSpace(input.ActionLabelEN),
+		ActionURL:          strings.TrimSpace(input.ActionURL),
+		IsDismissible:      input.IsDismissible,
+		DisplayPaths:       rawDisplayPaths,
+		ScheduledAt:        input.ScheduledAt,
+		ExpiresAt:          input.ExpiresAt,
+		Audience:           rawAudience,
+		RequireAcknowledge: input.RequireAcknowledge,
+		Severity:           normalizeAnnouncementSeverity(input.Severity),
+		Priority:           normalizeAnnouncementPriority(input.Priority),
+		Status:             status,
+		NotifyInbox:        input.NotifyInbox,
+		IsActive:           announcementStatusIsLive(status),
+		CreatedBy:          &createdBy,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}, nil
 }
 
 func UpdateAnnouncement(id uint, input AnnouncementInput) (*models.SystemAnnouncement, error) {
@@ -797,12 +1228,215 @@ func UpdateAnnouncement(id uint, input AnnouncementInput) (*models.SystemAnnounc
 	announcement.ExpiresAt = input.ExpiresAt
 	announcement.Audience = rawAudience
 	announcement.RequireAcknowledge = input.RequireAcknowledge
-	announcement.IsActive = input.IsActive
+	announcement.Severity = normalizeAnnouncementSeverity(input.Severity)
+	announcement.Priority = normalizeAnnouncementPriority(input.Priority)
+	announcement.Status = resolveAnnouncementStatus(input.Status, input.IsActive, input.ScheduledAt)
+	announcement.NotifyInbox = input.NotifyInbox
+	announcement.IsActive = announcementStatusIsLive(announcement.Status)
+	// Select names updated_at explicitly, which stops GORM's autoUpdateTime
+	// from filling it in, so set it here.
+	announcement.UpdatedAt = time.Now()
 
-	if err := config.DB.Save(&announcement).Error; err != nil {
+	// Save skips no columns, but it also skips nothing it should keep: Select
+	// keeps the false booleans in the UPDATE for the same reason Create needs
+	// it.
+	if err := config.DB.Model(&announcement).Select(announcementWritableColumns).Updates(announcement).Error; err != nil {
 		return nil, err
 	}
 	return &announcement, nil
+}
+
+// SetAnnouncementStatus moves one announcement between editorial states
+// without touching its content, which is what the list screen's archive and
+// republish buttons need.
+func SetAnnouncementStatus(id uint, status string) (*models.SystemAnnouncement, error) {
+	normalized := strings.ToLower(strings.TrimSpace(status))
+	switch normalized {
+	case announcementStatusDraft, announcementStatusScheduled, announcementStatusPublished, announcementStatusArchived:
+	default:
+		return nil, errors.New("invalid announcement status")
+	}
+
+	var announcement models.SystemAnnouncement
+	if err := config.DB.Where("id = ?", id).First(&announcement).Error; err != nil {
+		return nil, err
+	}
+
+	resolved := resolveAnnouncementStatus(normalized, announcementStatusIsLive(normalized), announcement.ScheduledAt)
+	updates := map[string]any{
+		"status":     resolved,
+		"is_active":  announcementStatusIsLive(resolved),
+		"updated_at": time.Now(),
+	}
+	if err := config.DB.Model(&announcement).Updates(updates).Error; err != nil {
+		return nil, err
+	}
+
+	announcement.Status = resolved
+	announcement.IsActive = announcementStatusIsLive(resolved)
+	return &announcement, nil
+}
+
+// DeleteAnnouncement removes an announcement and everything recorded about it.
+// The table has no soft-delete column, so this is a real delete; archiving via
+// SetAnnouncementStatus is the reversible option and is what the UI offers
+// first.
+func DeleteAnnouncement(id uint) error {
+	return config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("announcement_id = ?", id).Delete(&models.SystemAnnouncementAck{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("announcement_id = ?", id).Delete(&models.SystemAnnouncementDismissal{}).Error; err != nil {
+			return err
+		}
+		result := tx.Where("id = ?", id).Delete(&models.SystemAnnouncement{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		return nil
+	})
+}
+
+// GetAnnouncementByID returns one announcement, whatever its status.
+func GetAnnouncementByID(id uint) (*models.SystemAnnouncement, error) {
+	var announcement models.SystemAnnouncement
+	if err := config.DB.Where("id = ?", id).First(&announcement).Error; err != nil {
+		return nil, err
+	}
+	return &announcement, nil
+}
+
+// GetAnnouncementStats answers "who has actually seen this", which the old
+// bare acknowledgement count could not: it had no denominator and no way to
+// find the people still outstanding.
+func GetAnnouncementStats(id uint) (*AnnouncementStats, error) {
+	announcement, err := GetAnnouncementByID(id)
+	if err != nil {
+		return nil, err
+	}
+
+	roles := decodeAnnouncementAudience(announcement.Audience)
+	audienceCount, err := CountAnnouncementAudience(roles)
+	if err != nil {
+		return nil, err
+	}
+
+	var dismissCount int64
+	if err := config.DB.Model(&models.SystemAnnouncementDismissal{}).
+		Where("announcement_id = ?", id).Count(&dismissCount).Error; err != nil {
+		return nil, err
+	}
+
+	type recipientRow struct {
+		UserID         uint
+		FullName       string
+		Email          string
+		Role           string
+		AcknowledgedAt *time.Time
+	}
+
+	query := config.DB.Model(&models.User{}).
+		Select("users.id AS user_id, users.full_name, users.email, users.role, acks.acknowledged_at").
+		Joins("LEFT JOIN system_announcement_acks AS acks ON acks.user_id = users.id AND acks.announcement_id = ?", id).
+		Where("users.is_active = ?", true)
+
+	if !slices.Contains(roles, "all") {
+		lowered := make([]string, 0, len(roles))
+		for _, role := range roles {
+			lowered = append(lowered, strings.ToLower(strings.TrimSpace(role)))
+		}
+		query = query.Where("LOWER(users.role) IN ?", lowered)
+	}
+
+	rows := make([]recipientRow, 0)
+	if err := query.Order("users.full_name ASC").Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	stats := &AnnouncementStats{
+		AnnouncementID: id,
+		AudienceCount:  audienceCount,
+		DismissCount:   dismissCount,
+		Pending:        make([]AnnouncementRecipient, 0),
+		Acknowledged:   make([]AnnouncementRecipient, 0),
+	}
+
+	for _, row := range rows {
+		recipient := AnnouncementRecipient{
+			UserID:         row.UserID,
+			FullName:       row.FullName,
+			Email:          row.Email,
+			Role:           row.Role,
+			AcknowledgedAt: row.AcknowledgedAt,
+		}
+		if row.AcknowledgedAt != nil {
+			stats.Acknowledged = append(stats.Acknowledged, recipient)
+			continue
+		}
+		stats.Pending = append(stats.Pending, recipient)
+	}
+
+	stats.AckCount = int64(len(stats.Acknowledged))
+	if stats.AudienceCount > 0 {
+		stats.AckPercent = float64(stats.AckCount) * 100 / float64(stats.AudienceCount)
+	}
+
+	return stats, nil
+}
+
+// DismissAnnouncement records that this viewer closed the announcement. It
+// used to live in the browser's localStorage, which meant a dismissal did not
+// follow the person to their phone and came undone whenever site data was
+// cleared.
+func DismissAnnouncement(announcementID uint, userID uint, studentID uint) error {
+	if userID == 0 && studentID == 0 {
+		return errors.New("announcement dismissal actor is required")
+	}
+
+	var announcement models.SystemAnnouncement
+	if err := config.DB.Where("id = ?", announcementID).First(&announcement).Error; err != nil {
+		return err
+	}
+	if !announcement.IsDismissible || announcement.RequireAcknowledge {
+		return errors.New("announcement cannot be dismissed")
+	}
+
+	dismissal := models.SystemAnnouncementDismissal{
+		AnnouncementID: announcementID,
+		UserID:         userID,
+		DismissedAt:    time.Now(),
+		CreatedAt:      time.Now(),
+	}
+	if studentID > 0 {
+		dismissal.StudentID = &studentID
+	}
+
+	if err := config.DB.Create(&dismissal).Error; err != nil {
+		// The unique indexes turn a double click into a duplicate-key error
+		// rather than a second row. That is the outcome this function wants, so
+		// it is not worth surfacing.
+		if isDuplicateKeyError(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// isDuplicateKeyError reports whether the write lost a race to an identical one
+// that already landed.
+func isDuplicateKeyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, gorm.ErrDuplicatedKey) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "duplicate key") || strings.Contains(message, "unique constraint")
 }
 
 func AcknowledgeAnnouncement(announcementID uint, userID uint, studentID uint) error {
@@ -833,5 +1467,14 @@ func AcknowledgeAnnouncement(announcementID uint, userID uint, studentID uint) e
 	if studentID > 0 {
 		ack.StudentID = &studentID
 	}
-	return config.DB.Create(&ack).Error
+	if err := config.DB.Create(&ack).Error; err != nil {
+		// Two clicks landing together both miss the lookup above; the unique
+		// index catches the loser, and an already-recorded acknowledgement is
+		// exactly what the caller asked for.
+		if isDuplicateKeyError(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }

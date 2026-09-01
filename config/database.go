@@ -431,6 +431,52 @@ func MigrateBase64CourseCoversToFiles() {
 	log.Printf("✅ Migrated %d base64 course cover(s) to files under uploads/course-covers", migrated)
 }
 
+// MigrateAnnouncementStatuses backfills the editorial state that system
+// announcements gained after they had already been in use, and clears the
+// duplicate acknowledgement rows left behind by the old find-then-insert
+// AcknowledgeAnnouncement. Every statement is idempotent, which it has to be:
+// this runs on every boot.
+func MigrateAnnouncementStatuses() {
+	if DB == nil {
+		return
+	}
+
+	statements := []string{
+		// Rows written before `status` existed only had is_active to say
+		// whether they were live. A deactivated announcement is an archived
+		// one; everything else was already published.
+		`UPDATE system_announcements
+		 SET status = CASE WHEN is_active THEN 'published' ELSE 'archived' END
+		 WHERE status IS NULL OR status = ''`,
+		`UPDATE system_announcements SET severity = 'info' WHERE severity IS NULL OR severity = ''`,
+		`UPDATE system_announcements SET priority = 0 WHERE priority IS NULL`,
+		`UPDATE system_announcements SET notify_inbox = true WHERE notify_inbox IS NULL`,
+		// Keep only the earliest acknowledgement per (announcement, actor) so
+		// the unique indexes below can be built.
+		`DELETE FROM system_announcement_acks a
+		 USING system_announcement_acks b
+		 WHERE a.id > b.id
+		   AND a.announcement_id = b.announcement_id
+		   AND a.user_id = b.user_id
+		   AND a.user_id > 0`,
+		`DELETE FROM system_announcement_acks a
+		 USING system_announcement_acks b
+		 WHERE a.id > b.id
+		   AND a.announcement_id = b.announcement_id
+		   AND a.student_id = b.student_id
+		   AND a.student_id IS NOT NULL`,
+	}
+
+	for _, statement := range statements {
+		if err := DB.Exec(statement).Error; err != nil {
+			log.Printf("⚠️  Failed to migrate system announcement state: %v", err)
+			return
+		}
+	}
+
+	log.Println("✅ Migrated system announcement status and acknowledgements")
+}
+
 func MigratePerformanceIndexes() {
 	if DB == nil {
 		return
@@ -728,6 +774,48 @@ func MigratePerformanceIndexes() {
 		{
 			name: "courses_year_semester",
 			sql:  `CREATE INDEX IF NOT EXISTS idx_courses_year_semester ON courses (year, semester)`,
+		},
+
+		// ── System announcements ────────────────────────────────────────
+		//
+		// AcknowledgeAnnouncement looks the row up and inserts if it is
+		// missing, with no ON CONFLICT, so two clicks landing together both
+		// miss and both insert — and the acknowledgement count that admins
+		// read off the list is what goes wrong. Staff sessions carry a user_id
+		// and students carry a student_id with user_id left at 0, so the
+		// constraint has to be one partial index per actor kind rather than a
+		// single composite.
+		{
+			name: "system_announcement_acks_announcement_user_unique",
+			sql: `CREATE UNIQUE INDEX IF NOT EXISTS uq_system_announcement_acks_announcement_user
+			      ON system_announcement_acks (announcement_id, user_id)
+			      WHERE user_id > 0`,
+		},
+		{
+			name: "system_announcement_acks_announcement_student_unique",
+			sql: `CREATE UNIQUE INDEX IF NOT EXISTS uq_system_announcement_acks_announcement_student
+			      ON system_announcement_acks (announcement_id, student_id)
+			      WHERE student_id IS NOT NULL`,
+		},
+		{
+			name: "system_announcement_dismissals_announcement_user_unique",
+			sql: `CREATE UNIQUE INDEX IF NOT EXISTS uq_system_announcement_dismissals_announcement_user
+			      ON system_announcement_dismissals (announcement_id, user_id)
+			      WHERE user_id > 0`,
+		},
+		{
+			name: "system_announcement_dismissals_announcement_student_unique",
+			sql: `CREATE UNIQUE INDEX IF NOT EXISTS uq_system_announcement_dismissals_announcement_student
+			      ON system_announcement_dismissals (announcement_id, student_id)
+			      WHERE student_id IS NOT NULL`,
+		},
+		{
+			// ListActiveAnnouncementsForUser runs on every page load for every
+			// signed-in user, always filtered to the published rows and sorted
+			// by priority.
+			name: "system_announcements_status_priority",
+			sql: `CREATE INDEX IF NOT EXISTS idx_system_announcements_status_priority
+			      ON system_announcements (status, priority DESC, scheduled_at DESC)`,
 		},
 	}
 

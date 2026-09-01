@@ -102,6 +102,7 @@ func main() {
 		&models.UserNotification{},
 		&models.SystemAnnouncement{},
 		&models.SystemAnnouncementAck{},
+		&models.SystemAnnouncementDismissal{},
 		&models.DatabaseBackupRecord{},
 		// Feedback และ Log
 		&models.Feedback{},
@@ -120,6 +121,9 @@ func main() {
 	config.MigrateUploadPathsToApiPrefix()
 	config.MigrateBase64AvatarsToFiles()
 	config.MigrateBase64CourseCoversToFiles()
+	// Must run before the index pass: it clears the duplicate acknowledgement
+	// rows that would otherwise make the new unique indexes fail to build.
+	config.MigrateAnnouncementStatuses()
 	config.MigratePerformanceIndexes()
 	config.MigrateAutovacuumSettings()
 	config.MigratePgStatStatements()

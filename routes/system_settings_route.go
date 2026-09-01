@@ -13,6 +13,7 @@ func SetupSystemSettingsRoutes(app *fiber.App) {
 
 	settingsPublic := app.Group("/api/system-settings", middlewares.Protected())
 	settingsPublic.Get("/announcements/active", handlers.ListActiveAnnouncementsForCurrentUserHandler)
+	settingsPublic.Post("/announcements/:id/dismiss", handlers.DismissAnnouncementHandler)
 	settingsPublic.Get("/feature-flags", handlers.ListFeatureFlagsHandler)
 
 	settings := app.Group("/api/system-settings", middlewares.Protected(), middlewares.RequireRole("admin"))
@@ -26,7 +27,12 @@ func SetupSystemSettingsRoutes(app *fiber.App) {
 	settings.Get("/announcements", handlers.ListAnnouncementsHandler)
 	settings.Post("/announcements/upload-image", handlers.UploadAnnouncementImageHandler)
 	settings.Post("/announcements", handlers.CreateAnnouncementHandler)
+	// Registered before the ":id" routes so "batch" is not captured as an id.
+	settings.Post("/announcements/batch", handlers.CreateAnnouncementsBatchHandler)
 	settings.Put("/announcements/:id", handlers.UpdateAnnouncementHandler)
+	settings.Patch("/announcements/:id/status", handlers.SetAnnouncementStatusHandler)
+	settings.Delete("/announcements/:id", handlers.DeleteAnnouncementHandler)
+	settings.Get("/announcements/:id/stats", handlers.GetAnnouncementStatsHandler)
 	settings.Post("/announcements/:id/ack", handlers.AcknowledgeAnnouncementHandler)
 
 	settings.Put("/feature-flags/:key", middlewares.RequirePrivilegedStepUp("system_settings.feature_flags.update"), handlers.UpdateFeatureFlagHandler)

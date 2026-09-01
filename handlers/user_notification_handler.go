@@ -325,3 +325,25 @@ func AcknowledgeAnnouncementFromInboxHandler(c fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{"success": true, "message": "Acknowledged"})
 }
+
+// DismissAnnouncementHandler records that this viewer closed a dismissible
+// announcement. The dismissal used to be kept in the browser only, so it did
+// not follow the person to another device and was lost whenever site data was
+// cleared.
+func DismissAnnouncementHandler(c fiber.Ctx) error {
+	userID, hasUserID := middlewares.GetUserID(c)
+	studentID, hasStudentID := middlewares.GetStudentID(c)
+	if !hasUserID && !hasStudentID {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
+	}
+	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid announcement ID"})
+	}
+
+	if err := repositories.DismissAnnouncement(uint(id), userID, studentID); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Failed to dismiss announcement"})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "message": "Dismissed"})
+}

@@ -73,6 +73,11 @@
 หน้าโปรไฟล์ก็ใช้กฎเดียวกัน ผูกบัญชี KKU ได้เฉพาะโดเมนหลัก ผูกบัญชี Google ได้
 เฉพาะโดเมนสำรอง ส่วนบัญชีที่ผูกไว้แล้วยังยกเลิกการเชื่อมต่อได้จากทุกโดเมน
 
+หน้าเช็กชื่อ `/check-in/[sessionId]` ใช้กฎเดียวกันด้วย หน้านี้บังคับ redirect มาที่
+โดเมนของคณะอยู่แล้วก่อนโหลดข้อมูล (campus network guard เชื่อ IP ของ LAN เฉพาะเมื่อ
+request มาถึงบนโดเมนหลัก) ในทางปฏิบัติจึงเห็นปุ่ม KKU SSO เสมอ และล็อกอินด้วยการ
+redirect เต็มหน้าเหมือนเดิม ไม่ใช้ป็อปอัป เพราะเบราว์เซอร์ในแอปสแกน QR บล็อกป็อปอัป
+
 > ต้องเพิ่ม `https://cocolab.osp101.com/api/auth/google/callback` เข้าไปใน
 > Authorized redirect URIs ของ Google Cloud Console ไม่งั้นล็อกอินบนโดเมนสำรอง
 > จะติด `redirect_uri_mismatch`
@@ -86,11 +91,12 @@
 ปิดชั่วคราวโดยไม่แก้โค้ด: `NEXT_PUBLIC_TEMP_GOOGLE_FALLBACK=false` ตอน build
 
 วิธีเอาออกถาวรเมื่อสำนักอัปเดตข้อมูลครบแล้ว ค้นคำว่า
-`TEMP_GOOGLE_FALLBACK_ON_KKU_DOMAIN` แล้วลบทั้งหมด 4 จุด
+`TEMP_GOOGLE_FALLBACK_ON_KKU_DOMAIN` แล้วลบทั้งหมด 5 จุด
 
 - `lib/auth-providers.ts` (ตัวค่าคงที่)
 - `app/login/page.tsx` (กล่องสีเหลือง)
 - `app/student/login/page.tsx` (กล่องสีเหลือง)
+- `app/check-in/[sessionId]/page.tsx` (ปุ่มรองใต้ปุ่มหลักในขั้นเข้าสู่ระบบ)
 - `components/profile/AuthenticationSection.tsx` (เงื่อนไขใน isProviderConnectable)
 
 ## ลำดับการทำงาน

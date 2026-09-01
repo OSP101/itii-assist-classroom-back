@@ -790,6 +790,18 @@ type SystemAnnouncement struct {
 	MessageEN          string         `gorm:"type:text" json:"message_en"`
 	ContentType        string         `gorm:"type:varchar(20);default:'text'" json:"content_type"`
 	DisplayMode        string         `gorm:"type:varchar(20);default:'banner_top'" json:"display_mode"`
+	// Severity drives the colour, icon and wording the announcement is shown
+	// with: info | success | warning | urgent.
+	Severity string `gorm:"type:varchar(20);default:'info';index" json:"severity"`
+	// Priority pins an announcement above the others in the stack. Higher wins;
+	// ties fall back to the scheduled/created ordering.
+	Priority int `gorm:"default:0" json:"priority"`
+	// Status is the editorial state: draft | scheduled | published | archived.
+	// IsActive is kept in sync with it so older clients keep working.
+	Status string `gorm:"type:varchar(20);default:'published';index" json:"status"`
+	// NotifyInbox controls whether publishing also fans the announcement out to
+	// every recipient's notification inbox.
+	NotifyInbox bool `gorm:"type:boolean;default:true" json:"notify_inbox"`
 	ImageURL           string         `gorm:"type:text" json:"image_url"`
 	ActionLabel        string         `gorm:"type:varchar(255)" json:"action_label"`
 	ActionLabelTH      string         `gorm:"type:varchar(255)" json:"action_label_th"`
@@ -813,6 +825,19 @@ type SystemAnnouncementAck struct {
 	UserID         uint      `gorm:"not null;index" json:"user_id"`
 	StudentID      *uint     `gorm:"index" json:"student_id,omitempty"`
 	AcknowledgedAt time.Time `gorm:"type:timestamptz" json:"acknowledged_at"`
+	CreatedAt      time.Time `gorm:"type:timestamptz" json:"created_at"`
+}
+
+// SystemAnnouncementDismissal records that a viewer closed a dismissible
+// announcement. It used to live in localStorage only, so a dismissed banner
+// came straight back on another device or after the browser storage was
+// cleared.
+type SystemAnnouncementDismissal struct {
+	ID             uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	AnnouncementID uint      `gorm:"not null;index" json:"announcement_id"`
+	UserID         uint      `gorm:"not null;index" json:"user_id"`
+	StudentID      *uint     `gorm:"index" json:"student_id,omitempty"`
+	DismissedAt    time.Time `gorm:"type:timestamptz" json:"dismissed_at"`
 	CreatedAt      time.Time `gorm:"type:timestamptz" json:"created_at"`
 }
 

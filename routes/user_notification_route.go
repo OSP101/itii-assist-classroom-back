@@ -14,5 +14,6 @@ func SetupUserNotificationRoutes(app *fiber.App) {
 	group.Patch("/read-all", handlers.MarkAllNotificationsReadHandler)
 	group.Patch("/:id/read", handlers.MarkNotificationReadHandler)
 	group.Post("/announcements/:id/ack", handlers.AcknowledgeAnnouncementFromInboxHandler)
+	group.Post("/announcements/:id/dismiss", handlers.DismissAnnouncementHandler)
 	group.Delete("/clear", handlers.ClearReadNotificationsHandler)
 }
