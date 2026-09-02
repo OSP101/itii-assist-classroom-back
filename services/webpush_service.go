@@ -34,7 +34,21 @@ func getVAPIDKeys() (publicKey, privateKey, subject string) {
 	privateKey = strings.TrimSpace(os.Getenv("VAPID_PRIVATE_KEY"))
 	subject = strings.TrimSpace(os.Getenv("VAPID_SUBJECT"))
 	if subject == "" {
-		subject = "mailto:admin@example.com"
+		subject = "admin@example.com"
+	}
+	// webpush-go's getVAPIDAuthorizationHeader prepends "mailto:" itself
+	// whenever the subscriber string doesn't already start with "https:" - it
+	// does NOT check for an existing "mailto:" prefix. VAPID_SUBJECT is
+	// conventionally written as "mailto:someone@example.com" (that's the
+	// literal value the docs/.env examples for this env var use), so passing
+	// it straight through produced a VAPID JWT "sub" claim of
+	// "mailto:mailto:someone@example.com" - not a syntactically valid mailto
+	// URI. Apple's web push relay validates that claim strictly and rejected
+	// every single push with 403, silently; other push services (FCM,
+	// Mozilla) were far more lenient about it, which is why this only ever
+	// showed up as "iOS never gets anything."
+	if withoutScheme, ok := strings.CutPrefix(strings.ToLower(subject), "mailto:"); ok {
+		subject = subject[len(subject)-len(withoutScheme):]
 	}
 	return
 }

@@ -5,12 +5,67 @@ import (
 	"itii-assist/models"
 	"itii-assist/repositories"
 	"itii-assist/services"
+	"net"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"gorm.io/datatypes"
 )
+
+// allowedPushEndpointHosts is the allowlist of push services this server will
+// ever POST a payload to. RegisterPushHandler is reachable without a session
+// (students book queue tickets pre-auth), and until this check existed it
+// forwarded the caller-supplied `endpoint` verbatim into an outbound HTTP
+// request at send time with no validation at all — an attacker could park a
+// subscription (`endpoint` = an internal address, or any URL of their
+// choosing) against ANY user_id and the server would dutifully POST to it
+// every time that user got a push. That is a server-side request forgery
+// primitive, not a push feature. Real browsers only ever hand back a
+// subscription endpoint on one of these hosts, so anything else is rejected
+// outright rather than merely resolved-and-checked (defense in depth: a
+// hostname passing DNS-based private-IP checks today can still be
+// re-pointed at an internal address tomorrow — TOCTOU on a check like that is
+// exactly how SSRF filters get bypassed).
+var allowedPushEndpointHosts = map[string]bool{
+	"web.push.apple.com":                true,
+	"fcm.googleapis.com":                true,
+	"updates.push.services.mozilla.com": true,
+	"push.apple.com":                    true,
+}
+
+// isAllowedPushEndpoint validates that endpoint is an https URL to a known
+// push vendor. Used for every registration (worker and student) — SSRF risk
+// is identical either way.
+func isAllowedPushEndpoint(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return false
+	}
+	host := u.Hostname()
+	if allowedPushEndpointHosts[host] {
+		return true
+	}
+	// Windows/UWP push (notify.windows.com) and Mozilla's regional autopush
+	// nodes use rotating subdomains - match the fixed suffix instead of an
+	// exact host.
+	if strings.HasSuffix(host, ".notify.windows.com") || strings.HasSuffix(host, ".push.services.mozilla.com") {
+		return true
+	}
+	return false
+}
+
+// isPrivateOrLoopbackHost is kept as a second, independent gate (not the
+// primary defense - the allowlist above is) in case the allowlist is ever
+// loosened to a broader suffix match.
+func isPrivateOrLoopbackHost(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()
+}
 
 type PushSubscriptionKeysInput struct {
 	P256dh string `json:"p256dh"`
@@ -60,6 +115,9 @@ func RegisterPushHandler(c fiber.Ctx) error {
 	if endpoint == "" || p256dh == "" || auth == "" || input.UserType == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "error": fiber.Map{"message": "endpoint, keys และ user_type จำเป็นต้องระบุ"}})
 	}
+	if !isAllowedPushEndpoint(endpoint) {
+		return c.Status(400).JSON(fiber.Map{"success": false, "error": fiber.Map{"message": "endpoint ไม่ใช่ push service ที่รองรับ"}})
+	}
 
 	now := time.Now()
 	var deviceInfo datatypes.JSON
@@ -79,10 +137,21 @@ func RegisterPushHandler(c fiber.Ctx) error {
 	}
 
 	if input.UserType == "worker" {
-		if input.UserID == nil {
-			return c.Status(400).JSON(fiber.Map{"success": false, "error": fiber.Map{"message": "user_id is required for workers"}})
+		// A worker subscription is tied to a real account and, unlike a
+		// student's (scoped to a booking they hold the PIN for), carries no
+		// natural proof of ownership in the request body - user_id was just a
+		// number the caller supplied. Anyone could park a subscription against
+		// any worker's account, which is exactly how an anonymous scanner
+		// filled this user's push_subscriptions with garbage. Require the
+		// caller to actually be that worker.
+		authedUserID, ok := c.Locals("user_id").(uint)
+		if !ok || authedUserID == 0 {
+			return c.Status(401).JSON(fiber.Map{"success": false, "error": fiber.Map{"message": "ต้องเข้าสู่ระบบก่อนถึงจะลงทะเบียนอุปกรณ์รับงานได้"}})
 		}
-		sub.UserID = input.UserID
+		if input.UserID != nil && *input.UserID != authedUserID {
+			return c.Status(403).JSON(fiber.Map{"success": false, "error": fiber.Map{"message": "ไม่สามารถลงทะเบียนอุปกรณ์ให้บัญชีอื่นได้"}})
+		}
+		sub.UserID = &authedUserID
 		sub.SessionID = rawMessageToString(input.TargetID)
 	}
 
