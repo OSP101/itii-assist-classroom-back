@@ -314,7 +314,7 @@ func startAttendancePinLifecycleWorker() {
 			}
 
 			for _, change := range changes {
-				if change.Rotated || change.Released || change.StatusChanged {
+				if change.Rotated || change.Released || change.StatusChanged || change.ModeChanged {
 					pinMode := "static"
 					if change.PinRotatesAt != nil {
 						pinMode = "rotating"

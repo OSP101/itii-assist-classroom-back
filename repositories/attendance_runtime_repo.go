@@ -387,6 +387,17 @@ func applyAttendanceRuntimeStateToSession(session *models.AttendanceSession, sta
 	session.PinRotatesAt = state.NextRotationAt
 	session.PinGraceUntil = state.PreviousValidUntil
 	session.PinMode = state.Mode
+	// pin_mode is served to every screen straight from this cached runtime
+	// state while auto_rotate_pin is served from the session row, so the two
+	// must never contradict each other in one response: a cache still saying
+	// "rotating" after the instructor turned rotation off makes the check-in
+	// page advertise "รหัสเปลี่ยนทุก 1 นาที" under a PIN that never changes,
+	// and the instructor's own screens disagree with each other about which
+	// mode the session is in. The session's own setting always wins here.
+	if session.PinMode == "rotating" && !(session.AutoRotatePin != nil && *session.AutoRotatePin) {
+		session.PinMode = "static"
+		session.PinRotatesAt = nil
+	}
 	session.Status = state.Status
 	session.StartedAt = state.StartedAt
 	session.ExpiresAt = state.ExpiresAt
@@ -957,6 +968,15 @@ func MaintainAttendanceRuntimeSessions(ctx context.Context, now time.Time) ([]At
 				continue
 			}
 			state = reconciled
+			changes = append(changes, AttendancePinStateChange{
+				SessionID:    session.ID,
+				CourseID:     session.CourseID,
+				Status:       "active",
+				PinCode:      state.CurrentPIN,
+				PinIssuedAt:  state.PinIssuedAt,
+				PinRotatesAt: state.NextRotationAt,
+				ModeChanged:  true,
+			})
 		}
 		if state.Mode != "rotating" || state.NextRotationAt == nil || state.NextRotationAt.After(now) {
 			continue

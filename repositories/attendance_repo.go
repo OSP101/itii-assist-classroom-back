@@ -231,6 +231,11 @@ type AttendancePinStateChange struct {
 	Rotated       bool
 	Released      bool
 	StatusChanged bool
+	// ModeChanged marks a change that only flipped rotating<->static, with the
+	// PIN itself untouched. The screens still have to hear about it: their
+	// "PIN เปลี่ยนทุก 1 นาที" label and countdown are driven by pin_rotates_at,
+	// so without an event they keep counting down until their next poll.
+	ModeChanged bool
 }
 
 func ComputeSessionStatus(s models.AttendanceSession) string {
