@@ -33,6 +33,12 @@ func SetupQueueRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	publicCourse.Post("/bookings/:bookingId/cancel", handlers.CancelQueueBookingPublicHandler)
 	publicCourse.Get("/sessions/:sessionId/desk-statuses", handlers.GetQueueDeskStatusesPublicHandler)
 
+	// Not course-scoped: this room is always the caller's own worker-<id>, so
+	// no courseId or per-course permission check applies (see the handler's
+	// own doc comment for why that is sufficient).
+	workerAuth := app.Group("/api/queue", middlewares.Protected())
+	workerAuth.Get("/worker/socket-ticket", handlers.GetWorkerSocketTicketHandler)
+
 	base := app.Group("/api/courses/:courseId/queue", middlewares.Protected())
 	base.Use(middlewares.RequireAdminFeature("menu.queue"))
 

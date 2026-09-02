@@ -1132,6 +1132,41 @@ func GetDeskStatusesHandler(c fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "data": statuses})
 }
 
+// workerSocketTicketTTL matches the instructor attendance-view ticket: long
+// enough to carry a page from "fetch ticket" to "socket joined", short
+// enough that a leaked ticket is worthless by the time anyone could reuse it.
+const workerSocketTicketTTL = time.Minute
+
+// GET /api/queue/worker/socket-ticket
+//
+// Mints the ticket the worker (TA) queue page needs to join its own realtime
+// room. The worker-<id> room carries every task it assigns as it happens -
+// student name, student id, course, and assignment name - and used to be
+// joinable by anyone who could guess a user id, since ids here are small
+// sequential integers rather than the unguessable session/booking nanoids
+// the rest of the queue feature relies on. This mirrors the fix already
+// applied to the attendance instructor room (GetAttendanceSessionSocketTicketHandler):
+// no course-level permission check is needed here because the room is
+// inherently self-scoped - a ticket only for the caller's own worker-<id>
+// proves nothing more than "you are logged in as this user", which is
+// exactly the room it unlocks.
+func GetWorkerSocketTicketHandler(c fiber.Ctx) error {
+	userID, ok := c.Locals("user_id").(uint)
+	if !ok || userID == 0 {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "unauthorized"})
+	}
+
+	ticket, expiresAt, err := realtime.IssueSocketTicket(fmt.Sprintf("worker-%d", userID), workerSocketTicketTTL)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to issue socket ticket"})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    fiber.Map{"ticket": ticket, "expires_at": expiresAt},
+	})
+}
+
 // POST /api/courses/:courseId/queue/sessions/:sessionId/worker/join
 func WorkerJoinHandler(c fiber.Ctx) error {
 	sessionID := c.Params("sessionId")

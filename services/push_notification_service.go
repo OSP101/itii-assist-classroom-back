@@ -35,7 +35,7 @@ func SendQueueWorkerAssignedPush(sessionID string, workerID uint, booking *model
 
 	workerURL := fmt.Sprintf("/classroom/%s/queue/%s/worker", session.CourseID, session.ID)
 	title := "มีงานใหม่"
-	body := fmt.Sprintf("คิว #%d โต๊ะ %s", booking.QueueNumber, booking.DeskID)
+	body := fmt.Sprintf("คิว #%d โต๊ะ %d", booking.QueueNumber, booking.DeskNumber)
 	if strings.TrimSpace(booking.BookingType) != "" {
 		body = fmt.Sprintf("%s - %s", body, booking.BookingType)
 	}

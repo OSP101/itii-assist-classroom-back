@@ -380,8 +380,24 @@ func (c *client) handleMessage(message incomingMessage) {
 	case "leave-queue-group":
 		c.hub.leave(c, "queue-group-"+rawString(message.Data))
 	case "join-worker":
-		c.hub.join(c, "worker-"+rawString(message.Data))
+		// Ticket-gated: this room carries every task as it is assigned to a
+		// worker - student name, student id, course, assignment name. It used
+		// to be joinable by anyone who could guess a user id (a small
+		// sequential integer here, not a nanoid), which made a live feed of
+		// another TA's task assignments readable by anyone with a socket
+		// connection - no login even required. The ticket comes from
+		// GET /api/queue/worker/socket-ticket, which only ever mints a ticket
+		// for the caller's own id.
+		payload := rawMap(message.Data)
+		ticket := strings.TrimSpace(fmt.Sprint(payload["ticket"]))
+		room, ok := validateSocketTicket(ticket)
+		if !ok || !strings.HasPrefix(room, "worker-") {
+			c.sendDirect("worker-join-rejected", fiber.Map{"reason": "invalid_ticket"})
+			return
+		}
+		c.hub.join(c, room)
 	case "leave-worker":
+		// Leaving needs no ticket — a client can only ever remove itself.
 		c.hub.leave(c, "worker-"+rawString(message.Data))
 	case "join-booking":
 		c.hub.join(c, "booking-"+rawString(message.Data))
