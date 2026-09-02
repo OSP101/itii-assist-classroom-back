@@ -257,6 +257,7 @@ func main() {
 	services.StartDailyDatabaseBackupWorker()
 	startQueueMidnightWorker()
 	startQueuePausedSessionLeaseWorker()
+	startQueueOfferTimeoutWorker()
 	log.Fatal(app.Listen(":8000"))
 }
 
@@ -408,6 +409,51 @@ func startQueueMidnightWorker() {
 				lastDate = today
 				runCleanup()
 			}
+		}
+	}()
+}
+
+// startQueueOfferTimeoutWorker expires stale queue offers on a timer.
+//
+// Offer expiry used to run only inside request handlers, so a 90s offer could
+// outlive its deadline indefinitely: the TA who received it may have closed the
+// tab, and every other TA suppresses polling while their socket is healthy, so
+// no request arrived to trigger the sweep. The booking then showed as assigned
+// on the overview while nobody could act on it.
+//
+// The sweep also re-dispatches sessions holding an unassigned waiting booking,
+// which covers the tasks released by a decline or by a TA closing intake.
+func startQueueOfferTimeoutWorker() {
+	const queueOfferSweepInterval = 10 * time.Second
+
+	runSweep := func() {
+		sessionIDs, err := repositories.GetActiveQueueSessionIDs()
+		if err != nil {
+			log.Printf("⚠️  Queue offer sweep: cannot list active sessions: %v", err)
+			return
+		}
+		for _, sessionID := range sessionIDs {
+			if err := handlers.ProcessQueueOfferTimeoutsForSession(sessionID); err != nil {
+				log.Printf("⚠️  Queue offer sweep failed session=%s err=%v", sessionID, err)
+				continue
+			}
+			hasWaiting, err := repositories.HasUnassignedWaitingBooking(sessionID)
+			if err != nil {
+				log.Printf("⚠️  Queue offer sweep: cannot check waiting bookings session=%s err=%v", sessionID, err)
+				continue
+			}
+			if hasWaiting {
+				handlers.DispatchWaitingBookingsToAvailableWorkers(sessionID)
+			}
+		}
+	}
+
+	go func() {
+		ticker := time.NewTicker(queueOfferSweepInterval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			runSweep()
 		}
 	}()
 }

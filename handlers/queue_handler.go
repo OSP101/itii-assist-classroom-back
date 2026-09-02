@@ -12,6 +12,7 @@ import (
 	"itii-assist/services"
 	"itii-assist/utils"
 	"log"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1205,43 +1206,61 @@ func WorkerLeaveHandler(c fiber.Ctx) error {
 		return err
 	}
 
-	worker, err := repositories.GetWorkerBySessionUser(sessionID, userID)
-	if err != nil {
+	if _, err := repositories.GetWorkerBySessionUser(sessionID, userID); err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Worker not found"})
 	}
 
-	var activeBooking models.QueueBooking
-	hasActiveBooking := config.DB.Where("queue_session_id = ? AND assigned_worker_id = ? AND status IN ?", sessionID, userID, []string{"waiting", "in_progress"}).First(&activeBooking).Error == nil
-
-	newStatus := "offline"
-	message := "ออกจากการรับงานสำเร็จ"
-	if hasActiveBooking {
-		newStatus = "paused"
-		message = "หยุดรับงานใหม่แล้ว กรุณาทำงานปัจจุบันให้เสร็จ"
-	}
-
-	now := time.Now()
-	if err := config.DB.Model(&models.QueueWorker{}).
-		Where("id = ?", worker.ID).
-		Updates(map[string]interface{}{"status": newStatus, "last_active_at": now}).Error; err != nil {
+	// Only a task the TA already accepted keeps them in "paused". An offer they
+	// never accepted is released here and re-dispatched below, so closing intake
+	// really does hand the task to somebody else.
+	leaveResult, err := repositories.WorkerLeave(sessionID, userID)
+	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to leave worker session"})
 	}
 
-	logCourseActivity(c, session.CourseID, userID, "leave_queue_worker", "queue", "queue_session", session.ID, session.Title, fiber.Map{"status": newStatus})
+	newStatus := leaveResult.Status
+	message := "ออกจากการรับงานสำเร็จ"
+	if newStatus == "paused" {
+		message = "หยุดรับงานใหม่แล้ว กรุณาทำงานปัจจุบันให้เสร็จ"
+	} else if len(leaveResult.ReleasedBookings) > 0 {
+		message = "ออกจากการรับงานแล้ว ระบบส่งงานที่ยังไม่ได้กดรับต่อให้คนอื่น"
+	}
+
+	logCourseActivity(c, session.CourseID, userID, "leave_queue_worker", "queue", "queue_session", session.ID, session.Title, fiber.Map{"status": newStatus, "released_offers": len(leaveResult.ReleasedBookings)})
 	emitToQueueWithGroup(sessionID, "worker-left", fiber.Map{"worker_id": userID, "status": newStatus, "timestamp": time.Now().UnixMilli()})
 	go emitQueueReportSnapshot(sessionID)
 
 	// Mirror offline/paused status to all sessions in the concurrent group.
 	go repositories.WorkerOfflineMirrorGroup(sessionID, userID, newStatus)
 
-	return c.JSON(fiber.Map{"success": true, "message": message, "data": fiber.Map{"status": newStatus}})
+	// Announce the released offers, then push them at whoever is free now. The
+	// released booking may belong to a partner session of a concurrent group,
+	// so dispatch against the booking's own session.
+	releasedSessionIDs := make([]string, 0, len(leaveResult.ReleasedBookings))
+	for i := range leaveResult.ReleasedBookings {
+		released := leaveResult.ReleasedBookings[i]
+		realtime.EmitToWorker(userID, "offer-expired", fiber.Map{
+			"booking_id": released.ID,
+			"session_id": released.QueueSessionID,
+			"timestamp":  time.Now().UnixMilli(),
+		})
+		emitQueueBookingChanged(released.QueueSessionID, "booking-requeued", &released)
+		if !slices.Contains(releasedSessionIDs, released.QueueSessionID) {
+			releasedSessionIDs = append(releasedSessionIDs, released.QueueSessionID)
+		}
+	}
+	for _, releasedSessionID := range releasedSessionIDs {
+		dispatchWaitingBookingsToAvailableWorkers(releasedSessionID)
+	}
+
+	return c.JSON(fiber.Map{"success": true, "message": message, "data": fiber.Map{"status": newStatus, "released_offers": len(leaveResult.ReleasedBookings)}})
 }
 
 // GET /api/courses/:courseId/queue/sessions/:sessionId/workers/current-booking
 func GetWorkerCurrentBookingHandler(c fiber.Ctx) error {
 	sessionID := c.Params("sessionId")
 	userID := c.Locals("user_id").(uint)
-	if _, timeoutErr := repositories.ProcessQueueOfferTimeouts(sessionID); timeoutErr != nil {
+	if timeoutErr := ProcessQueueOfferTimeoutsForSession(sessionID); timeoutErr != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to fetch current booking"})
 	}
 	session, err := repositories.GetQueueSessionByID(sessionID)
@@ -1355,6 +1374,13 @@ func WorkerBookingActionHandler(c fiber.Ctx) error {
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update booking"})
 		}
+	}
+
+	// A declined booking goes back to the pool unassigned. Only this worker was
+	// re-assigned above, so without a sweep the booking waits for an unrelated
+	// request while other TAs sit idle.
+	if input.Action == "reject" {
+		dispatchWaitingBookingsToAvailableWorkers(booking.QueueSessionID)
 	}
 
 	var nextBookingPayload interface{}
@@ -4268,8 +4294,57 @@ func emitQueueActionChanged(booking *models.QueueBooking, action string) {
 	}
 }
 
+// ProcessQueueOfferTimeoutsForSession expires stale offers and announces what
+// happened to them. Exported for the background sweeper in cmd/api.
+func ProcessQueueOfferTimeoutsForSession(sessionID string) error {
+	reassignments, err := repositories.ProcessQueueOfferTimeouts(sessionID)
+	if err != nil {
+		return err
+	}
+	emitQueueOfferReassignments(reassignments)
+	return nil
+}
+
+// emitQueueOfferReassignments announces offers that just expired.
+//
+// The requeue itself happens inside a repository transaction, which cannot
+// reach the realtime hub. Without this the booking is re-offered in the
+// database - visible on the projector and the overview page - while the worker
+// who received it is told nothing and their page never polls again.
+func emitQueueOfferReassignments(reassignments []repositories.QueueOfferReassignment) {
+	for _, reassignment := range reassignments {
+		booking := reassignment.Booking
+		if booking == nil {
+			continue
+		}
+
+		// The TA who let it lapse gets an explicit signal so their card clears
+		// instead of sitting on a dead offer until they touch something.
+		realtime.EmitToWorker(reassignment.TimedOutWorkerID, "offer-expired", fiber.Map{
+			"booking_id": booking.ID,
+			"session_id": reassignment.SessionID,
+			"timestamp":  time.Now().UnixMilli(),
+		})
+
+		if reassignment.NewWorkerID == 0 {
+			emitQueueBookingChanged(reassignment.SessionID, "booking-requeued", booking)
+			continue
+		}
+
+		bookingPayload, payloadErr := buildWorkerBookingPayload(booking)
+		if payloadErr != nil {
+			log.Printf("⚠️  offer reassignment payload failed booking=%d err=%v", booking.ID, payloadErr)
+			continue
+		}
+		emitToQueueWithGroup(reassignment.SessionID, "booking-assigned", fiber.Map{"booking": bookingPayload, "worker_id": reassignment.NewWorkerID, "timestamp": time.Now().UnixMilli()})
+		realtime.EmitToBooking(booking.ID, "booking-assigned", fiber.Map{"booking": bookingPayload, "timestamp": time.Now().UnixMilli()})
+		realtime.EmitToWorker(reassignment.NewWorkerID, "new-task", fiber.Map{"booking": bookingPayload, "timestamp": time.Now().UnixMilli()})
+		go services.SendQueueWorkerAssignedPush(reassignment.SessionID, reassignment.NewWorkerID, booking)
+	}
+}
+
 func tryAssignNextBookingAndEmit(sessionID string, workerID uint) (*models.QueueBooking, error) {
-	if _, timeoutErr := repositories.ProcessQueueOfferTimeouts(sessionID); timeoutErr != nil {
+	if timeoutErr := ProcessQueueOfferTimeoutsForSession(sessionID); timeoutErr != nil {
 		return nil, timeoutErr
 	}
 
@@ -4288,6 +4363,12 @@ func tryAssignNextBookingAndEmit(sessionID string, workerID uint) (*models.Queue
 		go services.SendQueueWorkerAssignedPush(sessionID, workerID, nextBooking)
 	}
 	return nextBooking, nil
+}
+
+// DispatchWaitingBookingsToAvailableWorkers is the exported entry point for the
+// background sweeper in cmd/api.
+func DispatchWaitingBookingsToAvailableWorkers(sessionID string) {
+	dispatchWaitingBookingsToAvailableWorkers(sessionID)
 }
 
 func dispatchWaitingBookingsToAvailableWorkers(sessionID string) {

@@ -1232,6 +1232,142 @@ func lockWorkerRowForBookingSession(tx *gorm.DB, sessionID string, userID uint) 
 	return &worker, nil
 }
 
+// WorkerLeaveResult reports what stopping task intake did to the worker row and
+// to any offer they were still holding.
+type WorkerLeaveResult struct {
+	// Status is the worker's new status: "paused" while a task they already
+	// accepted is still in progress, otherwise "offline".
+	Status string
+	// ReleasedBookings are offers the worker had not accepted yet. They are
+	// handed straight back to the pool - the caller must re-dispatch and emit.
+	ReleasedBookings []models.QueueBooking
+}
+
+// WorkerLeave stops task intake for a worker.
+//
+// Only a booking the worker has actually started (in_progress) holds them in
+// "paused"; an offer still sitting at status "waiting" is released immediately.
+// Treating an unaccepted offer as an active booking used to park it on a TA who
+// had just closed intake, where nothing could move it until the 90s offer
+// expiry happened to be processed by some other request.
+//
+// The active-booking lookup spans the whole concurrent group: in a shared room a
+// TA may be working on a partner session's booking, and going "offline" while
+// holding it left a live task attached to a worker the dispatcher considers gone.
+func WorkerLeave(sessionID string, userID uint) (*WorkerLeaveResult, error) {
+	result := &WorkerLeaveResult{Status: "offline"}
+
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
+		now := time.Now()
+		result.ReleasedBookings = nil
+
+		var worker models.QueueWorker
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("queue_session_id = ? AND user_id = ?", sessionID, userID).
+			First(&worker).Error; err != nil {
+			return err
+		}
+
+		groupSessionIDs, err := concurrentSessionIDsTx(tx, sessionID)
+		if err != nil {
+			return err
+		}
+
+		var inProgress models.QueueBooking
+		inProgressErr := tx.
+			Where("queue_session_id IN ? AND assigned_worker_id = ? AND status = ?", groupSessionIDs, userID, "in_progress").
+			First(&inProgress).Error
+		if inProgressErr != nil && !errors.Is(inProgressErr, gorm.ErrRecordNotFound) {
+			return inProgressErr
+		}
+
+		workerUpdates := map[string]interface{}{"last_active_at": now}
+
+		if inProgressErr == nil {
+			result.Status = "paused"
+			workerUpdates["status"] = "paused"
+			return tx.Model(&models.QueueWorker{}).
+				Where("queue_session_id = ? AND user_id = ?", sessionID, userID).
+				Updates(workerUpdates).Error
+		}
+
+		var offers []models.QueueBooking
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("queue_session_id IN ? AND assigned_worker_id = ? AND status = ?", groupSessionIDs, userID, "waiting").
+			Find(&offers).Error; err != nil {
+			return err
+		}
+
+		for i := range offers {
+			b := offers[i]
+			if err := tx.Model(&models.QueueBooking{}).
+				Where("id = ?", b.ID).
+				Updates(map[string]interface{}{
+					"assigned_worker_id": nil,
+					"assigned_at":        nil,
+					"offer_expires_at":   nil,
+					// Same stamp as a timeout so the booking is not offered
+					// straight back to the TA who just closed intake.
+					"last_offer_worker_id":    userID,
+					"last_offer_timed_out_at": now,
+					"updated_at":              now,
+				}).Error; err != nil {
+				return err
+			}
+			if err := updateDeskStatus(tx, b.QueueSessionID, b.DeskID, b.BookingType, "waiting", b.ID); err != nil {
+				return err
+			}
+
+			b.AssignedWorkerID = nil
+			b.AssignedAt = nil
+			b.OfferExpiresAt = nil
+			releasedBy := userID
+			b.LastOfferWorkerID = &releasedBy
+			releasedAt := now
+			b.LastOfferTimedOutAt = &releasedAt
+			result.ReleasedBookings = append(result.ReleasedBookings, b)
+		}
+
+		result.Status = "offline"
+		workerUpdates["status"] = "offline"
+		workerUpdates["current_booking_id"] = nil
+		// Leaving on purpose ends any auto-pause: the countdown belongs to a TA
+		// who is still in the room, and WorkerJoin clears it anyway on return.
+		workerUpdates["offer_paused_until"] = nil
+		workerUpdates["consecutive_offer_timeouts"] = 0
+		return tx.Model(&models.QueueWorker{}).
+			Where("queue_session_id = ? AND user_id = ?", sessionID, userID).
+			Updates(workerUpdates).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+// GetActiveQueueSessionIDs lists the sessions the offer-timeout worker has to
+// sweep. Offer expiry is otherwise only ever evaluated inside a request, so a
+// room where every TA sits idle with a healthy socket never expires anything.
+func GetActiveQueueSessionIDs() ([]string, error) {
+	var ids []string
+	err := config.DB.Model(&models.QueueSession{}).
+		Where("status = ?", "active").
+		Pluck("id", &ids).Error
+	return ids, err
+}
+
+// HasUnassignedWaitingBooking reports whether a session holds a booking that is
+// waiting with nobody assigned - the only case where a dispatch sweep can do
+// any work.
+func HasUnassignedWaitingBooking(sessionID string) (bool, error) {
+	var count int64
+	err := config.DB.Model(&models.QueueBooking{}).
+		Where("queue_session_id = ? AND status = ? AND assigned_worker_id IS NULL", sessionID, "waiting").
+		Limit(1).Count(&count).Error
+	return count > 0, err
+}
+
 // WorkerOfflineMirrorGroup sets offline status for a worker across all sessions in the group.
 func WorkerOfflineMirrorGroup(sessionID string, userID uint, newStatus string) {
 	groupIDs, err := GetConcurrentSessionIDs(sessionID)
@@ -1312,9 +1448,14 @@ func assignBookingDirectToWorker(tx *gorm.DB, booking *models.QueueBooking, work
 	return updateDeskStatus(tx, booking.QueueSessionID, booking.DeskID, booking.BookingType, "in_progress", booking.ID)
 }
 
-func assignTimedOutBookingToOtherWorker(tx *gorm.DB, booking *models.QueueBooking, excludeWorkerID uint, now time.Time) error {
+// assignTimedOutBookingToOtherWorker offers a requeued booking to the least
+// loaded free worker other than the one who let it expire. It returns the user
+// id of the worker who received the offer, or 0 when nobody was available, so
+// the caller can announce the new offer over realtime/push - the repository
+// layer itself never emits.
+func assignTimedOutBookingToOtherWorker(tx *gorm.DB, booking *models.QueueBooking, excludeWorkerID uint, now time.Time) (uint, error) {
 	if booking == nil {
-		return nil
+		return 0, nil
 	}
 
 	query := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
@@ -1328,20 +1469,39 @@ func assignTimedOutBookingToOtherWorker(tx *gorm.DB, booking *models.QueueBookin
 	var candidate models.QueueWorker
 	if err := query.Order("(total_grading_completed + total_help_completed) ASC, user_id ASC").First(&candidate).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
+			return 0, nil
 		}
-		return err
+		return 0, err
 	}
 
-	return assignBookingOfferToWorker(tx, booking, &candidate, now)
+	if err := assignBookingOfferToWorker(tx, booking, &candidate, now); err != nil {
+		return 0, err
+	}
+	return candidate.UserID, nil
+}
+
+// QueueOfferReassignment describes one offer that expired and what happened to
+// the booking afterwards. Callers in the handler layer use it to emit the
+// realtime/push notifications the repository cannot send itself: without them a
+// re-routed booking is assigned in the database while the receiving worker page
+// shows nothing.
+type QueueOfferReassignment struct {
+	Booking          *models.QueueBooking
+	SessionID        string
+	TimedOutWorkerID uint
+	// NewWorkerID is the worker who received the re-offer, or 0 when the
+	// booking went back to the pool because nobody was free.
+	NewWorkerID uint
 }
 
 // ProcessQueueOfferTimeouts requeues expired offers and immediately tries to route them to another ready worker.
-func ProcessQueueOfferTimeouts(sessionID string) (int, error) {
+// It returns one entry per expired offer so the caller can announce the outcome.
+func ProcessQueueOfferTimeouts(sessionID string) ([]QueueOfferReassignment, error) {
 	now := time.Now()
-	processedCount := 0
+	reassignments := make([]QueueOfferReassignment, 0)
 
 	err := config.DB.Transaction(func(tx *gorm.DB) error {
+		reassignments = reassignments[:0]
 		var expired []models.QueueBooking
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
 			Where("queue_session_id = ? AND status = ? AND assigned_worker_id IS NOT NULL AND offer_expires_at IS NOT NULL AND offer_expires_at <= ?", sessionID, "waiting", now).
@@ -1363,7 +1523,17 @@ func ProcessQueueOfferTimeouts(sessionID string) (int, error) {
 				return err
 			}
 
+			// Losing the offer frees the worker, but it must never make them
+			// *more* available than they were. Only a worker who was actually
+			// taking work (online, or busy holding this very offer) goes back to
+			// "online"; a paused or offline TA keeps their status. Defaulting to
+			// "online" here turned a TA who had left - or who was forced offline
+			// when the session was paused - into a ghost the dispatcher kept
+			// routing tasks to, on a page nobody had open.
 			workerStatus := "online"
+			if worker.Status == "paused" || worker.Status == "offline" {
+				workerStatus = worker.Status
+			}
 			workerUpdates := map[string]interface{}{
 				"status":                     workerStatus,
 				"current_booking_id":         nil,
@@ -1371,12 +1541,10 @@ func ProcessQueueOfferTimeouts(sessionID string) (int, error) {
 				"consecutive_offer_timeouts": gorm.Expr("consecutive_offer_timeouts + 1"),
 				"last_active_at":             now,
 			}
-			if worker.Status == "paused" {
-				workerStatus = "paused"
-				workerUpdates["status"] = workerStatus
-			}
 
-			if worker.Status != "paused" && worker.ConsecutiveOfferTimeouts+1 >= queueOfferPauseThreshold {
+			// The auto-pause penalty is for ignoring an offer while available;
+			// a TA who was already paused or offline never had the chance.
+			if workerStatus == "online" && worker.ConsecutiveOfferTimeouts+1 >= queueOfferPauseThreshold {
 				workerUpdates["status"] = "offline"
 				workerUpdates["offer_paused_until"] = now.Add(queueOfferPauseDuration)
 				workerUpdates["consecutive_offer_timeouts"] = 0
@@ -1410,30 +1578,43 @@ func ProcessQueueOfferTimeouts(sessionID string) (int, error) {
 			timedOutAt := now
 			requeued.LastOfferTimedOutAt = &timedOutAt
 
-			if err := assignTimedOutBookingToOtherWorker(tx, &requeued, workerID, now); err != nil {
+			newWorkerID, err := assignTimedOutBookingToOtherWorker(tx, &requeued, workerID, now)
+			if err != nil {
 				return err
 			}
 
-			processedCount++
+			// Re-read so the emitted payload carries the booking's final state
+			// (either the fresh offer, or the requeued/unassigned row).
+			var finalBooking models.QueueBooking
+			if err := tx.First(&finalBooking, booking.ID).Error; err != nil {
+				return err
+			}
+
+			reassignments = append(reassignments, QueueOfferReassignment{
+				Booking:          &finalBooking,
+				SessionID:        sessionID,
+				TimedOutWorkerID: workerID,
+				NewWorkerID:      newWorkerID,
+			})
 		}
 
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
-	return processedCount, nil
+	return reassignments, nil
 }
 
 // AssignNextWaitingBookingToWorker attempts to atomically assign the next matching waiting booking
 // to the specified worker. It returns (booking, assignedNow, error).
 // assignedNow is true only when this call newly assigned a booking.
+// The caller is responsible for running ProcessQueueOfferTimeouts (and emitting
+// its result) before calling this - see tryAssignNextBookingAndEmit. Doing it
+// here as well would swallow the reassignments it reports, leaving a re-routed
+// booking assigned in the database with nobody notified.
 func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.QueueBooking, bool, error) {
-	if _, err := ProcessQueueOfferTimeouts(sessionID); err != nil {
-		return nil, false, err
-	}
-
 	var bookingResult models.QueueBooking
 	assignedNow := false
 
@@ -1826,11 +2007,15 @@ func WorkerUpdateBooking(bookingID uint, workerID uint, action string, score *fl
 			}
 
 			updates := map[string]interface{}{
-				"assigned_worker_id":      nil,
-				"assigned_at":             nil,
-				"offer_expires_at":        nil,
+				"assigned_worker_id": nil,
+				"assigned_at":        nil,
+				"offer_expires_at":   nil,
+				// Stamped like a timeout on purpose: the re-offer guard in
+				// AssignNextWaitingBookingToWorker skips a booking only while
+				// last_offer_timed_out_at is recent, so leaving it NULL handed
+				// the booking straight back to the worker who just declined it.
 				"last_offer_worker_id":    workerID,
-				"last_offer_timed_out_at": nil,
+				"last_offer_timed_out_at": now,
 				"reject_count":            gorm.Expr("reject_count + 1"),
 				"worker_note":             workerNote,
 				"updated_at":              now,
