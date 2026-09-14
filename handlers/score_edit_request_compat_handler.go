@@ -458,6 +458,62 @@ func reviewScoreEditRequests(requestIDs []uint, approved bool, reviewerID uint, 
 	return len(contexts), courseID, assignmentName, nil
 }
 
+func notifyScoreEditRequestSubmittedByEmail(courseID string, actorID uint, assignmentName, reason string) {
+	userIDs, err := repositories.GetCourseUserIDs(courseID)
+	if err != nil || len(userIDs) == 0 {
+		return
+	}
+
+	var recipients []models.User
+	if err := config.DB.Where("id IN ? AND id <> ? AND email <> ''", userIDs, actorID).Find(&recipients).Error; err != nil || len(recipients) == 0 {
+		return
+	}
+
+	var actor models.User
+	requesterName := "ผู้ใช้งาน"
+	if err := config.DB.First(&actor, actorID).Error; err == nil {
+		requesterName = scoreEditRequestEmailDisplayName(&actor)
+	}
+
+	var course models.Course
+	courseName := courseID
+	if err := config.DB.Select("name").First(&course, "id = ?", courseID).Error; err == nil && course.Name != "" {
+		courseName = course.Name
+	}
+
+	link := services.CourseApprovalURL(courseID)
+	for i := range recipients {
+		recipient := recipients[i]
+		if err := services.SendScoreEditRequestSubmittedEmail(&recipient, courseName, assignmentName, requesterName, reason, link); err != nil {
+			services.LogEmailDeliveryError("score_edit_request_submitted", err)
+		}
+	}
+}
+
+func notifyScoreEditRequestReviewedByEmail(requesterID uint, courseID string, approved bool, assignmentName, comment string, count int) {
+	if requesterID == 0 {
+		return
+	}
+	var requester models.User
+	if err := config.DB.First(&requester, requesterID).Error; err != nil || strings.TrimSpace(requester.Email) == "" {
+		return
+	}
+	link := services.CourseApprovalURL(courseID)
+	if err := services.SendScoreEditRequestReviewedEmail(&requester, approved, assignmentName, comment, count, link); err != nil {
+		services.LogEmailDeliveryError("score_edit_request_reviewed", err)
+	}
+}
+
+func scoreEditRequestEmailDisplayName(user *models.User) string {
+	for _, candidate := range []string{user.FullName, user.Username, user.Email} {
+		trimmed := strings.TrimSpace(candidate)
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return "ผู้ใช้งาน"
+}
+
 // GET /api/score-edit-requests?course_id=&status=
 func GetScoreEditRequestsCompatHandler(c fiber.Ctx) error {
 	courseID := c.Query("course_id")
@@ -570,6 +626,7 @@ func CreateScoreEditRequestCompatHandler(c fiber.Ctx) error {
 
 	logCourseActivity(c, context.CourseID, userID, "create_score_edit_request", "score", "assignment", context.AssignmentID, context.AssignmentName, fiber.Map{"score_id": scoreID, "new_score": newScore, "image_count": len(imagePaths)})
 	go createNotificationsForCourseMembers(context.CourseID, userID, "score_edit_request", "ขอแก้ไขคะแนน: "+context.AssignmentName, "มีการส่งคำขอแก้ไขคะแนน", "/classroom/"+context.CourseID+"/approval", buildNotifData(context.CourseID, fmt.Sprint(context.AssignmentID), "score_edit_request", ""))
+	go notifyScoreEditRequestSubmittedByEmail(context.CourseID, userID, context.AssignmentName, reason)
 
 	return c.Status(201).JSON(fiber.Map{
 		"success": true,
@@ -931,6 +988,7 @@ func (h *ScoreEditRequestHandler) ApproveRequest(c fiber.Ctx) error {
 	_ = traceID
 	if requesterID != 0 {
 		go createNotificationForUser(requesterID, courseID, "score_edit_approved", "คำขอแก้ไขคะแนนได้รับการอนุมัติ", "คำขอแก้ไขคะแนนของคุณได้รับการอนุมัติแล้ว", "/classroom/"+courseID+"/approval", buildNotifData(courseID, fmt.Sprint(id), "score_edit_request", ""))
+		go notifyScoreEditRequestReviewedByEmail(requesterID, courseID, true, assignmentName, input.Comment, count)
 	}
 	return c.JSON(fiber.Map{"success": true, "message": "Score edit request approved"})
 }
@@ -974,6 +1032,7 @@ func (h *ScoreEditRequestHandler) RejectRequest(c fiber.Ctx) error {
 	_ = traceID
 	if requesterID != 0 {
 		go createNotificationForUser(requesterID, courseID, "score_edit_rejected", "คำขอแก้ไขคะแนนถูกปฏิเสธ", "คำขอแก้ไขคะแนนของคุณถูกปฏิเสธ", "/classroom/"+courseID+"/approval", buildNotifData(courseID, fmt.Sprint(id), "score_edit_request", ""))
+		go notifyScoreEditRequestReviewedByEmail(requesterID, courseID, false, assignmentName, input.Comment, count)
 	}
 	return c.JSON(fiber.Map{"success": true, "message": "Score edit request rejected"})
 }
@@ -1008,6 +1067,7 @@ func BatchApproveScoreEditRequestsCompatHandler(c fiber.Ctx) error {
 		}
 		notifiedUsers[requesterID] = true
 		go createNotificationForUser(requesterID, courseID, "score_edit_approved", "คำขอแก้ไขคะแนนได้รับการอนุมัติ", fmt.Sprintf("คำขอแก้ไขคะแนนได้รับการอนุมัติ (%d รายการ)", count), "/classroom/"+courseID+"/approval", buildNotifData(courseID, fmt.Sprint(reqID), "score_edit_request", ""))
+		go notifyScoreEditRequestReviewedByEmail(requesterID, courseID, true, assignmentName, input.Comment, count)
 	}
 	return c.JSON(fiber.Map{"success": true, "message": fmt.Sprintf("Approved %d edit request(s)", count), "count": count})
 }
@@ -1045,6 +1105,7 @@ func BatchRejectScoreEditRequestsCompatHandler(c fiber.Ctx) error {
 		}
 		notifiedUsers[requesterID] = true
 		go createNotificationForUser(requesterID, courseID, "score_edit_rejected", "คำขอแก้ไขคะแนนถูกปฏิเสธ", fmt.Sprintf("คำขอแก้ไขคะแนนถูกปฏิเสธ (%d รายการ)", count), "/classroom/"+courseID+"/approval", buildNotifData(courseID, fmt.Sprint(reqID), "score_edit_request", ""))
+		go notifyScoreEditRequestReviewedByEmail(requesterID, courseID, false, assignmentName, input.Comment, count)
 	}
 	return c.JSON(fiber.Map{"success": true, "message": fmt.Sprintf("Rejected %d edit request(s)", count), "count": count})
 }

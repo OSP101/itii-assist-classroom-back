@@ -1434,6 +1434,20 @@ func ArchiveAndRemoveStudentFromSection(sectionID uint, studentID uint, removedB
 			return err
 		}
 
+		// ถ้าไม่เหลือ section ไหนในวิชาแล้ว คำขอลาที่ค้างอยู่ให้ยกเลิกอัตโนมัติ
+		var remaining int64
+		if err := tx.Table("course_section_students css").
+			Joins("JOIN course_sections cs ON cs.id = css.course_section_id").
+			Where("css.student_id = ? AND cs.course_id = ?", studentID, section.CourseID).
+			Count(&remaining).Error; err != nil {
+			return err
+		}
+		if remaining == 0 {
+			if err := CancelPendingLeaveRequestsForStudent(tx, section.CourseID, studentID); err != nil {
+				return err
+			}
+		}
+
 		return nil
 	})
 

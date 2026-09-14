@@ -103,6 +103,207 @@ func PasswordResetURL(token string) string {
 	return resetURL.String()
 }
 
+func CourseApprovalURL(courseID string) string {
+	cfg := loadEmailConfig()
+	return strings.TrimRight(cfg.Frontend, "/") + "/classroom/" + courseID + "/approval"
+}
+
+func SendScoreEditRequestSubmittedEmail(user *models.User, courseName, assignmentName, requesterName, reason, link string) error {
+	if user == nil || strings.TrimSpace(user.Email) == "" {
+		return fmt.Errorf("score edit request email requires a recipient")
+	}
+
+	cfg := loadEmailConfig()
+	displayName := displayNameForEmail(user)
+	subject := fmt.Sprintf("[%s] มีคำขอแก้ไขคะแนนใหม่: %s", cfg.AppName, assignmentName)
+
+	reasonBlock := ""
+	if strings.TrimSpace(reason) != "" {
+		reasonBlock = fmt.Sprintf(`
+      <div style="margin: 0 0 20px; padding: 18px; border-radius: 16px; background: #f8fafc; border: 1px solid #e2e8f0; white-space: pre-wrap; line-height: 1.7; color: #334155;">%s</div>`, html.EscapeString(strings.TrimSpace(reason)))
+	}
+
+	htmlBody := fmt.Sprintf(`
+<div style="font-family: 'Segoe UI', Tahoma, sans-serif; background: #f3f6fb; padding: 32px 16px;">
+  <div style="max-width: 560px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);">
+    <div style="padding: 32px; background: linear-gradient(135deg, #1d4ed8, #0f766e); color: #ffffff;">
+      <h1 style="margin: 0; font-size: 24px;">คำขอแก้ไขคะแนนใหม่</h1>
+      <p style="margin: 12px 0 0; opacity: 0.92;">%s</p>
+    </div>
+    <div style="padding: 32px;">
+      <p style="margin: 0 0 16px; color: #0f172a;">สวัสดีคุณ%s,</p>
+      <p style="margin: 0 0 20px; color: #475569; line-height: 1.7;">
+        %s ส่งคำขอแก้ไขคะแนนของงาน "%s" ในวิชา %s กรุณาเข้าไปตรวจสอบและพิจารณาอนุมัติ
+      </p>%s
+      <p style="margin: 28px 0;">
+        <a href="%s" style="display: inline-block; background: #1d4ed8; color: #ffffff; text-decoration: none; padding: 14px 22px; border-radius: 12px; font-weight: 600;">
+          เปิดหน้ารายการอนุมัติ
+        </a>
+      </p>
+    </div>
+  </div>
+</div>`, html.EscapeString(cfg.AppName), html.EscapeString(displayName), html.EscapeString(requesterName), html.EscapeString(assignmentName), html.EscapeString(courseName), reasonBlock, html.EscapeString(link))
+
+	plainBody := fmt.Sprintf(
+		"%s\n\nสวัสดีคุณ%s,\n\n%s ส่งคำขอแก้ไขคะแนนของงาน \"%s\" ในวิชา %s กรุณาเข้าไปตรวจสอบและพิจารณาอนุมัติ:\n%s\n",
+		cfg.AppName,
+		displayName,
+		requesterName,
+		assignmentName,
+		courseName,
+		link,
+	)
+
+	return sendEmail(emailMessage{
+		To:      strings.TrimSpace(user.Email),
+		Subject: subject,
+		HTML:    htmlBody,
+		Plain:   plainBody,
+	})
+}
+
+func SendScoreEditRequestReviewedEmail(user *models.User, approved bool, assignmentName, comment string, count int, link string) error {
+	if user == nil || strings.TrimSpace(user.Email) == "" {
+		return fmt.Errorf("score edit request result email requires a recipient")
+	}
+
+	cfg := loadEmailConfig()
+	displayName := displayNameForEmail(user)
+
+	resultText := "ได้รับการอนุมัติ"
+	headerColor := "linear-gradient(135deg, #0f766e, #1d4ed8)"
+	if !approved {
+		resultText = "ถูกปฏิเสธ"
+		headerColor = "linear-gradient(135deg, #b91c1c, #ea580c)"
+	}
+
+	countText := ""
+	if count > 1 {
+		countText = fmt.Sprintf(" (%d รายการ)", count)
+	}
+
+	subject := fmt.Sprintf("[%s] คำขอแก้ไขคะแนน%s: %s", cfg.AppName, resultText, assignmentName)
+
+	commentBlock := ""
+	if strings.TrimSpace(comment) != "" {
+		commentBlock = fmt.Sprintf(`
+      <div style="margin: 0 0 20px; padding: 18px; border-radius: 16px; background: #f8fafc; border: 1px solid #e2e8f0; white-space: pre-wrap; line-height: 1.7; color: #334155;">
+        <div style="font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px;">ความเห็นของผู้ตรวจสอบ</div>
+        %s
+      </div>`, html.EscapeString(strings.TrimSpace(comment)))
+	}
+
+	htmlBody := fmt.Sprintf(`
+<div style="font-family: 'Segoe UI', Tahoma, sans-serif; background: #f3f6fb; padding: 32px 16px;">
+  <div style="max-width: 560px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);">
+    <div style="padding: 32px; background: %s; color: #ffffff;">
+      <h1 style="margin: 0; font-size: 24px;">คำขอแก้ไขคะแนน%s</h1>
+      <p style="margin: 12px 0 0; opacity: 0.92;">%s</p>
+    </div>
+    <div style="padding: 32px;">
+      <p style="margin: 0 0 16px; color: #0f172a;">สวัสดีคุณ%s,</p>
+      <p style="margin: 0 0 20px; color: #475569; line-height: 1.7;">
+        คำขอแก้ไขคะแนนของงาน "%s" ที่คุณส่งมา%s%s แล้ว
+      </p>%s
+      <p style="margin: 28px 0;">
+        <a href="%s" style="display: inline-block; background: #1d4ed8; color: #ffffff; text-decoration: none; padding: 14px 22px; border-radius: 12px; font-weight: 600;">
+          เปิดหน้ารายการอนุมัติ
+        </a>
+      </p>
+    </div>
+  </div>
+</div>`, headerColor, html.EscapeString(resultText), html.EscapeString(cfg.AppName), html.EscapeString(displayName), html.EscapeString(assignmentName), html.EscapeString(countText), html.EscapeString(resultText), commentBlock, html.EscapeString(link))
+
+	plainBody := fmt.Sprintf(
+		"%s\n\nสวัสดีคุณ%s,\n\nคำขอแก้ไขคะแนนของงาน \"%s\" ที่คุณส่งมา%s%s แล้ว\n%s\n",
+		cfg.AppName,
+		displayName,
+		assignmentName,
+		countText,
+		resultText,
+		link,
+	)
+
+	return sendEmail(emailMessage{
+		To:      strings.TrimSpace(user.Email),
+		Subject: subject,
+		HTML:    htmlBody,
+		Plain:   plainBody,
+	})
+}
+
+func SendSystemAnnouncementEmail(user *models.User, announcement *models.SystemAnnouncement) error {
+	if user == nil || strings.TrimSpace(user.Email) == "" {
+		return fmt.Errorf("announcement email requires a recipient")
+	}
+	if announcement == nil {
+		return fmt.Errorf("announcement email requires an announcement")
+	}
+
+	cfg := loadEmailConfig()
+	displayName := displayNameForEmail(user)
+
+	title := strings.TrimSpace(announcement.TitleTH)
+	if title == "" {
+		title = strings.TrimSpace(announcement.Title)
+	}
+	message := strings.TrimSpace(announcement.MessageTH)
+	if message == "" {
+		message = strings.TrimSpace(announcement.Message)
+	}
+
+	subject := fmt.Sprintf("[%s] ประกาศ: %s", cfg.AppName, title)
+
+	actionBlock := ""
+	plainAction := ""
+	actionURL := strings.TrimSpace(announcement.ActionURL)
+	if actionURL != "" {
+		actionLabel := strings.TrimSpace(announcement.ActionLabelTH)
+		if actionLabel == "" {
+			actionLabel = strings.TrimSpace(announcement.ActionLabel)
+		}
+		if actionLabel == "" {
+			actionLabel = "ดูรายละเอียด"
+		}
+		actionBlock = fmt.Sprintf(`
+      <p style="margin: 28px 0;">
+        <a href="%s" style="display: inline-block; background: #1d4ed8; color: #ffffff; text-decoration: none; padding: 14px 22px; border-radius: 12px; font-weight: 600;">
+          %s
+        </a>
+      </p>`, html.EscapeString(actionURL), html.EscapeString(actionLabel))
+		plainAction = fmt.Sprintf("\n%s: %s\n", actionLabel, actionURL)
+	}
+
+	htmlBody := fmt.Sprintf(`
+<div style="font-family: 'Segoe UI', Tahoma, sans-serif; background: #f3f6fb; padding: 32px 16px;">
+  <div style="max-width: 560px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);">
+    <div style="padding: 32px; background: linear-gradient(135deg, #1d4ed8, #0f766e); color: #ffffff;">
+      <p style="margin: 0; font-size: 12px; letter-spacing: 2px; text-transform: uppercase; opacity: 0.85;">ประกาศจากระบบ</p>
+      <h1 style="margin: 10px 0 0; font-size: 24px;">%s</h1>
+    </div>
+    <div style="padding: 32px;">
+      <p style="margin: 0 0 16px; color: #0f172a;">สวัสดีคุณ%s,</p>
+      <div style="margin: 0 0 20px; color: #475569; line-height: 1.7; white-space: pre-wrap;">%s</div>%s
+    </div>
+  </div>
+</div>`, html.EscapeString(title), html.EscapeString(displayName), html.EscapeString(message), actionBlock)
+
+	plainBody := fmt.Sprintf(
+		"%s\n\nสวัสดีคุณ%s,\n\n%s\n%s",
+		cfg.AppName,
+		displayName,
+		message,
+		plainAction,
+	)
+
+	return sendEmail(emailMessage{
+		To:      strings.TrimSpace(user.Email),
+		Subject: subject,
+		HTML:    htmlBody,
+		Plain:   plainBody,
+	})
+}
+
 func SendPasswordResetEmail(user *models.User, token string) error {
 	if user == nil || strings.TrimSpace(user.Email) == "" {
 		return fmt.Errorf("password reset email requires a recipient")
@@ -344,14 +545,19 @@ func sendWithResend(cfg emailConfig, message emailMessage) error {
 }
 
 func sendWithSMTP(cfg emailConfig, message emailMessage) error {
-	if cfg.SMTPHost == "" || cfg.SMTPUser == "" || cfg.SMTPPass == "" {
+	if cfg.SMTPHost == "" {
 		return fmt.Errorf("SMTP configuration is incomplete")
+	}
+	if (cfg.SMTPUser == "") != (cfg.SMTPPass == "") {
+		return fmt.Errorf("SMTP_USER and SMTP_PASS must be set together")
 	}
 
 	fromAddress := extractEmailAddress(cfg.From)
 	recipients := []string{message.To}
 	addr := fmt.Sprintf("%s:%d", cfg.SMTPHost, cfg.SMTPPort)
 
+	// Relays that trust the sender's IP (e.g. an allowlisted VM) need no
+	// credentials at all, so auth is only attempted when both are set.
 	var auth smtp.Auth
 	if cfg.SMTPUser != "" {
 		auth = smtp.PlainAuth("", cfg.SMTPUser, cfg.SMTPPass, cfg.SMTPHost)
@@ -359,7 +565,9 @@ func sendWithSMTP(cfg emailConfig, message emailMessage) error {
 
 	mime := buildMIMEMessage(fromAddress, recipients, message)
 
-	if cfg.SMTPSecure {
+	// Port 465 is implicit TLS (encrypt before talking SMTP); everything
+	// else (587, 25, ...) is plaintext-then-STARTTLS.
+	if cfg.SMTPSecure && cfg.SMTPPort == 465 {
 		tlsConfig := &tls.Config{ServerName: cfg.SMTPHost}
 		conn, err := tls.Dial("tcp", addr, tlsConfig)
 		if err != nil {
@@ -373,39 +581,61 @@ func sendWithSMTP(cfg emailConfig, message emailMessage) error {
 		}
 		defer client.Close()
 
-		if auth != nil {
-			if ok, _ := client.Extension("AUTH"); ok {
-				if err := client.Auth(auth); err != nil {
-					return err
-				}
-			}
-		}
-
-		if err := client.Mail(fromAddress); err != nil {
-			return err
-		}
-		for _, recipient := range recipients {
-			if err := client.Rcpt(recipient); err != nil {
-				return err
-			}
-		}
-
-		writer, err := client.Data()
-		if err != nil {
-			return err
-		}
-		if _, err := writer.Write(mime); err != nil {
-			_ = writer.Close()
-			return err
-		}
-		if err := writer.Close(); err != nil {
-			return err
-		}
-
-		return client.Quit()
+		return deliverSMTP(client, auth, fromAddress, recipients, mime)
 	}
 
-	return smtp.SendMail(addr, auth, fromAddress, recipients, mime)
+	client, err := smtp.Dial(addr)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	if cfg.SMTPSecure {
+		ok, _ := client.Extension("STARTTLS")
+		if !ok {
+			return fmt.Errorf("smtp server does not support STARTTLS")
+		}
+		if err := client.StartTLS(&tls.Config{ServerName: cfg.SMTPHost}); err != nil {
+			return err
+		}
+	}
+
+	return deliverSMTP(client, auth, fromAddress, recipients, mime)
+}
+
+func deliverSMTP(client *smtp.Client, auth smtp.Auth, from string, recipients []string, mime []byte) error {
+	if auth != nil {
+		ok, _ := client.Extension("AUTH")
+		if !ok {
+			return fmt.Errorf("smtp server does not support AUTH but SMTP_USER/SMTP_PASS were provided")
+		}
+		if err := client.Auth(auth); err != nil {
+			return err
+		}
+	}
+
+	if err := client.Mail(from); err != nil {
+		return err
+	}
+	for _, recipient := range recipients {
+		if err := client.Rcpt(recipient); err != nil {
+			return err
+		}
+	}
+
+	writer, err := client.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := writer.Write(mime); err != nil {
+		_ = writer.Close()
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+
+	return client.Quit()
 }
 
 func buildMIMEMessage(from string, recipients []string, message emailMessage) []byte {

@@ -45,6 +45,7 @@ type announcementPayload struct {
 	Priority           int        `json:"priority"`
 	Status             string     `json:"status"`
 	NotifyInbox        *bool      `json:"notify_inbox"`
+	NotifyEmail        *bool      `json:"notify_email"`
 }
 
 // announcementBatchPayload is how the composer sends several announcements at
@@ -317,10 +318,12 @@ func UploadAnnouncementImageHandler(c fiber.Ctx) error {
 
 // toAnnouncementInput turns one request payload into repository input,
 // applying the optional shared defaults a batch request carries.
-func toAnnouncementInput(payload announcementPayload, defaults *announcementPayload) repositories.AnnouncementInput {
+func toAnnouncementInput(payload announcementPayload, defaults *announcementPayload) (repositories.AnnouncementInput, bool) {
 	if defaults != nil {
 		payload = mergeAnnouncementPayload(payload, *defaults)
 	}
+
+	notifyEmail := payload.NotifyEmail != nil && *payload.NotifyEmail
 
 	isActive := true
 	if payload.IsActive != nil {
@@ -362,7 +365,7 @@ func toAnnouncementInput(payload announcementPayload, defaults *announcementPayl
 		Status:             payload.Status,
 		NotifyInbox:        notifyInbox,
 		IsActive:           isActive,
-	}
+	}, notifyEmail
 }
 
 // mergeAnnouncementPayload fills the fields an item left empty from the batch
@@ -406,6 +409,9 @@ func mergeAnnouncementPayload(item announcementPayload, defaults announcementPay
 	if item.NotifyInbox == nil {
 		item.NotifyInbox = defaults.NotifyInbox
 	}
+	if item.NotifyEmail == nil {
+		item.NotifyEmail = defaults.NotifyEmail
+	}
 	if !item.RequireAcknowledge {
 		item.RequireAcknowledge = defaults.RequireAcknowledge
 	}
@@ -423,7 +429,7 @@ func CreateAnnouncementHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
 	}
 
-	input := toAnnouncementInput(payload, nil)
+	input, notifyEmail := toAnnouncementInput(payload, nil)
 	created, err := repositories.CreateAnnouncement(input, actorID)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
@@ -435,7 +441,7 @@ func CreateAnnouncementHandler(c fiber.Ctx) error {
 		"status":   created.Status,
 	})
 
-	publishAnnouncement(actorID, created, input.Audience)
+	publishAnnouncement(actorID, created, input.Audience, notifyEmail)
 
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": created})
 }
@@ -466,8 +472,11 @@ func CreateAnnouncementsBatchHandler(c fiber.Ctx) error {
 	}
 
 	inputs := make([]repositories.AnnouncementInput, 0, len(payload.Items))
+	notifyEmails := make([]bool, 0, len(payload.Items))
 	for _, item := range payload.Items {
-		inputs = append(inputs, toAnnouncementInput(item, payload.Defaults))
+		input, notifyEmail := toAnnouncementInput(item, payload.Defaults)
+		inputs = append(inputs, input)
+		notifyEmails = append(notifyEmails, notifyEmail)
 	}
 
 	created, err := repositories.CreateAnnouncementsBatch(inputs, actorID)
@@ -485,7 +494,7 @@ func CreateAnnouncementsBatchHandler(c fiber.Ctx) error {
 	})
 
 	for index := range created {
-		publishAnnouncement(actorID, &created[index], inputs[index].Audience)
+		publishAnnouncement(actorID, &created[index], inputs[index].Audience, notifyEmails[index])
 	}
 
 	return c.Status(201).JSON(fiber.Map{"success": true, "data": created})
@@ -588,7 +597,7 @@ func UpdateAnnouncementHandler(c fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบประกาศที่ต้องการแก้ไข"})
 	}
 
-	input := toAnnouncementInput(payload, nil)
+	input, notifyEmail := toAnnouncementInput(payload, nil)
 	updated, updateErr := repositories.UpdateAnnouncement(uint(id), input)
 	if updateErr != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": updateErr.Error()})
@@ -605,7 +614,7 @@ func UpdateAnnouncementHandler(c fiber.Ctx) error {
 	// way creating it live would. One that was already published does not, or
 	// every wording fix would land in everybody's inbox again.
 	if !previous.IsActive && updated.IsActive {
-		publishAnnouncement(actorID, updated, input.Audience)
+		publishAnnouncement(actorID, updated, input.Audience, notifyEmail)
 	}
 
 	return c.JSON(fiber.Map{"success": true, "data": updated})
@@ -772,11 +781,11 @@ func GetServiceHealthHandler(c fiber.Ctx) error {
 		dbStatus["detail"] = pingErr.Error()
 	}
 
-	emailConfigured := os.Getenv("SMTP_HOST") != "" && os.Getenv("SMTP_USER") != ""
+	emailConfigured := os.Getenv("SMTP_HOST") != ""
 	emailStatus := fiber.Map{
 		"name":   "email",
 		"status": "down",
-		"detail": "SMTP_HOST/SMTP_USER missing",
+		"detail": "SMTP_HOST missing",
 	}
 	if emailConfigured {
 		emailStatus["status"] = "up"
@@ -835,7 +844,7 @@ func GetServiceHealthHandler(c fiber.Ctx) error {
 // composer would close, and long enough to hit the proxy's timeout. Now the
 // request returns as soon as the announcement is stored and the fan-out
 // continues behind it.
-func publishAnnouncement(actorID uint, announcement *models.SystemAnnouncement, audienceRoles []string) {
+func publishAnnouncement(actorID uint, announcement *models.SystemAnnouncement, audienceRoles []string, notifyEmail bool) {
 	if announcement == nil || !announcement.IsActive || !announcement.NotifyInbox {
 		return
 	}
@@ -855,11 +864,11 @@ func publishAnnouncement(actorID uint, announcement *models.SystemAnnouncement, 
 				log.Printf("⚠️  announcement fan-out panicked for announcement %d: %v", announcement.ID, recovered)
 			}
 		}()
-		fanoutAnnouncementNotification(actorID, announcement, audienceRoles)
+		fanoutAnnouncementNotification(actorID, announcement, audienceRoles, notifyEmail)
 	}()
 }
 
-func fanoutAnnouncementNotification(actorID uint, announcement *models.SystemAnnouncement, audienceRoles []string) {
+func fanoutAnnouncementNotification(actorID uint, announcement *models.SystemAnnouncement, audienceRoles []string, notifyEmail bool) {
 	if announcement == nil {
 		return
 	}
@@ -906,6 +915,10 @@ func fanoutAnnouncementNotification(actorID uint, announcement *models.SystemAnn
 
 	if len(notifications) == 0 {
 		return
+	}
+
+	if notifyEmail {
+		sendAnnouncementEmails(recipients, announcement)
 	}
 
 	// One multi-row insert per chunk instead of one statement per recipient.
@@ -977,4 +990,25 @@ func resolveAudienceUserIDs(audienceRoles []string) ([]uint, error) {
 		result = append(result, userID)
 	}
 	return result, nil
+}
+
+// sendAnnouncementEmails is only called for announcements the composer
+// opted into emailing; the recipient list already excludes the actor.
+func sendAnnouncementEmails(recipientIDs []uint, announcement *models.SystemAnnouncement) {
+	if len(recipientIDs) == 0 {
+		return
+	}
+
+	var recipients []models.User
+	if err := config.DB.Where("id IN ? AND email <> ''", recipientIDs).Find(&recipients).Error; err != nil {
+		log.Printf("⚠️  failed to load announcement email recipients: %v", err)
+		return
+	}
+
+	for i := range recipients {
+		recipient := recipients[i]
+		if err := services.SendSystemAnnouncementEmail(&recipient, announcement); err != nil {
+			services.LogEmailDeliveryError("system_announcement", err)
+		}
+	}
 }

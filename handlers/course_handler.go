@@ -532,13 +532,18 @@ func CreateCourseHandler(c fiber.Ctx) error {
 // they change often and say nothing about how the course is run.
 func courseChangeFields(course models.Course) map[string]interface{} {
 	return map[string]interface{}{
-		"code":                course.Code,
-		"name":                course.Name,
-		"year":                course.Year,
-		"semester":            course.Semester,
-		"description":         course.Description,
-		"is_active":           course.IsActive,
-		"attention_threshold": course.AttentionThreshold,
+		"code":                  course.Code,
+		"name":                  course.Name,
+		"year":                  course.Year,
+		"semester":              course.Semester,
+		"description":           course.Description,
+		"is_active":             course.IsActive,
+		"attention_threshold":   course.AttentionThreshold,
+		"leave_request_enabled": course.LeaveRequestEnabled == nil || *course.LeaveRequestEnabled,
+		"leave_evidence_policy": course.LeaveEvidencePolicy,
+		"leave_backdate_days":   course.LeaveBackdateDays,
+		"leave_advance_days":    course.LeaveAdvanceDays,
+		"leave_max_pending":     course.LeaveMaxPending,
 	}
 }
 
@@ -571,6 +576,12 @@ func UpdateCourseHandler(c fiber.Ctx) error {
 		AttentionThreshold *int     `json:"attention_threshold"`
 		InstructorIDs      []uint   `json:"instructor_ids"`
 		InstructorID       *uint    `json:"instructor_id"`
+		// ตั้งค่าคำขอลา
+		LeaveRequestEnabled *bool   `json:"leave_request_enabled"`
+		LeaveEvidencePolicy *string `json:"leave_evidence_policy"`
+		LeaveBackdateDays   *int    `json:"leave_backdate_days"`
+		LeaveAdvanceDays    *int    `json:"leave_advance_days"`
+		LeaveMaxPending     *int    `json:"leave_max_pending"`
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
@@ -627,6 +638,36 @@ func UpdateCourseHandler(c fiber.Ctx) error {
 	}
 	if input.AttentionThreshold != nil {
 		updated.AttentionThreshold = *input.AttentionThreshold
+	}
+	if input.LeaveRequestEnabled != nil {
+		enabled := *input.LeaveRequestEnabled
+		updated.LeaveRequestEnabled = &enabled
+	}
+	if input.LeaveEvidencePolicy != nil {
+		switch strings.TrimSpace(*input.LeaveEvidencePolicy) {
+		case repositories.LeaveEvidencePolicyNone, repositories.LeaveEvidencePolicySickOnly, repositories.LeaveEvidencePolicySickPersonal, repositories.LeaveEvidencePolicyAll:
+			updated.LeaveEvidencePolicy = strings.TrimSpace(*input.LeaveEvidencePolicy)
+		default:
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "นโยบายหลักฐานการลาไม่ถูกต้อง"})
+		}
+	}
+	if input.LeaveBackdateDays != nil {
+		if *input.LeaveBackdateDays < 0 || *input.LeaveBackdateDays > 120 {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "จำนวนวันขอลาย้อนหลังต้องอยู่ระหว่าง 0 ถึง 120"})
+		}
+		updated.LeaveBackdateDays = *input.LeaveBackdateDays
+	}
+	if input.LeaveAdvanceDays != nil {
+		if *input.LeaveAdvanceDays < 0 || *input.LeaveAdvanceDays > 365 {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "จำนวนวันขอลาล่วงหน้าต้องอยู่ระหว่าง 0 ถึง 365"})
+		}
+		updated.LeaveAdvanceDays = *input.LeaveAdvanceDays
+	}
+	if input.LeaveMaxPending != nil {
+		if *input.LeaveMaxPending < 1 || *input.LeaveMaxPending > 50 {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "จำนวนคำขอค้างสูงสุดต้องอยู่ระหว่าง 1 ถึง 50"})
+		}
+		updated.LeaveMaxPending = *input.LeaveMaxPending
 	}
 
 	// Update instructors

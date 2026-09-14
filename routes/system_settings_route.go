@@ -43,4 +43,8 @@ func SetupSystemSettingsRoutes(app *fiber.App) {
 	settings.Put("/programs", handlers.UpdateStudentProgramsHandler)
 
 	settings.Get("/health", handlers.GetServiceHealthHandler)
+
+	// ทดสอบการส่งอีเมล
+	settings.Get("/email", handlers.GetEmailConfigHandler)
+	settings.Post("/email/test", handlers.SendTestEmailHandler)
 }

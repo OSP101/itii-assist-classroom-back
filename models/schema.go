@@ -135,22 +135,28 @@ type Desk struct {
 // =============================================================================
 
 type Course struct {
-	ID                 string    `gorm:"primaryKey;type:varchar(21)" json:"id"` // NanoID
-	Code               string    `gorm:"type:varchar(100);not null;index" json:"code"`
-	Name               string    `gorm:"type:varchar(255);not null" json:"name"`
-	Year               int       `gorm:"type:smallint;not null" json:"year"`
-	Semester           int       `gorm:"type:smallint;not null" json:"semester"`
-	InstructorID       *uint     `gorm:"index" json:"instructor_id,omitempty"`
-	Instructor         *User     `gorm:"foreignKey:InstructorID" json:"-"`
-	Description        string    `gorm:"type:text" json:"description"`
-	Image              string    `gorm:"type:text" json:"image"`
-	CoverPositionX     float64   `gorm:"type:double precision;default:50" json:"cover_position_x"`
-	CoverPositionY     float64   `gorm:"type:double precision;default:50" json:"cover_position_y"`
-	CoverZoom          float64   `gorm:"type:double precision;default:1" json:"cover_zoom"`
-	IsActive           bool      `gorm:"type:boolean;default:true" json:"is_active"`
-	AttentionThreshold int       `gorm:"default:60" json:"attention_threshold"`
-	CreatedAt          time.Time `gorm:"type:timestamptz" json:"created_at"`
-	UpdatedAt          time.Time `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+	ID                 string  `gorm:"primaryKey;type:varchar(21)" json:"id"` // NanoID
+	Code               string  `gorm:"type:varchar(100);not null;index" json:"code"`
+	Name               string  `gorm:"type:varchar(255);not null" json:"name"`
+	Year               int     `gorm:"type:smallint;not null" json:"year"`
+	Semester           int     `gorm:"type:smallint;not null" json:"semester"`
+	InstructorID       *uint   `gorm:"index" json:"instructor_id,omitempty"`
+	Instructor         *User   `gorm:"foreignKey:InstructorID" json:"-"`
+	Description        string  `gorm:"type:text" json:"description"`
+	Image              string  `gorm:"type:text" json:"image"`
+	CoverPositionX     float64 `gorm:"type:double precision;default:50" json:"cover_position_x"`
+	CoverPositionY     float64 `gorm:"type:double precision;default:50" json:"cover_position_y"`
+	CoverZoom          float64 `gorm:"type:double precision;default:1" json:"cover_zoom"`
+	IsActive           bool    `gorm:"type:boolean;default:true" json:"is_active"`
+	AttentionThreshold int     `gorm:"default:60" json:"attention_threshold"`
+	// ตั้งค่าคำขอลา (ต่อวิชา)
+	LeaveRequestEnabled *bool     `gorm:"type:boolean;default:true" json:"leave_request_enabled"`
+	LeaveEvidencePolicy string    `gorm:"type:varchar(20);default:'sick_personal'" json:"leave_evidence_policy"` // none, sick_only, sick_personal, all
+	LeaveBackdateDays   int       `gorm:"default:7" json:"leave_backdate_days"`
+	LeaveAdvanceDays    int       `gorm:"default:60" json:"leave_advance_days"`
+	LeaveMaxPending     int       `gorm:"default:5" json:"leave_max_pending"`
+	CreatedAt           time.Time `gorm:"type:timestamptz" json:"created_at"`
+	UpdatedAt           time.Time `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
 }
 
 // CourseMember เป็น generalized model สำหรับสมาชิกในวิชา (role: student/ta/instructor)
@@ -476,8 +482,65 @@ type AttendanceRecord struct {
 	LocationLng         *float64   `gorm:"type:decimal(10,7)" json:"location_lng,omitempty"`
 	DistanceMeters      *int       `gorm:"" json:"distance_meters,omitempty"`
 	UpdatedBy           *uint      `gorm:"index" json:"updated_by,omitempty"`
-	CreatedAt           time.Time  `gorm:"type:timestamptz" json:"created_at"`
-	UpdatedAt           time.Time  `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+	// StatusSource บอกว่าสถานะปัจจุบันมาจากไหน: system (สร้าง absent ล่วงหน้า),
+	// checkin (นักศึกษาเช็กชื่อเอง), manual (ผู้สอน/TA แก้เอง), leave_request (อนุมัติคำขอลา)
+	StatusSource   string    `gorm:"type:varchar(20);default:'system'" json:"status_source"`
+	LeaveRequestID *uint     `gorm:"index" json:"leave_request_id,omitempty"`
+	CreatedAt      time.Time `gorm:"type:timestamptz" json:"created_at"`
+	UpdatedAt      time.Time `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+}
+
+// AttendanceRecordHistory เก็บทุกครั้งที่สถานะเช็กชื่อเปลี่ยน เพื่อตามย้อนหลังได้ว่า
+// ใครเปลี่ยนจากอะไรเป็นอะไร ผ่านช่องทางไหน
+type AttendanceRecordHistory struct {
+	ID                  uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	AttendanceRecordID  uint      `gorm:"not null;index" json:"attendance_record_id"`
+	AttendanceSessionID uint      `gorm:"not null;index" json:"attendance_session_id"`
+	StudentID           uint      `gorm:"not null;index" json:"student_id"`
+	FromStatus          string    `gorm:"type:varchar(20)" json:"from_status"`
+	ToStatus            string    `gorm:"type:varchar(20);not null" json:"to_status"`
+	Source              string    `gorm:"type:varchar(20);not null" json:"source"`     // system, checkin, manual, leave_request
+	ActorType           string    `gorm:"type:varchar(20);not null" json:"actor_type"` // system, user, student
+	ActorID             *uint     `gorm:"index" json:"actor_id,omitempty"`
+	LeaveRequestID      *uint     `gorm:"index" json:"leave_request_id,omitempty"`
+	Note                string    `gorm:"type:text" json:"note"`
+	CreatedAt           time.Time `gorm:"type:timestamptz" json:"created_at"`
+}
+
+// AttendanceLeaveRequest คำขอลา 1 ใบของนักศึกษา (ลาได้หลายวันในใบเดียว ดู items)
+type AttendanceLeaveRequest struct {
+	ID            uint           `gorm:"primaryKey;autoIncrement" json:"id"`
+	CourseID      string         `gorm:"type:varchar(21);not null;index" json:"course_id"`
+	StudentID     uint           `gorm:"not null;index" json:"student_id"`
+	LeaveType     string         `gorm:"type:varchar(20);not null" json:"leave_type"` // sick, personal, official, other
+	Reason        string         `gorm:"type:text" json:"reason"`
+	Evidence      datatypes.JSON `gorm:"type:jsonb" json:"evidence,omitempty"`
+	Status        string         `gorm:"type:varchar(20);default:'pending';index" json:"status"` // pending, approved, partially_approved, rejected, cancelled
+	ReviewedBy    *uint          `gorm:"index" json:"reviewed_by,omitempty"`
+	ReviewedAt    *time.Time     `gorm:"type:timestamptz" json:"reviewed_at,omitempty"`
+	ReviewComment string         `gorm:"type:text" json:"review_comment"`
+	SubmittedIP   string         `gorm:"type:varchar(64)" json:"-"`
+	CreatedAt     time.Time      `gorm:"type:timestamptz" json:"created_at"`
+	UpdatedAt     time.Time      `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+}
+
+// AttendanceLeaveRequestItem วันที่ลา 1 วันในคำขอ ผูกกับ session ถ้ามีอยู่แล้ว
+// ถ้ายังไม่มี session ในวันนั้น จะรอจับคู่เมื่อผู้สอนสร้าง session ทีหลัง
+type AttendanceLeaveRequestItem struct {
+	ID                  uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	LeaveRequestID      uint      `gorm:"not null;index" json:"leave_request_id"`
+	LeaveDate           time.Time `gorm:"type:date;not null;index" json:"leave_date"`
+	AttendanceSessionID *uint     `gorm:"index" json:"attendance_session_id,omitempty"`
+	// ByDate = นักศึกษาเลือก "วัน" ไม่ได้เลือกคาบ ระบบจับคู่ทุก session ในวันนั้นให้เอง
+	ByDate bool `gorm:"type:boolean;default:false" json:"by_date"`
+	// pending, approved, rejected, applied, awaiting_session, superseded, cancelled, revoked
+	ItemStatus      string     `gorm:"type:varchar(20);default:'pending'" json:"item_status"`
+	PreviousStatus  string     `gorm:"type:varchar(20)" json:"previous_status"`
+	AppliedRecordID *uint      `gorm:"index" json:"applied_record_id,omitempty"`
+	AppliedAt       *time.Time `gorm:"type:timestamptz" json:"applied_at,omitempty"`
+	ReviewComment   string     `gorm:"type:text" json:"review_comment"`
+	CreatedAt       time.Time  `gorm:"type:timestamptz" json:"created_at"`
+	UpdatedAt       time.Time  `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
 }
 
 type AttendancePinHistory struct {
@@ -781,15 +844,15 @@ type AppConfig struct {
 }
 
 type SystemAnnouncement struct {
-	ID                 uint           `gorm:"primaryKey;autoIncrement" json:"id"`
-	Title              string         `gorm:"type:varchar(255);not null" json:"title"`
-	TitleTH            string         `gorm:"type:varchar(255)" json:"title_th"`
-	TitleEN            string         `gorm:"type:varchar(255)" json:"title_en"`
-	Message            string         `gorm:"type:text;not null" json:"message"`
-	MessageTH          string         `gorm:"type:text" json:"message_th"`
-	MessageEN          string         `gorm:"type:text" json:"message_en"`
-	ContentType        string         `gorm:"type:varchar(20);default:'text'" json:"content_type"`
-	DisplayMode        string         `gorm:"type:varchar(20);default:'banner_top'" json:"display_mode"`
+	ID          uint   `gorm:"primaryKey;autoIncrement" json:"id"`
+	Title       string `gorm:"type:varchar(255);not null" json:"title"`
+	TitleTH     string `gorm:"type:varchar(255)" json:"title_th"`
+	TitleEN     string `gorm:"type:varchar(255)" json:"title_en"`
+	Message     string `gorm:"type:text;not null" json:"message"`
+	MessageTH   string `gorm:"type:text" json:"message_th"`
+	MessageEN   string `gorm:"type:text" json:"message_en"`
+	ContentType string `gorm:"type:varchar(20);default:'text'" json:"content_type"`
+	DisplayMode string `gorm:"type:varchar(20);default:'banner_top'" json:"display_mode"`
 	// Severity drives the colour, icon and wording the announcement is shown
 	// with: info | success | warning | urgent.
 	Severity string `gorm:"type:varchar(20);default:'info';index" json:"severity"`
@@ -801,7 +864,7 @@ type SystemAnnouncement struct {
 	Status string `gorm:"type:varchar(20);default:'published';index" json:"status"`
 	// NotifyInbox controls whether publishing also fans the announcement out to
 	// every recipient's notification inbox.
-	NotifyInbox bool `gorm:"type:boolean;default:true" json:"notify_inbox"`
+	NotifyInbox        bool           `gorm:"type:boolean;default:true" json:"notify_inbox"`
 	ImageURL           string         `gorm:"type:text" json:"image_url"`
 	ActionLabel        string         `gorm:"type:varchar(255)" json:"action_label"`
 	ActionLabelTH      string         `gorm:"type:varchar(255)" json:"action_label_th"`

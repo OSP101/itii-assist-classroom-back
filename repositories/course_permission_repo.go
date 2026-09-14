@@ -52,6 +52,7 @@ const (
 	PermissionUpdateAttendanceSessions = "update_attendance_sessions"
 	PermissionDeleteAttendanceSessions = "delete_attendance_sessions"
 	PermissionUpdateAttendanceStatus   = "update_attendance_status"
+	PermissionReviewLeaveRequests      = "review_leave_requests"
 	PermissionViewQueue                = "view_queue"
 	PermissionCreateQueueSessions      = "create_queue_sessions"
 	PermissionUpdateQueueSessions      = "update_queue_sessions"
@@ -96,6 +97,7 @@ type CourseMemberPermissions struct {
 	UpdateAttendanceSessions bool `json:"update_attendance_sessions"`
 	DeleteAttendanceSessions bool `json:"delete_attendance_sessions"`
 	UpdateAttendanceStatus   bool `json:"update_attendance_status"`
+	ReviewLeaveRequests      bool `json:"review_leave_requests"`
 	ViewQueue                bool `json:"view_queue"`
 	CreateQueueSessions      bool `json:"create_queue_sessions"`
 	UpdateQueueSessions      bool `json:"update_queue_sessions"`
@@ -162,6 +164,7 @@ func DefaultInstructorCoursePermissions() CourseMemberPermissions {
 		UpdateAttendanceSessions: true,
 		DeleteAttendanceSessions: true,
 		UpdateAttendanceStatus:   true,
+		ReviewLeaveRequests:      true,
 		ViewQueue:                true,
 		CreateQueueSessions:      true,
 		UpdateQueueSessions:      true,
@@ -206,6 +209,7 @@ func DefaultTACoursePermissions() CourseMemberPermissions {
 		UpdateAttendanceSessions: true,
 		DeleteAttendanceSessions: true,
 		UpdateAttendanceStatus:   false,
+		ReviewLeaveRequests:      false,
 		ViewQueue:                true,
 		CreateQueueSessions:      true,
 		UpdateQueueSessions:      true,
@@ -241,7 +245,7 @@ func NormalizeCourseMemberPermissions(role string, permissions *CourseMemberPerm
 	if normalized.CreateExamScores || normalized.UpdateExamScores || normalized.DeleteExamScores || normalized.UpdateExamSettings {
 		normalized.ViewExamScores = true
 	}
-	if normalized.CreateAttendanceSessions || normalized.UpdateAttendanceSessions || normalized.DeleteAttendanceSessions || normalized.UpdateAttendanceStatus {
+	if normalized.CreateAttendanceSessions || normalized.UpdateAttendanceSessions || normalized.DeleteAttendanceSessions || normalized.UpdateAttendanceStatus || normalized.ReviewLeaveRequests {
 		normalized.ViewAttendance = true
 	}
 	if normalized.CreateQueueSessions || normalized.UpdateQueueSessions || normalized.DeleteQueueSessions || normalized.ManageQueueBookings {
@@ -364,6 +368,7 @@ func ResolveCourseMemberPermissions(role string, raw string, isPrimary bool) Cou
 	applyBoolOverride[CourseMemberPermissions](payload, "update_attendance_sessions", func(value bool) { base.UpdateAttendanceSessions = value })
 	applyBoolOverride[CourseMemberPermissions](payload, "delete_attendance_sessions", func(value bool) { base.DeleteAttendanceSessions = value })
 	applyBoolOverride[CourseMemberPermissions](payload, "update_attendance_status", func(value bool) { base.UpdateAttendanceStatus = value })
+	applyBoolOverride[CourseMemberPermissions](payload, "review_leave_requests", func(value bool) { base.ReviewLeaveRequests = value })
 	applyBoolOverride[CourseMemberPermissions](payload, "view_queue", func(value bool) { base.ViewQueue = value })
 	applyBoolOverride[CourseMemberPermissions](payload, "create_queue_sessions", func(value bool) { base.CreateQueueSessions = value })
 	applyBoolOverride[CourseMemberPermissions](payload, "update_queue_sessions", func(value bool) { base.UpdateQueueSessions = value })
@@ -466,6 +471,8 @@ func (permissions CourseMemberPermissions) Has(permissionKey string) bool {
 		return permissions.ViewAttendance || permissions.CreateAttendanceSessions || permissions.UpdateAttendanceSessions || permissions.DeleteAttendanceSessions
 	case PermissionUpdateAttendanceStatus:
 		return permissions.UpdateAttendanceStatus
+	case PermissionReviewLeaveRequests:
+		return permissions.ReviewLeaveRequests
 	case PermissionViewQueue:
 		return permissions.ViewQueue
 	case PermissionCreateQueueSessions:

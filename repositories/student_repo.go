@@ -222,6 +222,7 @@ type LookupStudentAttendanceRecord struct {
 	Status       string     `json:"status"`
 	CheckInTime  *time.Time `json:"check_in_time"`
 	Note         *string    `json:"note"`
+	StatusSource string     `json:"status_source"`
 }
 
 type LookupStudentAttendanceSummary struct {
@@ -326,6 +327,7 @@ type studentLookupAttendanceRow struct {
 	Status       string     `gorm:"column:status"`
 	CheckInTime  *time.Time `gorm:"column:check_in_time"`
 	Note         string     `gorm:"column:note"`
+	StatusSource string     `gorm:"column:status_source"`
 }
 
 type studentLookupExamRow struct {
@@ -775,7 +777,7 @@ func lookupStudentScores(studentID string, courseID string) (*LookupStudentResul
 	if err := config.DB.Table("attendance_records AS ar").
 		Joins("JOIN attendance_sessions AS s ON s.id = ar.attendance_session_id").
 		Where("ar.student_id = ? AND s.course_id IN ? AND s.start_time <= ?", student.ID, courseIDs, time.Now()).
-		Select("s.course_id, ar.id, s.title AS session_title, s.start_time AS date, ar.status, ar.check_in_time, ar.note").
+		Select("s.course_id, ar.id, s.title AS session_title, s.start_time AS date, ar.status, ar.check_in_time, ar.note, ar.status_source").
 		Order("ar.created_at DESC").
 		Scan(&attendanceRows).Error; err != nil {
 		return nil, err
@@ -792,6 +794,7 @@ func lookupStudentScores(studentID string, courseID string) (*LookupStudentResul
 			Status:       row.Status,
 			CheckInTime:  cloneTimePointer(row.CheckInTime),
 			Note:         nullableStringPointer(row.Note),
+			StatusSource: row.StatusSource,
 		})
 		switch row.Status {
 		case "present":

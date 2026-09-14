@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"gorm.io/gorm"
 )
 
 // AttendanceHandler — struct-based handler with audit logger
@@ -869,6 +870,12 @@ func (h *AttendanceHandler) CreateAttendanceSession(c fiber.Ctx) error {
 	if err := repositories.CreateAttendanceSession(&session, sectionIDs); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to create session"})
 	}
+	// จับคู่คำขอลาที่เลือกวันนี้ไว้ล่วงหน้า (ที่อนุมัติแล้วจะลง leave ให้ทันที)
+	if bound, err := repositories.BindLeaveItemsToSession(session.ID); err != nil {
+		log.Printf("event=leave_bind_failed session_id=%d err=%v", session.ID, err)
+	} else if bound > 0 {
+		log.Printf("event=leave_bound session_id=%d items=%d", session.ID, bound)
+	}
 	session.Status = repositories.ComputeSessionStatus(session)
 	logCourseActivity(c, input.CourseID, userID, "create_attendance_session", "attendance", "attendance_session", session.ID, session.Title, fiber.Map{
 		"course_section_ids": sectionIDs,
@@ -1039,6 +1046,13 @@ func UpdateAttendanceSessionHandler(c fiber.Ctx) error {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update session sections"})
 		}
 	}
+	// วัน/section เปลี่ยนได้ ต้องจับคู่คำขอลาใหม่และลง leave ซ้ำให้ record ที่เพิ่ง backfill
+	if _, err := repositories.BindLeaveItemsToSession(session.ID); err != nil {
+		log.Printf("event=leave_bind_failed session_id=%d err=%v", session.ID, err)
+	}
+	if err := repositories.ReapplyLeaveForSession(session.ID); err != nil {
+		log.Printf("event=leave_reapply_failed session_id=%d err=%v", session.ID, err)
+	}
 	session.Status = repositories.ComputeSessionStatus(session)
 	logCourseActivity(c, session.CourseID, actorID, "update_attendance_session", "attendance", "attendance_session", session.ID, session.Title, fiber.Map{
 		"course_section_ids":     sectionIDs,
@@ -1142,11 +1156,29 @@ func (h *AttendanceHandler) UpdateAttendanceRecordByRecordID(c fiber.Ctx) error 
 	}
 
 	updatedBy := c.Locals("user_id").(uint)
+	previousStatus := record.Status
 	record.Status = input.Status
 	record.Note = input.Note
 	record.UpdatedBy = &updatedBy
 	record.UpdatedAt = time.Now()
-	if err := config.DB.Save(&record).Error; err != nil {
+	record.StatusSource = repositories.AttendanceSourceManual
+	if err := config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(&record).Error; err != nil {
+			return err
+		}
+		return repositories.RecordAttendanceStatusHistory(tx, repositories.AttendanceStatusChange{
+			RecordID:       record.ID,
+			SessionID:      record.AttendanceSessionID,
+			StudentID:      record.StudentID,
+			FromStatus:     previousStatus,
+			ToStatus:       record.Status,
+			Source:         repositories.AttendanceSourceManual,
+			ActorType:      repositories.AttendanceActorUser,
+			ActorID:        &updatedBy,
+			LeaveRequestID: record.LeaveRequestID,
+			Note:           record.Note,
+		})
+	}); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update record"})
 	}
 
@@ -1201,6 +1233,8 @@ func emitAttendanceRecordUpdated(sessionID uint, studentID uint) {
 				"distance_meters":       record.DistanceMeters,
 				"note":                  nullableAttendanceString(record.Note),
 				"section_no":            nullableAttendanceString(record.SectionNo),
+				"status_source":         record.StatusSource,
+				"leave_request_id":      record.LeaveRequestID,
 				"updated_by":            record.UpdatedBy,
 				"created_at":            record.CreatedAt,
 				"updated_at":            record.UpdatedAt,
@@ -2004,9 +2038,24 @@ func ApplyTimeChangeHandler(c fiber.Ctx) error {
 		if newStatus == "invalid" {
 			note = "[ระบบ] สถานะเปลี่ยนเป็นขาด เนื่องจากเวลาเช็กชื่ออยู่นอกช่วงเวลาใหม่"
 		}
-		if err := tx.Model(&models.AttendanceRecord{}).Where("id = ?", record.ID).Updates(map[string]interface{}{"status": dbStatus, "updated_by": updatedBy, "note": note, "updated_at": time.Now()}).Error; err != nil {
+		if err := tx.Model(&models.AttendanceRecord{}).Where("id = ?", record.ID).Updates(map[string]interface{}{"status": dbStatus, "updated_by": updatedBy, "note": note, "updated_at": time.Now(), "status_source": repositories.AttendanceSourceSystem}).Error; err != nil {
 			tx.Rollback()
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to re-evaluate attendance records"})
+		}
+		if err := repositories.RecordAttendanceStatusHistory(tx, repositories.AttendanceStatusChange{
+			RecordID:       record.ID,
+			SessionID:      session.ID,
+			StudentID:      record.StudentID,
+			FromStatus:     record.Status,
+			ToStatus:       dbStatus,
+			Source:         repositories.AttendanceSourceSystem,
+			ActorType:      repositories.AttendanceActorUser,
+			ActorID:        &updatedBy,
+			LeaveRequestID: record.LeaveRequestID,
+			Note:           note,
+		}); err != nil {
+			tx.Rollback()
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to record attendance history"})
 		}
 
 		switch {
@@ -2028,6 +2077,13 @@ func ApplyTimeChangeHandler(c fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to commit attendance changes"})
 	}
 
+	// วันของคาบอาจเปลี่ยน ต้องจับคู่คำขอลาใหม่
+	if _, err := repositories.BindLeaveItemsToSession(session.ID); err != nil {
+		log.Printf("event=leave_bind_failed session_id=%d err=%v", session.ID, err)
+	}
+	if err := repositories.ReapplyLeaveForSession(session.ID); err != nil {
+		log.Printf("event=leave_reapply_failed session_id=%d err=%v", session.ID, err)
+	}
 	session.Status = repositories.ComputeSessionStatus(session)
 	logCourseActivity(c, session.CourseID, updatedBy, "apply_attendance_time_change", "attendance", "attendance_session", session.ID, session.Title, fiber.Map{"invalidated": invalidated, "present_to_late": presentToLate, "late_to_present": lateToPresent, "recovered": recovered, "unchanged": unchanged})
 	return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"session": attendanceSessionPayload(session, detail.CourseSectionIDs), "impact": fiber.Map{"total_records": len(records), "invalidated": invalidated, "present_to_late": presentToLate, "late_to_present": lateToPresent, "recovered": recovered, "unchanged": unchanged, "details": auditDetails}}})

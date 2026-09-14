@@ -970,6 +970,8 @@ func GetAttendanceSession(id uint) (*AttendanceSessionDetail, error) {
 		LocationLng         *float64   `gorm:"column:location_lng"`
 		DistanceMeters      *int       `gorm:"column:distance_meters"`
 		UpdatedBy           *uint      `gorm:"column:updated_by"`
+		StatusSource        *string    `gorm:"column:status_source"`
+		LeaveRequestID      *uint      `gorm:"column:leave_request_id"`
 		RecordCreatedAt     time.Time  `gorm:"column:record_created_at"`
 		RecordUpdatedAt     time.Time  `gorm:"column:record_updated_at"`
 		// Student fields
@@ -996,6 +998,8 @@ func GetAttendanceSession(id uint) (*AttendanceSessionDetail, error) {
 			ar.location_lng,
 			ar.distance_meters,
 			ar.updated_by,
+			ar.status_source,
+			ar.leave_request_id,
 			ar.created_at as record_created_at,
 			ar.updated_at as record_updated_at,
 			s.id as stu_id,
@@ -1071,6 +1075,8 @@ func GetAttendanceSession(id uint) (*AttendanceSessionDetail, error) {
 				LocationLng:         r.LocationLng,
 				DistanceMeters:      r.DistanceMeters,
 				UpdatedBy:           r.UpdatedBy,
+				StatusSource:        derefString(r.StatusSource),
+				LeaveRequestID:      r.LeaveRequestID,
 				CreatedAt:           r.RecordCreatedAt,
 				UpdatedAt:           r.RecordUpdatedAt,
 			},
@@ -1199,10 +1205,19 @@ func UpdateAttendanceSession(session *models.AttendanceSession) error {
 }
 
 func DeleteAttendanceSession(id uint) error {
-	db := config.DB
-	db.Where("attendance_session_id = ?", id).Delete(&models.AttendanceRecord{})
-	db.Where("attendance_session_id = ?", id).Delete(&models.AttendanceSessionSection{})
-	return db.Where("id = ?", id).Delete(&models.AttendanceSession{}).Error
+	return config.DB.Transaction(func(tx *gorm.DB) error {
+		// ปลดคำขอลาออกจาก session นี้ก่อน เก็บวันไว้รอจับคู่ใหม่ถ้าสร้างซ้ำ
+		if err := DetachLeaveItemsFromSession(tx, id); err != nil {
+			return err
+		}
+		if err := tx.Where("attendance_session_id = ?", id).Delete(&models.AttendanceRecord{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("attendance_session_id = ?", id).Delete(&models.AttendanceSessionSection{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("id = ?", id).Delete(&models.AttendanceSession{}).Error
+	})
 }
 
 // ============================================================
@@ -1253,7 +1268,7 @@ func UpdateAttendanceRecordReturningPrevious(sessionID uint, studentID uint, sta
 			return err
 		}
 		now := time.Now()
-		return tx.Model(&models.AttendanceRecord{}).
+		if err := tx.Model(&models.AttendanceRecord{}).
 			Where("id = ?", record.ID).
 			Updates(map[string]interface{}{
 				"status": status,
@@ -1263,10 +1278,26 @@ func UpdateAttendanceRecordReturningPrevious(sessionID uint, studentID uint, sta
 					}
 					return nil
 				}(),
-				"note":       note,
-				"updated_by": updatedBy,
-				"updated_at": now,
-			}).Error
+				"note":          note,
+				"updated_by":    updatedBy,
+				"updated_at":    now,
+				"status_source": AttendanceSourceManual,
+			}).Error; err != nil {
+			return err
+		}
+		actor := updatedBy
+		return RecordAttendanceStatusHistory(tx, AttendanceStatusChange{
+			RecordID:       record.ID,
+			SessionID:      session.ID,
+			StudentID:      studentID,
+			FromStatus:     record.Status,
+			ToStatus:       status,
+			Source:         AttendanceSourceManual,
+			ActorType:      AttendanceActorUser,
+			ActorID:        &actor,
+			LeaveRequestID: record.LeaveRequestID,
+			Note:           note,
+		})
 	})
 
 	return previous, err
@@ -1299,7 +1330,23 @@ func BulkUpdateAttendanceRecords(sessionID uint, updates []AttendanceRecordUpdat
 					"note":          u.Note,
 					"updated_by":    updatedBy,
 					"updated_at":    now,
+					"status_source": AttendanceSourceManual,
 				}).Error; err != nil {
+				return err
+			}
+			actor := updatedBy
+			if err := RecordAttendanceStatusHistory(tx, AttendanceStatusChange{
+				RecordID:       record.ID,
+				SessionID:      session.ID,
+				StudentID:      u.StudentID,
+				FromStatus:     record.Status,
+				ToStatus:       u.Status,
+				Source:         AttendanceSourceManual,
+				ActorType:      AttendanceActorUser,
+				ActorID:        &actor,
+				LeaveRequestID: record.LeaveRequestID,
+				Note:           u.Note,
+			}); err != nil {
 				return err
 			}
 		}
@@ -1418,6 +1465,7 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 		checkInTime := now
 		updates := map[string]interface{}{
 			"status":            status,
+			"status_source":     AttendanceSourceCheckIn,
 			"check_in_time":     &checkInTime,
 			"pin_verified":      true,
 			"google_email":      googleEmail,
@@ -1466,6 +1514,27 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 		}
 		if updateResult.Error != nil {
 			return updateResult.Error
+		}
+		// ถ้าก่อนหน้านี้เป็น leave จากคำขอลา ให้ present ทับ (มาเรียนดีกว่า)
+		// และบันทึกว่า item ของคำขอนั้นถูกแทนที่แล้ว
+		if record.Status == "leave" && record.LeaveRequestID != nil {
+			if err := supersedeLeaveRequestItemForRecord(tx, record.ID); err != nil {
+				return err
+			}
+		}
+		actorStudent := studentID
+		if err := RecordAttendanceStatusHistory(tx, AttendanceStatusChange{
+			RecordID:       record.ID,
+			SessionID:      session.ID,
+			StudentID:      studentID,
+			FromStatus:     record.Status,
+			ToStatus:       status,
+			Source:         AttendanceSourceCheckIn,
+			ActorType:      AttendanceActorStudent,
+			ActorID:        &actorStudent,
+			LeaveRequestID: record.LeaveRequestID,
+		}); err != nil {
+			return err
 		}
 
 		result = AttendanceCheckInResult{
@@ -1697,4 +1766,11 @@ func GetAttendanceCourseSummary(courseID string) (*AttendanceCourseSummary, erro
 	}
 
 	return summary, nil
+}
+
+func derefString(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }

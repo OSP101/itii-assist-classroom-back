@@ -765,6 +765,28 @@ func MigratePerformanceIndexes() {
 			name: "course_tas_user_course",
 			sql:  `CREATE INDEX IF NOT EXISTS idx_course_tas_user_course ON course_tas (user_id, course_id)`,
 		},
+		// ── คำขอลา ──────────────────────────────────────────────────────
+		{
+			name: "attendance_leave_requests_course_status_created",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_attendance_leave_requests_course_status_created ON attendance_leave_requests (course_id, status, created_at DESC)`,
+		},
+		{
+			name: "attendance_leave_requests_student_course",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_attendance_leave_requests_student_course ON attendance_leave_requests (student_id, course_id, created_at DESC)`,
+		},
+		{
+			// จับคู่ item ที่รอ session กับ session ที่เพิ่งสร้าง หาตามวัน
+			name: "attendance_leave_request_items_date_status",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_attendance_leave_request_items_date_status ON attendance_leave_request_items (leave_date, item_status)`,
+		},
+		{
+			name: "attendance_record_histories_record_created",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_attendance_record_histories_record_created ON attendance_record_histories (attendance_record_id, created_at DESC)`,
+		},
+		{
+			name: "attendance_record_histories_session_student",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_attendance_record_histories_session_student ON attendance_record_histories (attendance_session_id, student_id)`,
+		},
 		{
 			// courses.is_active / year / semester are filtered directly
 			// (WHERE courses.is_active = true, etc.) with no index at all.

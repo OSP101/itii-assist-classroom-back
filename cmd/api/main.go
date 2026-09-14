@@ -85,6 +85,9 @@ func main() {
 		&models.AttendanceSession{},
 		&models.AttendanceSessionSection{},
 		&models.AttendanceRecord{},
+		&models.AttendanceRecordHistory{},
+		&models.AttendanceLeaveRequest{},
+		&models.AttendanceLeaveRequestItem{},
 		&models.AttendancePinHistory{},
 		&models.AttendanceDisplayDevice{},
 		&models.AttendanceDisplayPairing{},
@@ -205,6 +208,11 @@ func main() {
 		}))
 	}
 
+	// ไฟล์ใต้ uploads/private (หลักฐานการลา ฯลฯ) ห้ามเสิร์ฟแบบสาธารณะ
+	// ต้องผ่าน route ที่เช็กสิทธิ์เท่านั้น
+	app.Use("/api/uploads/private", func(c fiber.Ctx) error {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Not found"})
+	})
 	app.Use("/api/uploads", static.New("./uploads"))
 
 	app.Get("/api/health", func(c fiber.Ctx) error {
@@ -247,6 +255,14 @@ func main() {
 			} else if deleted > 0 {
 				log.Printf("🧹 Cleaned up %d expired student removal record(s)", deleted)
 			}
+		}
+	}()
+	// Background job: เตือนผู้สอนวันละครั้งเมื่อมีคำขอลาค้างเกิน 3 วัน
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			handlers.RunLeaveRequestPendingReminder(72 * time.Hour)
 		}
 	}()
 	startLogRetentionWorker()

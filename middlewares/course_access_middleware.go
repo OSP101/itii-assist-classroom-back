@@ -413,6 +413,23 @@ func CourseIDFromAttendanceSessionParam(param string) CourseAccessResolver {
 	}
 }
 
+func CourseIDFromLeaveRequestParam(param string) CourseAccessResolver {
+	return func(c fiber.Ctx) ([]string, error) {
+		requestID, err := strconv.ParseUint(strings.TrimSpace(c.Params(param)), 10, 64)
+		if err != nil {
+			return nil, newCourseAccessError(400, "Invalid leave request ID")
+		}
+		courseID, err := repositories.GetCourseIDByLeaveRequestID(uint(requestID))
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, newCourseAccessError(404, "Leave request not found")
+		}
+		if err != nil {
+			return nil, err
+		}
+		return []string{courseID}, nil
+	}
+}
+
 func CourseIDFromScoreBody(field string) CourseAccessResolver {
 	return func(c fiber.Ctx) ([]string, error) {
 		scoreID, err := requiredUintField(c, field)
