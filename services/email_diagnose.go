@@ -105,7 +105,7 @@ func DiagnoseEmailTransport() EmailDiagnosticReport {
 		report.Overall = "fail"
 		return report
 	}
-	addStep("config", "ok", fmt.Sprintf("host=%s port=%d secure=%t auth=%t skip_verify=%t min_tls=%s", cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPSecure, cfg.SMTPUser != "", cfg.SMTPTLSSkipVerify, func() string {
+	addStep("config", "ok", fmt.Sprintf("host=%s port=%d secure=%t auth=%t skip_verify=%t legacy_ciphers=%t min_tls=%s", cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPSecure, cfg.SMTPUser != "", cfg.SMTPTLSSkipVerify, cfg.SMTPTLSLegacyCiphers, func() string {
 		if cfg.SMTPTLSMinVersion == 0 {
 			return "default(1.2)"
 		}
@@ -196,7 +196,21 @@ func DiagnoseEmailTransport() EmailDiagnosticReport {
 		if err := client.StartTLS(smtpTLSConfig(cfg)); err != nil {
 			addStep("starttls", "fail", err.Error(), smtpTLSHint(err), started)
 			report.Overall = "fail"
-			if strings.Contains(strings.ToLower(err.Error()), "handshake failure") {
+			if isTLSHandshakeFailure(err) && !cfg.SMTPTLSLegacyCiphers {
+				// ลองซ้ำด้วย cipher ชุดเต็มบน connection ใหม่ เพื่อบอกได้ชัดว่าแก้ด้วย env ตัวไหน
+				retryStarted := time.Now()
+				legacyCfg := cfg
+				legacyCfg.SMTPTLSLegacyCiphers = true
+				if state, retryErr := probeStartTLS(addr, legacyCfg); retryErr == nil {
+					addStep("starttls_legacy_retry", "ok", describeTLSState(state), "ตั้ง SMTP_TLS_LEGACY_CIPHERS=true แล้วส่งได้ (ระบบจะลองซ้ำให้อัตโนมัติอยู่แล้ว แต่ตั้งไว้จะเร็วกว่า)", retryStarted)
+					report.Advice = append(report.Advice, "ตั้ง SMTP_TLS_LEGACY_CIPHERS=true ใน env ของ backend (relay รับเฉพาะ cipher แบบ RSA key exchange)")
+					report.Overall = "ok"
+					return report
+				} else {
+					addStep("starttls_legacy_retry", "fail", retryErr.Error(), "", retryStarted)
+				}
+			}
+			if isTLSHandshakeFailure(err) {
 				report.Advice = append(report.Advice,
 					"ลอง SMTP_TLS_MIN_VERSION=1.0 (relay เก่า)",
 					"ถ้าเป็น relay ภายในที่ใช้ self-signed ลอง SMTP_TLS_SKIP_VERIFY=true",
@@ -246,4 +260,28 @@ func DiagnoseEmailTransport() EmailDiagnosticReport {
 	_ = client.Quit()
 	report.Overall = "ok"
 	return report
+}
+
+// probeStartTLS เปิด connection ใหม่แล้วลอง STARTTLS ด้วย config ที่ให้ ใช้ในการวินิจฉัยเท่านั้น
+func probeStartTLS(addr string, cfg emailConfig) (tls.ConnectionState, error) {
+	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	if err != nil {
+		return tls.ConnectionState{}, err
+	}
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	client, err := smtp.NewClient(conn, cfg.SMTPHost)
+	if err != nil {
+		conn.Close()
+		return tls.ConnectionState{}, err
+	}
+	defer client.Close()
+	if err := client.Hello("localhost"); err != nil {
+		return tls.ConnectionState{}, err
+	}
+	if err := client.StartTLS(smtpTLSConfig(cfg)); err != nil {
+		return tls.ConnectionState{}, err
+	}
+	state, _ := client.TLSConnectionState()
+	_ = client.Quit()
+	return state, nil
 }

@@ -43,6 +43,9 @@ type emailConfig struct {
 	SMTPTLSMinVersion uint16
 	// SMTPStartTLSOpportunistic = ถ้าเซิร์ฟเวอร์ไม่มี STARTTLS ให้ส่งแบบไม่เข้ารหัสแทนที่จะล้มเหลว
 	SMTPStartTLSOpportunistic bool
+	// SMTPTLSLegacyCiphers เปิด cipher แบบ RSA key exchange (ไม่มี forward secrecy) ที่ Go 1.22+
+	// ตัดออกจากค่าเริ่มต้น relay ของ มข. (smtp.kku.ac.th) รับเฉพาะแบบนี้
+	SMTPTLSLegacyCiphers bool
 }
 
 func smtpTLSConfig(cfg emailConfig) *tls.Config {
@@ -50,7 +53,28 @@ func smtpTLSConfig(cfg emailConfig) *tls.Config {
 	if cfg.SMTPTLSMinVersion != 0 {
 		tlsConfig.MinVersion = cfg.SMTPTLSMinVersion
 	}
+	if cfg.SMTPTLSLegacyCiphers {
+		tlsConfig.CipherSuites = legacyCompatibleCipherSuites()
+	}
 	return tlsConfig
+}
+
+// legacyCompatibleCipherSuites คืน cipher ทั้งหมดที่ Go รู้จัก (รวม TLS_RSA_* ที่ถูกปิดเป็นค่าเริ่มต้น)
+// เรียงให้ตัวที่ปลอดภัยกว่ามาก่อน เซิร์ฟเวอร์ที่รองรับ ECDHE จะยังได้ forward secrecy
+func legacyCompatibleCipherSuites() []uint16 {
+	ids := make([]uint16, 0, 32)
+	for _, suite := range tls.CipherSuites() {
+		ids = append(ids, suite.ID)
+	}
+	for _, suite := range tls.InsecureCipherSuites() {
+		ids = append(ids, suite.ID)
+	}
+	return ids
+}
+
+// isTLSHandshakeFailure = เซิร์ฟเวอร์ตอบ alert handshake_failure (ตกลง cipher/เวอร์ชันกันไม่ได้)
+func isTLSHandshakeFailure(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "handshake failure")
 }
 
 func parseTLSMinVersion(raw string) uint16 {
@@ -121,6 +145,7 @@ func loadEmailConfig() emailConfig {
 		SMTPTLSSkipVerify:         strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_TLS_SKIP_VERIFY")), "true"),
 		SMTPTLSMinVersion:         parseTLSMinVersion(os.Getenv("SMTP_TLS_MIN_VERSION")),
 		SMTPStartTLSOpportunistic: strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_STARTTLS_OPPORTUNISTIC")), "true"),
+		SMTPTLSLegacyCiphers:      strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_TLS_LEGACY_CIPHERS")), "true"),
 	}
 }
 
@@ -577,7 +602,22 @@ func sendWithResend(cfg emailConfig, message emailMessage) error {
 	return nil
 }
 
+// sendWithSMTP ส่งผ่าน SMTP ถ้า TLS handshake ถูกปฏิเสธและยังไม่ได้เปิด legacy ciphers
+// จะลองใหม่อีกครั้งด้วย cipher ชุดเต็ม (relay ของ มข. ต้องการแบบนี้) แล้ว log ให้รู้ว่าควรตั้ง env ถาวร
 func sendWithSMTP(cfg emailConfig, message emailMessage) error {
+	err := sendWithSMTPOnce(cfg, message)
+	if err == nil || cfg.SMTPTLSLegacyCiphers || !isTLSHandshakeFailure(err) {
+		return err
+	}
+	log.Printf("event=smtp_tls_handshake_failure host=%s retrying with legacy RSA cipher suites; set SMTP_TLS_LEGACY_CIPHERS=true to skip the failed first attempt", cfg.SMTPHost)
+	cfg.SMTPTLSLegacyCiphers = true
+	if retryErr := sendWithSMTPOnce(cfg, message); retryErr != nil {
+		return fmt.Errorf("%w; retry with legacy ciphers also failed: %v", err, retryErr)
+	}
+	return nil
+}
+
+func sendWithSMTPOnce(cfg emailConfig, message emailMessage) error {
 	if cfg.SMTPHost == "" {
 		return fmt.Errorf("SMTP configuration is incomplete")
 	}
@@ -650,7 +690,7 @@ func smtpTLSHint(err error) string {
 	msg := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(msg, "handshake failure"):
-		return "server rejected the TLS handshake: usually the port/mode mismatch (465 = implicit TLS, 587/25 = STARTTLS), a relay that only speaks TLS 1.0/1.1 (try SMTP_TLS_MIN_VERSION=1.0), or a relay that needs a client certificate"
+		return "server rejected the TLS handshake: usually a relay that only accepts RSA key-exchange ciphers (set SMTP_TLS_LEGACY_CIPHERS=true, this is the case for smtp.kku.ac.th), a port/mode mismatch (465 = implicit TLS, 587/25 = STARTTLS), or a relay that needs a client certificate"
 	case strings.Contains(msg, "certificate") || strings.Contains(msg, "x509"):
 		return "certificate could not be verified: the relay may use a self-signed cert or SMTP_HOST does not match the cert name (try SMTP_TLS_SKIP_VERIFY=true for an internal relay)"
 	case strings.Contains(msg, "first record does not look like a tls handshake"):
