@@ -186,42 +186,17 @@ func SendScoreEditRequestSubmittedEmail(user *models.User, courseName, assignmen
 	displayName := displayNameForEmail(user)
 	subject := fmt.Sprintf("[%s] มีคำขอแก้ไขคะแนนใหม่: %s", cfg.AppName, assignmentName)
 
-	reasonBlock := ""
-	if strings.TrimSpace(reason) != "" {
-		reasonBlock = fmt.Sprintf(`
-      <div style="margin: 0 0 20px; padding: 18px; border-radius: 16px; background: #f8fafc; border: 1px solid #e2e8f0; white-space: pre-wrap; line-height: 1.7; color: #334155;">%s</div>`, html.EscapeString(strings.TrimSpace(reason)))
+	content := emailContent{
+		Section:  "คะแนน · คำขอแก้ไขคะแนน",
+		Title:    "คำขอแก้ไขคะแนนใหม่",
+		Subtitle: fmt.Sprintf("%s · %s", courseName, assignmentName),
+		BodyHTML: emailGreeting(displayName) +
+			emailParagraph(fmt.Sprintf(`%s ส่งคำขอแก้ไขคะแนนของงาน "%s" ในวิชา %s กรุณาเข้าไปตรวจสอบและพิจารณาอนุมัติ`, html.EscapeString(requesterName), html.EscapeString(assignmentName), html.EscapeString(courseName))) +
+			emailQuoteBlock("เหตุผล", reason) +
+			emailButton("เปิดหน้ารายการอนุมัติ", link),
 	}
-
-	htmlBody := fmt.Sprintf(`
-<div style="font-family: 'Segoe UI', Tahoma, sans-serif; background: #f3f6fb; padding: 32px 16px;">
-  <div style="max-width: 560px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);">
-    <div style="padding: 32px; background: linear-gradient(135deg, #1d4ed8, #0f766e); color: #ffffff;">
-      <h1 style="margin: 0; font-size: 24px;">คำขอแก้ไขคะแนนใหม่</h1>
-      <p style="margin: 12px 0 0; opacity: 0.92;">%s</p>
-    </div>
-    <div style="padding: 32px;">
-      <p style="margin: 0 0 16px; color: #0f172a;">สวัสดีคุณ%s,</p>
-      <p style="margin: 0 0 20px; color: #475569; line-height: 1.7;">
-        %s ส่งคำขอแก้ไขคะแนนของงาน "%s" ในวิชา %s กรุณาเข้าไปตรวจสอบและพิจารณาอนุมัติ
-      </p>%s
-      <p style="margin: 28px 0;">
-        <a href="%s" style="display: inline-block; background: #1d4ed8; color: #ffffff; text-decoration: none; padding: 14px 22px; border-radius: 12px; font-weight: 600;">
-          เปิดหน้ารายการอนุมัติ
-        </a>
-      </p>
-    </div>
-  </div>
-</div>`, html.EscapeString(cfg.AppName), html.EscapeString(displayName), html.EscapeString(requesterName), html.EscapeString(assignmentName), html.EscapeString(courseName), reasonBlock, html.EscapeString(link))
-
-	plainBody := fmt.Sprintf(
-		"%s\n\nสวัสดีคุณ%s,\n\n%s ส่งคำขอแก้ไขคะแนนของงาน \"%s\" ในวิชา %s กรุณาเข้าไปตรวจสอบและพิจารณาอนุมัติ:\n%s\n",
-		cfg.AppName,
-		displayName,
-		requesterName,
-		assignmentName,
-		courseName,
-		link,
-	)
+	htmlBody := renderEmailHTML(content)
+	plainBody := renderEmailPlain(content, fmt.Sprintf("สวัสดีคุณ%s,\n\n%s ส่งคำขอแก้ไขคะแนนของงาน \"%s\" ในวิชา %s กรุณาเข้าไปตรวจสอบและพิจารณาอนุมัติ\nเหตุผล: %s\n\nเปิดหน้ารายการอนุมัติ: %s", displayName, requesterName, assignmentName, courseName, strings.TrimSpace(reason), link))
 
 	return sendEmail(emailMessage{
 		To:      strings.TrimSpace(user.Email),
@@ -240,10 +215,10 @@ func SendScoreEditRequestReviewedEmail(user *models.User, approved bool, assignm
 	displayName := displayNameForEmail(user)
 
 	resultText := "ได้รับการอนุมัติ"
-	headerColor := "linear-gradient(135deg, #0f766e, #1d4ed8)"
+	headerColor := emailGradientSuccess
 	if !approved {
 		resultText = "ถูกปฏิเสธ"
-		headerColor = "linear-gradient(135deg, #b91c1c, #ea580c)"
+		headerColor = emailGradientDanger
 	}
 
 	countText := ""
@@ -253,45 +228,18 @@ func SendScoreEditRequestReviewedEmail(user *models.User, approved bool, assignm
 
 	subject := fmt.Sprintf("[%s] คำขอแก้ไขคะแนน%s: %s", cfg.AppName, resultText, assignmentName)
 
-	commentBlock := ""
-	if strings.TrimSpace(comment) != "" {
-		commentBlock = fmt.Sprintf(`
-      <div style="margin: 0 0 20px; padding: 18px; border-radius: 16px; background: #f8fafc; border: 1px solid #e2e8f0; white-space: pre-wrap; line-height: 1.7; color: #334155;">
-        <div style="font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px;">ความเห็นของผู้ตรวจสอบ</div>
-        %s
-      </div>`, html.EscapeString(strings.TrimSpace(comment)))
+	content := emailContent{
+		Section:  "คะแนน · คำขอแก้ไขคะแนน",
+		Title:    "คำขอแก้ไขคะแนน" + resultText,
+		Subtitle: assignmentName + countText,
+		Gradient: headerColor,
+		BodyHTML: emailGreeting(displayName) +
+			emailParagraph(fmt.Sprintf(`คำขอแก้ไขคะแนนของงาน "%s" ที่คุณส่งมา%s%sแล้ว`, html.EscapeString(assignmentName), html.EscapeString(countText), html.EscapeString(resultText))) +
+			emailQuoteBlock("ความเห็นของผู้ตรวจสอบ", comment) +
+			emailButton("เปิดหน้ารายการอนุมัติ", link),
 	}
-
-	htmlBody := fmt.Sprintf(`
-<div style="font-family: 'Segoe UI', Tahoma, sans-serif; background: #f3f6fb; padding: 32px 16px;">
-  <div style="max-width: 560px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);">
-    <div style="padding: 32px; background: %s; color: #ffffff;">
-      <h1 style="margin: 0; font-size: 24px;">คำขอแก้ไขคะแนน%s</h1>
-      <p style="margin: 12px 0 0; opacity: 0.92;">%s</p>
-    </div>
-    <div style="padding: 32px;">
-      <p style="margin: 0 0 16px; color: #0f172a;">สวัสดีคุณ%s,</p>
-      <p style="margin: 0 0 20px; color: #475569; line-height: 1.7;">
-        คำขอแก้ไขคะแนนของงาน "%s" ที่คุณส่งมา%s%s แล้ว
-      </p>%s
-      <p style="margin: 28px 0;">
-        <a href="%s" style="display: inline-block; background: #1d4ed8; color: #ffffff; text-decoration: none; padding: 14px 22px; border-radius: 12px; font-weight: 600;">
-          เปิดหน้ารายการอนุมัติ
-        </a>
-      </p>
-    </div>
-  </div>
-</div>`, headerColor, html.EscapeString(resultText), html.EscapeString(cfg.AppName), html.EscapeString(displayName), html.EscapeString(assignmentName), html.EscapeString(countText), html.EscapeString(resultText), commentBlock, html.EscapeString(link))
-
-	plainBody := fmt.Sprintf(
-		"%s\n\nสวัสดีคุณ%s,\n\nคำขอแก้ไขคะแนนของงาน \"%s\" ที่คุณส่งมา%s%s แล้ว\n%s\n",
-		cfg.AppName,
-		displayName,
-		assignmentName,
-		countText,
-		resultText,
-		link,
-	)
+	htmlBody := renderEmailHTML(content)
+	plainBody := renderEmailPlain(content, fmt.Sprintf("สวัสดีคุณ%s,\n\nคำขอแก้ไขคะแนนของงาน \"%s\" ที่คุณส่งมา%s%sแล้ว\nความเห็น: %s\n\nเปิดหน้ารายการอนุมัติ: %s", displayName, assignmentName, countText, resultText, strings.TrimSpace(comment), link))
 
 	return sendEmail(emailMessage{
 		To:      strings.TrimSpace(user.Email),
@@ -334,36 +282,20 @@ func SendSystemAnnouncementEmail(user *models.User, announcement *models.SystemA
 		if actionLabel == "" {
 			actionLabel = "ดูรายละเอียด"
 		}
-		actionBlock = fmt.Sprintf(`
-      <p style="margin: 28px 0;">
-        <a href="%s" style="display: inline-block; background: #1d4ed8; color: #ffffff; text-decoration: none; padding: 14px 22px; border-radius: 12px; font-weight: 600;">
-          %s
-        </a>
-      </p>`, html.EscapeString(actionURL), html.EscapeString(actionLabel))
+		actionBlock = emailButton(actionLabel, actionURL)
 		plainAction = fmt.Sprintf("\n%s: %s\n", actionLabel, actionURL)
 	}
 
-	htmlBody := fmt.Sprintf(`
-<div style="font-family: 'Segoe UI', Tahoma, sans-serif; background: #f3f6fb; padding: 32px 16px;">
-  <div style="max-width: 560px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);">
-    <div style="padding: 32px; background: linear-gradient(135deg, #1d4ed8, #0f766e); color: #ffffff;">
-      <p style="margin: 0; font-size: 12px; letter-spacing: 2px; text-transform: uppercase; opacity: 0.85;">ประกาศจากระบบ</p>
-      <h1 style="margin: 10px 0 0; font-size: 24px;">%s</h1>
-    </div>
-    <div style="padding: 32px;">
-      <p style="margin: 0 0 16px; color: #0f172a;">สวัสดีคุณ%s,</p>
-      <div style="margin: 0 0 20px; color: #475569; line-height: 1.7; white-space: pre-wrap;">%s</div>%s
-    </div>
-  </div>
-</div>`, html.EscapeString(title), html.EscapeString(displayName), html.EscapeString(message), actionBlock)
-
-	plainBody := fmt.Sprintf(
-		"%s\n\nสวัสดีคุณ%s,\n\n%s\n%s",
-		cfg.AppName,
-		displayName,
-		message,
-		plainAction,
-	)
+	content := emailContent{
+		Section:   "ประกาศจากผู้ดูแลระบบ",
+		Title:     title,
+		Reference: emailReference("AN", announcement.ID),
+		BodyHTML: emailGreeting(displayName) +
+			fmt.Sprintf(`<div style="margin: 0 0 20px; color: #475569; line-height: 1.7; white-space: pre-wrap;">%s</div>`, html.EscapeString(message)) +
+			actionBlock,
+	}
+	htmlBody := renderEmailHTML(content)
+	plainBody := renderEmailPlain(content, fmt.Sprintf("สวัสดีคุณ%s,\n\n%s\n%s", displayName, message, plainAction))
 
 	return sendEmail(emailMessage{
 		To:      strings.TrimSpace(user.Email),
@@ -383,37 +315,18 @@ func SendPasswordResetEmail(user *models.User, token string) error {
 	resetURL := PasswordResetURL(token)
 	subject := fmt.Sprintf("[%s] รีเซ็ตรหัสผ่านของคุณ", cfg.AppName)
 
-	htmlBody := fmt.Sprintf(`
-<div style="font-family: 'Segoe UI', Tahoma, sans-serif; background: #f3f6fb; padding: 32px 16px;">
-  <div style="max-width: 560px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);">
-    <div style="padding: 32px; background: linear-gradient(135deg, #1d4ed8, #0f766e); color: #ffffff;">
-      <h1 style="margin: 0; font-size: 24px;">รีเซ็ตรหัสผ่าน</h1>
-      <p style="margin: 12px 0 0; opacity: 0.92;">%s</p>
-    </div>
-    <div style="padding: 32px;">
-      <p style="margin: 0 0 16px; color: #0f172a;">สวัสดีคุณ%s,</p>
-      <p style="margin: 0 0 20px; color: #475569; line-height: 1.7;">
-        มีการร้องขอให้รีเซ็ตรหัสผ่านสำหรับบัญชีของคุณ หากคุณเป็นผู้ดำเนินการเอง กรุณากดปุ่มด้านล่างภายใน 1 ชั่วโมง
-      </p>
-      <p style="margin: 28px 0;">
-        <a href="%s" style="display: inline-block; background: #1d4ed8; color: #ffffff; text-decoration: none; padding: 14px 22px; border-radius: 12px; font-weight: 600;">
-          รีเซ็ตรหัสผ่าน
-        </a>
-      </p>
-      <p style="margin: 0 0 12px; color: #64748b; line-height: 1.7;">
-        หากปุ่มใช้งานไม่ได้ คุณสามารถเปิดลิงก์นี้ในเบราว์เซอร์:
-      </p>
-      <p style="margin: 0; word-break: break-all; color: #0f766e;">%s</p>
-    </div>
-  </div>
-</div>`, html.EscapeString(cfg.AppName), html.EscapeString(displayName), html.EscapeString(resetURL), html.EscapeString(resetURL))
-
-	plainBody := fmt.Sprintf(
-		"%s\n\nสวัสดีคุณ%s,\n\nมีการร้องขอให้รีเซ็ตรหัสผ่านสำหรับบัญชีของคุณ หากคุณเป็นผู้ดำเนินการเอง กรุณาเปิดลิงก์นี้ภายใน 1 ชั่วโมง:\n%s\n",
-		cfg.AppName,
-		displayName,
-		resetURL,
-	)
+	content := emailContent{
+		Section: "บัญชีผู้ใช้ · ความปลอดภัย",
+		Title:   "รีเซ็ตรหัสผ่าน",
+		BodyHTML: emailGreeting(displayName) +
+			emailParagraph("มีการร้องขอให้รีเซ็ตรหัสผ่านสำหรับบัญชีของคุณ หากคุณเป็นผู้ดำเนินการเอง กรุณากดปุ่มด้านล่างภายใน 1 ชั่วโมง") +
+			emailButton("รีเซ็ตรหัสผ่าน", resetURL) +
+			`<p style="margin: 20px 0 8px; color: #64748b; line-height: 1.7;">หากปุ่มใช้งานไม่ได้ คุณสามารถเปิดลิงก์นี้ในเบราว์เซอร์:</p>` +
+			fmt.Sprintf(`<p style="margin: 0 0 16px; word-break: break-all; color: %s;">%s</p>`, emailThemeAccentStrong, html.EscapeString(resetURL)) +
+			emailMuted("หากคุณไม่ได้เป็นผู้ร้องขอ ไม่ต้องทำอะไร รหัสผ่านเดิมยังใช้ได้ตามปกติ"),
+	}
+	htmlBody := renderEmailHTML(content)
+	plainBody := renderEmailPlain(content, fmt.Sprintf("สวัสดีคุณ%s,\n\nมีการร้องขอให้รีเซ็ตรหัสผ่านสำหรับบัญชีของคุณ หากคุณเป็นผู้ดำเนินการเอง กรุณาเปิดลิงก์นี้ภายใน 1 ชั่วโมง:\n%s\n\nหากคุณไม่ได้เป็นผู้ร้องขอ ไม่ต้องทำอะไร", displayName, resetURL))
 
 	return sendEmail(emailMessage{
 		To:      strings.TrimSpace(user.Email),
@@ -439,36 +352,22 @@ func SendTwoFactorCodeEmail(user *models.User, code string, purpose string) erro
 	}
 
 	subject := fmt.Sprintf("[%s] รหัสยืนยัน %s", cfg.AppName, purposeText)
-	htmlBody := fmt.Sprintf(`
-<div style="font-family: 'Segoe UI', Tahoma, sans-serif; background: #f3f6fb; padding: 32px 16px;">
-  <div style="max-width: 520px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);">
-    <div style="padding: 32px; background: linear-gradient(135deg, #0f766e, #1d4ed8); color: #ffffff;">
-      <h1 style="margin: 0; font-size: 24px;">รหัสยืนยัน</h1>
-      <p style="margin: 12px 0 0; opacity: 0.92;">%s</p>
-    </div>
-    <div style="padding: 32px;">
-      <p style="margin: 0 0 16px; color: #0f172a;">สวัสดีคุณ%s,</p>
-      <p style="margin: 0 0 24px; color: #475569; line-height: 1.7;">
-        ใช้รหัสนี้เพื่อ%s รหัสมีอายุ 5 นาที และใช้ได้เพียงครั้งเดียว
-      </p>
-      <div style="margin: 0 0 24px; padding: 20px; border-radius: 16px; background: #ecfeff; border: 2px solid #22d3ee; text-align: center;">
-        <div style="font-size: 12px; color: #0f766e; letter-spacing: 2px; text-transform: uppercase; font-weight: 700;">Verification Code</div>
-        <div style="margin-top: 10px; font-size: 38px; letter-spacing: 10px; font-weight: 800; color: #0f172a;">%s</div>
-      </div>
-      <p style="margin: 0; color: #64748b; line-height: 1.7;">
-        หากคุณไม่ได้เป็นผู้ร้องขอ กรุณาเปลี่ยนรหัสผ่านและตรวจสอบความปลอดภัยของบัญชีทันที
-      </p>
-    </div>
-  </div>
-</div>`, html.EscapeString(cfg.AppName), html.EscapeString(displayName), html.EscapeString(purposeText), html.EscapeString(code))
-
-	plainBody := fmt.Sprintf(
-		"%s\n\nสวัสดีคุณ%s,\n\nรหัสยืนยันสำหรับ%sของคุณคือ %s\nรหัสมีอายุ 5 นาที และใช้ได้เพียงครั้งเดียว\n",
-		cfg.AppName,
-		displayName,
-		purposeText,
-		code,
-	)
+	content := emailContent{
+		Section:  "บัญชีผู้ใช้ · ความปลอดภัย",
+		Title:    "รหัสยืนยัน",
+		Subtitle: purposeText,
+		Gradient: emailGradientSuccess,
+		MaxWidth: 520,
+		BodyHTML: emailGreeting(displayName) +
+			emailParagraph(fmt.Sprintf("ใช้รหัสนี้เพื่อ%s รหัสมีอายุ 5 นาที และใช้ได้เพียงครั้งเดียว", html.EscapeString(purposeText))) +
+			fmt.Sprintf(`<div style="margin: 0 0 24px; padding: 20px; border-radius: 16px; background: #dbeafe; border: 2px solid %s; text-align: center;">
+        <div style="font-size: 12px; color: %s; letter-spacing: 2px; text-transform: uppercase; font-weight: 700;">Verification Code</div>
+        <div style="margin-top: 10px; font-size: 38px; letter-spacing: 10px; font-weight: 800; color: %s;">%s</div>
+      </div>`, emailThemeAccent, emailThemeAccentStrong, emailThemeText, html.EscapeString(code)) +
+			emailMuted("หากคุณไม่ได้เป็นผู้ร้องขอ กรุณาเปลี่ยนรหัสผ่านและตรวจสอบความปลอดภัยของบัญชีทันที"),
+	}
+	htmlBody := renderEmailHTML(content)
+	plainBody := renderEmailPlain(content, fmt.Sprintf("สวัสดีคุณ%s,\n\nรหัสยืนยันสำหรับ%sของคุณคือ %s\nรหัสมีอายุ 5 นาที และใช้ได้เพียงครั้งเดียว", displayName, purposeText, code))
 
 	return sendEmail(emailMessage{
 		To:      strings.TrimSpace(user.Email),
@@ -506,46 +405,21 @@ func SendSupportTicketAlert(feedback *models.Feedback) error {
 	}
 
 	subject := fmt.Sprintf("[%s] Support ticket #%d (%s)", cfg.AppName, feedback.ID, priorityLabel)
-	htmlBody := fmt.Sprintf(`
-<div style="font-family: 'Segoe UI', Tahoma, sans-serif; background: #f3f6fb; padding: 32px 16px;">
-  <div style="max-width: 640px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);">
-    <div style="padding: 28px 32px; background: linear-gradient(135deg, #0f766e, #1d4ed8); color: #ffffff;">
-      <p style="margin: 0; font-size: 12px; letter-spacing: 2px; text-transform: uppercase; opacity: 0.85;">Support Ticket Alert</p>
-      <h1 style="margin: 10px 0 0; font-size: 24px;">%s</h1>
-      <p style="margin: 12px 0 0; opacity: 0.92;">Ticket #%d • Priority %s</p>
-    </div>
-    <div style="padding: 32px; color: #0f172a;">
-      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 24px;">
-        <div style="padding: 16px; border-radius: 14px; background: #f8fafc; border: 1px solid #e2e8f0;">
+	content := emailContent{
+		Section:   "แจ้งปัญหา · Support ticket",
+		Title:     feedback.Title,
+		Subtitle:  fmt.Sprintf("Priority %s · %s", priorityLabel, createdAt.Format("2006-01-02 15:04:05 MST")),
+		Reference: emailReference("TK", feedback.ID),
+		MaxWidth:  640,
+		BodyHTML: fmt.Sprintf(`<div style="padding: 16px; border-radius: 14px; background: #f8fafc; border: 1px solid #e2e8f0; margin-bottom: 20px;">
           <div style="font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 1px;">Contact Email</div>
           <div style="margin-top: 6px; font-size: 15px; font-weight: 600;">%s</div>
-        </div>
-        <div style="padding: 16px; border-radius: 14px; background: #f8fafc; border: 1px solid #e2e8f0;">
-          <div style="font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 1px;">Created At</div>
-          <div style="margin-top: 6px; font-size: 15px; font-weight: 600;">%s</div>
-        </div>
-      </div>
-      <div style="margin-bottom: 16px; font-size: 13px; color: #64748b; text-transform: uppercase; letter-spacing: 1px;">รายละเอียดคำขอ</div>
-      <div style="padding: 18px; border-radius: 16px; background: #f8fafc; border: 1px solid #e2e8f0; white-space: pre-wrap; line-height: 1.7; color: #334155;">%s</div>
-      <p style="margin: 28px 0 0;">
-        <a href="%s" style="display: inline-block; background: #1d4ed8; color: #ffffff; text-decoration: none; padding: 14px 22px; border-radius: 12px; font-weight: 600;">
-          เปิดหน้า Feedback Admin
-        </a>
-      </p>
-    </div>
-  </div>
-</div>`, html.EscapeString(feedback.Title), feedback.ID, html.EscapeString(priorityLabel), html.EscapeString(contactEmail), html.EscapeString(createdAt.Format("2006-01-02 15:04:05 MST")), html.EscapeString(strings.TrimSpace(feedback.Description)), html.EscapeString(adminURL))
-
-	plainBody := fmt.Sprintf(
-		"Support ticket #%d\nหัวข้อ: %s\nPriority: %s\nContact: %s\nCreated At: %s\n\nรายละเอียด:\n%s\n\nเปิดในระบบ: %s\n",
-		feedback.ID,
-		strings.TrimSpace(feedback.Title),
-		priorityLabel,
-		contactEmail,
-		createdAt.Format("2006-01-02 15:04:05 MST"),
-		strings.TrimSpace(feedback.Description),
-		adminURL,
-	)
+        </div>`, html.EscapeString(contactEmail)) +
+			emailQuoteBlock("รายละเอียดคำขอ", feedback.Description) +
+			emailButton("เปิดหน้า Feedback Admin", adminURL),
+	}
+	htmlBody := renderEmailHTML(content)
+	plainBody := renderEmailPlain(content, fmt.Sprintf("หัวข้อ: %s\nPriority: %s\nContact: %s\nCreated At: %s\n\nรายละเอียด:\n%s\n\nเปิดในระบบ: %s", feedback.Title, priorityLabel, contactEmail, createdAt.Format("2006-01-02 15:04:05 MST"), strings.TrimSpace(feedback.Description), adminURL))
 
 	for _, recipient := range recipients {
 		if err := sendEmail(emailMessage{

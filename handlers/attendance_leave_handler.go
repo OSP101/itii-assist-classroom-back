@@ -846,8 +846,8 @@ func notifyLeaveRequestSubmitted(view *repositories.LeaveRequestView) {
 		courseName = view.CourseID
 	}
 	typeLabel := services.LeaveTypeLabelTH(view.LeaveType)
-	link := "/classroom/" + view.CourseID + "?tab=attendance&view=leave"
-	title := fmt.Sprintf("คำขอ%sใหม่: %s", typeLabel, studentName)
+	link := "/classroom/" + view.CourseID + "?tab=leave-requests"
+	title := fmt.Sprintf("คำขอ%sใหม่ %s: %s", typeLabel, services.LeaveRequestReference(view.ID), studentName)
 	message := fmt.Sprintf("%s %s ส่งคำขอ%s %d วัน ในวิชา %s", studentCode, studentName, typeLabel, len(view.Items), courseName)
 	data := buildNotifData(view.CourseID, strconv.Itoa(int(view.ID)), "leave_request", studentName)
 	items := leaveEmailItems(view)
@@ -861,7 +861,7 @@ func notifyLeaveRequestSubmitted(view *repositories.LeaveRequestView) {
 		if name == "" {
 			name = u.Username
 		}
-		if err := services.SendLeaveRequestSubmittedEmail(u.Email, name, courseName, studentName, studentCode, view.LeaveType, view.Reason, items, len(view.EvidenceList), services.LeaveRequestReviewURL(view.CourseID)); err != nil {
+		if err := services.SendLeaveRequestSubmittedEmail(view.ID, u.Email, name, courseName, studentName, studentCode, view.LeaveType, view.Reason, items, len(view.EvidenceList), services.LeaveRequestReviewURL(view.CourseID)); err != nil {
 			services.LogEmailDeliveryError("leave_request_submitted", err)
 		}
 	}
@@ -880,7 +880,7 @@ func notifyLeaveRequestReviewed(view *repositories.LeaveRequestView) {
 	if courseName == "" {
 		courseName = view.CourseID
 	}
-	if err := services.SendLeaveRequestReviewedEmail(view.Student.Email, view.Student.FullName, courseName, view.LeaveType, view.Status, view.ReviewComment, leaveEmailItems(view), services.StudentLeaveRequestURL(view.CourseID)); err != nil {
+	if err := services.SendLeaveRequestReviewedEmail(view.ID, view.Student.Email, view.Student.FullName, courseName, view.LeaveType, view.Status, view.ReviewComment, leaveEmailItems(view), services.StudentLeaveRequestURL(view.CourseID)); err != nil {
 		services.LogEmailDeliveryError("leave_request_reviewed", err)
 	}
 }

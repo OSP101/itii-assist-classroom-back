@@ -10,6 +10,8 @@ import (
 // อีเมลคำขอลา
 // =============================================================================
 
+const leaveEmailSection = "ระบบเช็กชื่อ · คำขอลา"
+
 // LeaveEmailItem รายการวันลา 1 แถวในอีเมล
 type LeaveEmailItem struct {
 	DateText    string // เช่น "จันทร์ 15 ก.ย. 2569"
@@ -30,18 +32,23 @@ func LeaveTypeLabelTH(leaveType string) string {
 	}
 }
 
+// LeaveRequestReference เลขอ้างอิงคำขอลาที่แสดงในอีเมลและหน้าจอ เช่น LR-123
+func LeaveRequestReference(id uint) string {
+	return emailReference("LR", id)
+}
+
 func leaveItemResultLabel(result string) (string, string) {
 	switch result {
 	case "approved", "applied":
-		return "อนุมัติ", "#0f766e"
+		return "อนุมัติ", emailThemeSuccess
 	case "awaiting", "awaiting_session":
-		return "อนุมัติ (รอคาบเรียน)", "#0f766e"
+		return "อนุมัติ (รอคาบเรียน)", emailThemeSuccess
 	case "rejected":
-		return "ไม่อนุมัติ", "#b91c1c"
+		return "ไม่อนุมัติ", emailThemeDanger
 	case "superseded":
-		return "มาเรียนแล้ว", "#475569"
+		return "มาเรียนแล้ว", emailThemeText2
 	default:
-		return "รอพิจารณา", "#b45309"
+		return "รอพิจารณา", emailThemeWarning
 	}
 }
 
@@ -90,7 +97,7 @@ func leaveItemsPlain(items []LeaveEmailItem, showResult bool) string {
 
 func LeaveRequestReviewURL(courseID string) string {
 	cfg := loadEmailConfig()
-	return strings.TrimRight(cfg.Frontend, "/") + "/classroom/" + courseID + "?tab=attendance&view=leave"
+	return strings.TrimRight(cfg.Frontend, "/") + "/classroom/" + courseID + "?tab=leave-requests"
 }
 
 func StudentLeaveRequestURL(courseID string) string {
@@ -99,112 +106,84 @@ func StudentLeaveRequestURL(courseID string) string {
 }
 
 // SendLeaveRequestSubmittedEmail แจ้งผู้สอน/TA ว่ามีคำขอลาใหม่
-func SendLeaveRequestSubmittedEmail(toEmail, toName, courseName, studentName, studentCode, leaveType, reason string, items []LeaveEmailItem, evidenceCount int, link string) error {
+func SendLeaveRequestSubmittedEmail(requestID uint, toEmail, toName, courseName, studentName, studentCode, leaveType, reason string, items []LeaveEmailItem, evidenceCount int, link string) error {
 	if strings.TrimSpace(toEmail) == "" {
 		return fmt.Errorf("leave request email requires a recipient")
 	}
 	cfg := loadEmailConfig()
 	typeLabel := LeaveTypeLabelTH(leaveType)
-	subject := fmt.Sprintf("[%s] คำขอลาใหม่ (%s): %s %s", cfg.AppName, typeLabel, studentCode, studentName)
+	ref := LeaveRequestReference(requestID)
+	subject := fmt.Sprintf("[%s] คำขอลาใหม่ %s (%s): %s %s", cfg.AppName, ref, typeLabel, studentCode, studentName)
 
-	reasonBlock := ""
-	if strings.TrimSpace(reason) != "" {
-		reasonBlock = fmt.Sprintf(`
-      <div style="margin: 0 0 20px; padding: 18px; border-radius: 16px; background: #f8fafc; border: 1px solid #e2e8f0; white-space: pre-wrap; line-height: 1.7; color: #334155;">
-        <div style="font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px;">เหตุผล</div>%s</div>`, html.EscapeString(strings.TrimSpace(reason)))
-	}
 	evidenceText := "ไม่มีหลักฐานแนบ"
 	if evidenceCount > 0 {
-		evidenceText = fmt.Sprintf("แนบหลักฐาน %d ไฟล์ (ดูได้ในระบบ)", evidenceCount)
+		evidenceText = fmt.Sprintf("แนบหลักฐาน %d ไฟล์ (เปิดดูได้ในระบบเท่านั้น)", evidenceCount)
 	}
 
-	htmlBody := fmt.Sprintf(`
-<div style="font-family: 'Segoe UI', Tahoma, sans-serif; background: #f3f6fb; padding: 32px 16px;">
-  <div style="max-width: 560px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);">
-    <div style="padding: 32px; background: linear-gradient(135deg, #1d4ed8, #0f766e); color: #ffffff;">
-      <h1 style="margin: 0; font-size: 24px;">คำขอลาใหม่</h1>
-      <p style="margin: 12px 0 0; opacity: 0.92;">%s</p>
-    </div>
-    <div style="padding: 32px;">
-      <p style="margin: 0 0 16px; color: #0f172a;">สวัสดีคุณ%s,</p>
-      <p style="margin: 0 0 20px; color: #475569; line-height: 1.7;">
-        %s (%s) ส่งคำขอ<strong>%s</strong>ในวิชา %s กรุณาเข้าไปพิจารณา
-      </p>
-      %s%s
-      <p style="margin: 0 0 20px; font-size: 13px; color: #64748b;">%s</p>
-      <p style="margin: 28px 0;">
-        <a href="%s" style="display: inline-block; background: #1d4ed8; color: #ffffff; text-decoration: none; padding: 14px 22px; border-radius: 12px; font-weight: 600;">
-          เปิดหน้าคำขอลา
-        </a>
-      </p>
-    </div>
-  </div>
-</div>`, html.EscapeString(cfg.AppName), html.EscapeString(toName), html.EscapeString(studentName), html.EscapeString(studentCode), html.EscapeString(typeLabel), html.EscapeString(courseName), leaveItemsTableHTML(items, false), reasonBlock, html.EscapeString(evidenceText), html.EscapeString(link))
+	content := emailContent{
+		Section:   leaveEmailSection,
+		Title:     "คำขอลาใหม่รอพิจารณา",
+		Subtitle:  fmt.Sprintf("%s · %s", courseName, typeLabel),
+		Reference: ref,
+		BodyHTML: emailGreeting(toName) +
+			emailParagraph(fmt.Sprintf(`%s (%s) ส่งคำขอ<strong>%s</strong>ในวิชา %s จำนวน %d วัน กรุณาเข้าไปพิจารณา`, html.EscapeString(studentName), html.EscapeString(studentCode), html.EscapeString(typeLabel), html.EscapeString(courseName), len(items))) +
+			leaveItemsTableHTML(items, false) +
+			emailQuoteBlock("เหตุผล", reason) +
+			emailMuted(html.EscapeString(evidenceText)) +
+			emailButton("เปิดหน้าคำขอลา", link),
+	}
+	plain := fmt.Sprintf("สวัสดีคุณ%s,\n\n%s (%s) ส่งคำขอ%sในวิชา %s จำนวน %d วัน กรุณาเข้าไปพิจารณา\n\nวันที่ขอลา:\n%s\nเหตุผล: %s\n%s\n\nเปิดหน้าคำขอลา: %s",
+		toName, studentName, studentCode, typeLabel, courseName, len(items), leaveItemsPlain(items, false), strings.TrimSpace(reason), evidenceText, link)
 
-	plainBody := fmt.Sprintf("%s\n\nสวัสดีคุณ%s,\n\n%s (%s) ส่งคำขอ%sในวิชา %s กรุณาเข้าไปพิจารณา\n\nวันที่ขอลา:\n%s\nเหตุผล: %s\n%s\n\n%s\n",
-		cfg.AppName, toName, studentName, studentCode, typeLabel, courseName, leaveItemsPlain(items, false), strings.TrimSpace(reason), evidenceText, link)
-
-	return sendEmail(emailMessage{To: strings.TrimSpace(toEmail), Subject: subject, HTML: htmlBody, Plain: plainBody})
+	return sendEmail(emailMessage{To: strings.TrimSpace(toEmail), Subject: subject, HTML: renderEmailHTML(content), Plain: renderEmailPlain(content, plain)})
 }
 
 // SendLeaveRequestReviewedEmail แจ้งผลให้นักศึกษา (อนุมัติ/บางส่วน/ไม่อนุมัติ/ถอนอนุมัติ)
-func SendLeaveRequestReviewedEmail(toEmail, toName, courseName, leaveType, status, comment string, items []LeaveEmailItem, link string) error {
+func SendLeaveRequestReviewedEmail(requestID uint, toEmail, toName, courseName, leaveType, status, comment string, items []LeaveEmailItem, link string) error {
 	if strings.TrimSpace(toEmail) == "" {
 		return fmt.Errorf("leave request result email requires a recipient")
 	}
 	cfg := loadEmailConfig()
 	typeLabel := LeaveTypeLabelTH(leaveType)
+	ref := LeaveRequestReference(requestID)
 
 	resultText := "ได้รับการอนุมัติ"
-	headerColor := "linear-gradient(135deg, #0f766e, #1d4ed8)"
+	gradient := emailGradientSuccess
 	switch status {
 	case "partially_approved":
 		resultText = "ได้รับการอนุมัติบางส่วน"
-		headerColor = "linear-gradient(135deg, #b45309, #0f766e)"
+		gradient = emailGradientWarning
 	case "rejected":
 		resultText = "ไม่ได้รับการอนุมัติ"
-		headerColor = "linear-gradient(135deg, #b91c1c, #ea580c)"
+		gradient = emailGradientDanger
 	case "revoked":
 		resultText = "ถูกถอนการอนุมัติ"
-		headerColor = "linear-gradient(135deg, #b91c1c, #7c2d12)"
+		gradient = emailGradientDanger
 	}
-	subject := fmt.Sprintf("[%s] คำขอ%s%s: %s", cfg.AppName, typeLabel, resultText, courseName)
+	subject := fmt.Sprintf("[%s] คำขอ%s %s %s: %s", cfg.AppName, typeLabel, ref, resultText, courseName)
 
-	commentBlock := ""
-	if strings.TrimSpace(comment) != "" {
-		commentBlock = fmt.Sprintf(`
-      <div style="margin: 0 0 20px; padding: 18px; border-radius: 16px; background: #f8fafc; border: 1px solid #e2e8f0; white-space: pre-wrap; line-height: 1.7; color: #334155;">
-        <div style="font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px;">ความเห็นของผู้สอน</div>%s</div>`, html.EscapeString(strings.TrimSpace(comment)))
-	}
 	note := ""
 	if status == "approved" || status == "partially_approved" {
-		note = `<p style="margin: 0 0 20px; font-size: 13px; color: #64748b;">วันที่อนุมัติแล้ว ระบบบันทึกสถานะเช็กชื่อเป็น "ลา" ให้อัตโนมัติ ถ้าคาบเรียนของวันนั้นยังไม่ถูกสร้าง ระบบจะบันทึกให้เมื่อผู้สอนสร้างคาบ</p>`
+		note = emailMuted(`วันที่อนุมัติแล้ว ระบบบันทึกสถานะเช็กชื่อเป็น "ลา" ให้อัตโนมัติ ถ้าคาบเรียนของวันนั้นยังไม่ถูกสร้าง ระบบจะบันทึกให้เมื่อผู้สอนสร้างคาบ`)
 	}
 
-	htmlBody := fmt.Sprintf(`
-<div style="font-family: 'Segoe UI', Tahoma, sans-serif; background: #f3f6fb; padding: 32px 16px;">
-  <div style="max-width: 560px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);">
-    <div style="padding: 32px; background: %s; color: #ffffff;">
-      <h1 style="margin: 0; font-size: 24px;">คำขอ%s%s</h1>
-      <p style="margin: 12px 0 0; opacity: 0.92;">%s</p>
-    </div>
-    <div style="padding: 32px;">
-      <p style="margin: 0 0 16px; color: #0f172a;">สวัสดีคุณ%s,</p>
-      <p style="margin: 0 0 20px; color: #475569; line-height: 1.7;">คำขอ%sของคุณในวิชา %s %sแล้ว รายละเอียดรายวัน:</p>
-      %s%s%s
-      <p style="margin: 28px 0;">
-        <a href="%s" style="display: inline-block; background: #1d4ed8; color: #ffffff; text-decoration: none; padding: 14px 22px; border-radius: 12px; font-weight: 600;">
-          ดูคำขอลาของฉัน
-        </a>
-      </p>
-    </div>
-  </div>
-</div>`, headerColor, html.EscapeString(typeLabel), html.EscapeString(resultText), html.EscapeString(cfg.AppName), html.EscapeString(toName), html.EscapeString(typeLabel), html.EscapeString(courseName), html.EscapeString(resultText), leaveItemsTableHTML(items, true), commentBlock, note, html.EscapeString(link))
+	content := emailContent{
+		Section:   leaveEmailSection,
+		Title:     "คำขอ" + typeLabel + resultText,
+		Subtitle:  courseName,
+		Gradient:  gradient,
+		Reference: ref,
+		BodyHTML: emailGreeting(toName) +
+			emailParagraph(fmt.Sprintf(`คำขอ%sของคุณในวิชา %s %sแล้ว รายละเอียดรายวัน:`, html.EscapeString(typeLabel), html.EscapeString(courseName), html.EscapeString(resultText))) +
+			leaveItemsTableHTML(items, true) +
+			emailQuoteBlock("ความเห็นของผู้สอน", comment) +
+			note +
+			emailButton("ดูคำขอลาของฉัน", link),
+	}
+	plain := fmt.Sprintf("สวัสดีคุณ%s,\n\nคำขอ%sของคุณในวิชา %s %sแล้ว\n\n%s\nความเห็นของผู้สอน: %s\n\nดูคำขอลาของฉัน: %s",
+		toName, typeLabel, courseName, resultText, leaveItemsPlain(items, true), strings.TrimSpace(comment), link)
 
-	plainBody := fmt.Sprintf("%s\n\nสวัสดีคุณ%s,\n\nคำขอ%sของคุณในวิชา %s %sแล้ว\n\n%s\nความเห็น: %s\n\n%s\n",
-		cfg.AppName, toName, typeLabel, courseName, resultText, leaveItemsPlain(items, true), strings.TrimSpace(comment), link)
-
-	return sendEmail(emailMessage{To: strings.TrimSpace(toEmail), Subject: subject, HTML: htmlBody, Plain: plainBody})
+	return sendEmail(emailMessage{To: strings.TrimSpace(toEmail), Subject: subject, HTML: renderEmailHTML(content), Plain: renderEmailPlain(content, plain)})
 }
 
 // SendLeaveRequestPendingReminderEmail เตือนผู้สอนว่ามีคำขอค้างนาน
@@ -214,22 +193,16 @@ func SendLeaveRequestPendingReminderEmail(toEmail, toName, courseName string, pe
 	}
 	cfg := loadEmailConfig()
 	subject := fmt.Sprintf("[%s] มีคำขอลาค้างพิจารณา %d รายการ: %s", cfg.AppName, pendingCount, courseName)
-	htmlBody := fmt.Sprintf(`
-<div style="font-family: 'Segoe UI', Tahoma, sans-serif; background: #f3f6fb; padding: 32px 16px;">
-  <div style="max-width: 560px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);">
-    <div style="padding: 32px; background: linear-gradient(135deg, #b45309, #1d4ed8); color: #ffffff;">
-      <h1 style="margin: 0; font-size: 24px;">คำขอลาค้างพิจารณา</h1>
-      <p style="margin: 12px 0 0; opacity: 0.92;">%s</p>
-    </div>
-    <div style="padding: 32px;">
-      <p style="margin: 0 0 16px; color: #0f172a;">สวัสดีคุณ%s,</p>
-      <p style="margin: 0 0 20px; color: #475569; line-height: 1.7;">วิชา %s มีคำขอลาที่ยังไม่ได้พิจารณา %d รายการ รายการที่เก่าที่สุดค้างมา %d วันแล้ว</p>
-      <p style="margin: 28px 0;">
-        <a href="%s" style="display: inline-block; background: #1d4ed8; color: #ffffff; text-decoration: none; padding: 14px 22px; border-radius: 12px; font-weight: 600;">เปิดหน้าคำขอลา</a>
-      </p>
-    </div>
-  </div>
-</div>`, html.EscapeString(cfg.AppName), html.EscapeString(toName), html.EscapeString(courseName), pendingCount, oldestDays, html.EscapeString(link))
-	plainBody := fmt.Sprintf("%s\n\nสวัสดีคุณ%s,\n\nวิชา %s มีคำขอลาที่ยังไม่ได้พิจารณา %d รายการ รายการที่เก่าที่สุดค้างมา %d วันแล้ว\n%s\n", cfg.AppName, toName, courseName, pendingCount, oldestDays, link)
-	return sendEmail(emailMessage{To: strings.TrimSpace(toEmail), Subject: subject, HTML: htmlBody, Plain: plainBody})
+	content := emailContent{
+		Section:  leaveEmailSection,
+		Title:    "คำขอลาค้างพิจารณา",
+		Subtitle: courseName,
+		Gradient: emailGradientWarning,
+		BodyHTML: emailGreeting(toName) +
+			emailParagraph(fmt.Sprintf(`วิชา %s มีคำขอลาที่ยังไม่ได้พิจารณา <strong>%d รายการ</strong> รายการที่เก่าที่สุดค้างมา %d วันแล้ว`, html.EscapeString(courseName), pendingCount, oldestDays)) +
+			emailMuted("ระบบส่งเตือนวันละครั้งจนกว่าคำขอจะถูกพิจารณา") +
+			emailButton("เปิดหน้าคำขอลา", link),
+	}
+	plain := fmt.Sprintf("สวัสดีคุณ%s,\n\nวิชา %s มีคำขอลาที่ยังไม่ได้พิจารณา %d รายการ รายการที่เก่าที่สุดค้างมา %d วันแล้ว\n\nเปิดหน้าคำขอลา: %s", toName, courseName, pendingCount, oldestDays, link)
+	return sendEmail(emailMessage{To: strings.TrimSpace(toEmail), Subject: subject, HTML: renderEmailHTML(content), Plain: renderEmailPlain(content, plain)})
 }
