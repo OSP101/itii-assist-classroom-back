@@ -139,3 +139,15 @@ func SendTestEmailHandler(c fiber.Ctx) error {
 		},
 	})
 }
+
+// POST /api/system-settings/email/diagnose
+func DiagnoseEmailHandler(c fiber.Ctx) error {
+	userID, _ := c.Locals("user_id").(uint)
+	allowed, _ := emailTestAllowed(userID)
+	if !allowed {
+		return c.Status(429).JSON(fiber.Map{"success": false, "message": "ตรวจสอบถี่เกินไป กรุณารอสักครู่แล้วลองใหม่"})
+	}
+	report := services.DiagnoseEmailTransport()
+	logPrivilegedAdminAction(c, userID, "email_diagnose", "info", "system_settings", "email", fiber.Map{"overall": report.Overall, "target": report.Target, "mode": report.Mode})
+	return c.JSON(fiber.Map{"success": true, "data": report})
+}

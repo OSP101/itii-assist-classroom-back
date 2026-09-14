@@ -9,6 +9,7 @@ import (
 	"io"
 	"itii-assist/models"
 	"log"
+	"net"
 	"net/http"
 	"net/smtp"
 	"net/url"
@@ -36,6 +37,34 @@ type emailConfig struct {
 	SMTPSecure bool
 	SMTPUser   string
 	SMTPPass   string
+	// SMTPTLSSkipVerify ข้ามการตรวจใบรับรอง (relay ภายในที่ใช้ self-signed)
+	SMTPTLSSkipVerify bool
+	// SMTPTLSMinVersion เช่น tls.VersionTLS10 สำหรับ relay เก่าที่ยังไม่รองรับ TLS 1.2
+	SMTPTLSMinVersion uint16
+	// SMTPStartTLSOpportunistic = ถ้าเซิร์ฟเวอร์ไม่มี STARTTLS ให้ส่งแบบไม่เข้ารหัสแทนที่จะล้มเหลว
+	SMTPStartTLSOpportunistic bool
+}
+
+func smtpTLSConfig(cfg emailConfig) *tls.Config {
+	tlsConfig := &tls.Config{ServerName: cfg.SMTPHost, InsecureSkipVerify: cfg.SMTPTLSSkipVerify} //nolint:gosec // opt-in ผ่าน env สำหรับ relay ภายใน
+	if cfg.SMTPTLSMinVersion != 0 {
+		tlsConfig.MinVersion = cfg.SMTPTLSMinVersion
+	}
+	return tlsConfig
+}
+
+func parseTLSMinVersion(raw string) uint16 {
+	switch strings.TrimSpace(raw) {
+	case "1.0", "10", "tls1.0":
+		return tls.VersionTLS10
+	case "1.1", "11", "tls1.1":
+		return tls.VersionTLS11
+	case "1.2", "12", "tls1.2":
+		return tls.VersionTLS12
+	case "1.3", "13", "tls1.3":
+		return tls.VersionTLS13
+	}
+	return 0
 }
 
 func loadEmailConfig() emailConfig {
@@ -88,6 +117,10 @@ func loadEmailConfig() emailConfig {
 		SMTPSecure: strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_SECURE")), "true"),
 		SMTPUser:   strings.TrimSpace(os.Getenv("SMTP_USER")),
 		SMTPPass:   os.Getenv("SMTP_PASS"),
+
+		SMTPTLSSkipVerify:         strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_TLS_SKIP_VERIFY")), "true"),
+		SMTPTLSMinVersion:         parseTLSMinVersion(os.Getenv("SMTP_TLS_MIN_VERSION")),
+		SMTPStartTLSOpportunistic: strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_STARTTLS_OPPORTUNISTIC")), "true"),
 	}
 }
 
@@ -554,7 +587,7 @@ func sendWithSMTP(cfg emailConfig, message emailMessage) error {
 
 	fromAddress := extractEmailAddress(cfg.From)
 	recipients := []string{message.To}
-	addr := fmt.Sprintf("%s:%d", cfg.SMTPHost, cfg.SMTPPort)
+	addr := net.JoinHostPort(cfg.SMTPHost, strconv.Itoa(cfg.SMTPPort))
 
 	// Relays that trust the sender's IP (e.g. an allowlisted VM) need no
 	// credentials at all, so auth is only attempted when both are set.
@@ -568,39 +601,64 @@ func sendWithSMTP(cfg emailConfig, message emailMessage) error {
 	// Port 465 is implicit TLS (encrypt before talking SMTP); everything
 	// else (587, 25, ...) is plaintext-then-STARTTLS.
 	if cfg.SMTPSecure && cfg.SMTPPort == 465 {
-		tlsConfig := &tls.Config{ServerName: cfg.SMTPHost}
-		conn, err := tls.Dial("tcp", addr, tlsConfig)
+		dialer := &net.Dialer{Timeout: 15 * time.Second}
+		conn, err := tls.DialWithDialer(dialer, "tcp", addr, smtpTLSConfig(cfg))
 		if err != nil {
-			return err
+			return fmt.Errorf("implicit TLS to %s failed: %w (%s)", addr, err, smtpTLSHint(err))
 		}
 		defer conn.Close()
 
 		client, err := smtp.NewClient(conn, cfg.SMTPHost)
 		if err != nil {
-			return err
+			return fmt.Errorf("smtp greeting on %s failed: %w", addr, err)
 		}
 		defer client.Close()
 
 		return deliverSMTP(client, auth, fromAddress, recipients, mime)
 	}
 
-	client, err := smtp.Dial(addr)
+	rawConn, err := net.DialTimeout("tcp", addr, 15*time.Second)
 	if err != nil {
-		return err
+		return fmt.Errorf("tcp connect to %s failed: %w", addr, err)
+	}
+	client, err := smtp.NewClient(rawConn, cfg.SMTPHost)
+	if err != nil {
+		rawConn.Close()
+		return fmt.Errorf("smtp greeting on %s failed: %w", addr, err)
 	}
 	defer client.Close()
 
 	if cfg.SMTPSecure {
 		ok, _ := client.Extension("STARTTLS")
-		if !ok {
-			return fmt.Errorf("smtp server does not support STARTTLS")
-		}
-		if err := client.StartTLS(&tls.Config{ServerName: cfg.SMTPHost}); err != nil {
-			return err
+		switch {
+		case ok:
+			if err := client.StartTLS(smtpTLSConfig(cfg)); err != nil {
+				return fmt.Errorf("STARTTLS on %s failed: %w (%s)", addr, err, smtpTLSHint(err))
+			}
+		case cfg.SMTPStartTLSOpportunistic:
+			log.Printf("event=smtp_starttls_unavailable addr=%s sending in plaintext (SMTP_STARTTLS_OPPORTUNISTIC=true)", addr)
+		default:
+			return fmt.Errorf("smtp server %s does not advertise STARTTLS; set SMTP_SECURE=false for a plaintext relay or SMTP_STARTTLS_OPPORTUNISTIC=true", addr)
 		}
 	}
 
 	return deliverSMTP(client, auth, fromAddress, recipients, mime)
+}
+
+// smtpTLSHint แปล error TLS ที่พบบ่อยเป็นคำแนะนำสั้น ๆ
+func smtpTLSHint(err error) string {
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "handshake failure"):
+		return "server rejected the TLS handshake: usually the port/mode mismatch (465 = implicit TLS, 587/25 = STARTTLS), a relay that only speaks TLS 1.0/1.1 (try SMTP_TLS_MIN_VERSION=1.0), or a relay that needs a client certificate"
+	case strings.Contains(msg, "certificate") || strings.Contains(msg, "x509"):
+		return "certificate could not be verified: the relay may use a self-signed cert or SMTP_HOST does not match the cert name (try SMTP_TLS_SKIP_VERIFY=true for an internal relay)"
+	case strings.Contains(msg, "first record does not look like a tls handshake"):
+		return "the server answered in plaintext: it does not speak implicit TLS on this port, use port 587/25 with STARTTLS"
+	case strings.Contains(msg, "protocol version"):
+		return "TLS version mismatch (try SMTP_TLS_MIN_VERSION=1.0)"
+	}
+	return "check SMTP_HOST/SMTP_PORT/SMTP_SECURE"
 }
 
 func deliverSMTP(client *smtp.Client, auth smtp.Auth, from string, recipients []string, mime []byte) error {

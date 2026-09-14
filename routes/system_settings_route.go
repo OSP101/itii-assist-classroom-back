@@ -47,4 +47,5 @@ func SetupSystemSettingsRoutes(app *fiber.App) {
 	// ทดสอบการส่งอีเมล
 	settings.Get("/email", handlers.GetEmailConfigHandler)
 	settings.Post("/email/test", handlers.SendTestEmailHandler)
+	settings.Post("/email/diagnose", handlers.DiagnoseEmailHandler)
 }
