@@ -90,10 +90,6 @@ func renderEmailHTML(c emailContent) string {
 	if url := emailLogoURL(); url != "" {
 		logo = fmt.Sprintf(`<img src="%s" alt="" width="36" height="36" style="width: 36px; height: 36px; border-radius: 10px; vertical-align: middle; margin-right: 10px;" />`, html.EscapeString(url))
 	}
-	section := c.Section
-	if strings.TrimSpace(section) == "" {
-		section = "แจ้งเตือนจากระบบ"
-	}
 	subtitle := ""
 	if strings.TrimSpace(c.Subtitle) != "" {
 		subtitle = fmt.Sprintf(`<p style="margin: 10px 0 0; opacity: 0.92; font-size: 14px;">%s</p>`, html.EscapeString(c.Subtitle))
@@ -114,7 +110,6 @@ func renderEmailHTML(c emailContent) string {
   <div style="max-width: %dpx; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);">
     <div style="padding: 14px 32px; background: %s; color: #e2e8f0; font-size: 13px;">
       %s<span style="font-weight: 700; color: #ffffff; letter-spacing: 0.3px;">%s</span>
-      <span style="opacity: 0.65;"> · %s</span>
     </div>
     <div style="padding: 28px 32px; background: %s; color: #ffffff;">
       <h1 style="margin: 0; font-size: 24px; line-height: 1.3;">%s</h1>
@@ -135,7 +130,7 @@ func renderEmailHTML(c emailContent) string {
 		emailThemeBg,
 		maxWidth,
 		emailThemeDark,
-		logo, html.EscapeString(cfg.AppName), html.EscapeString(section),
+		logo, html.EscapeString(cfg.AppName),
 		gradient,
 		html.EscapeString(c.Title),
 		subtitle,
@@ -154,9 +149,6 @@ func renderEmailPlain(c emailContent, body string) string {
 	cfg := loadEmailConfig()
 	var b strings.Builder
 	b.WriteString(cfg.AppName)
-	if strings.TrimSpace(c.Section) != "" {
-		b.WriteString(" · " + c.Section)
-	}
 	b.WriteString("\n" + c.Title + "\n")
 	if strings.TrimSpace(c.Subtitle) != "" {
 		b.WriteString(c.Subtitle + "\n")
