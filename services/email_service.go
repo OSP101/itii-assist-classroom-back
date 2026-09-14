@@ -9,8 +9,10 @@ import (
 	"io"
 	"itii-assist/models"
 	"log"
+	"mime"
 	"net"
 	"net/http"
+	"net/mail"
 	"net/smtp"
 	"net/url"
 	"os"
@@ -102,7 +104,16 @@ func loadEmailConfig() emailConfig {
 		}
 	}
 
-	from := strings.TrimSpace(os.Getenv("EMAIL_FROM"))
+	// ลำดับความสำคัญ: MAILER_FROM (+ MAILER_FROM_NAME) > EMAIL_FROM > SMTP_FROM
+	from := strings.TrimSpace(os.Getenv("MAILER_FROM"))
+	if from != "" {
+		if name := strings.TrimSpace(os.Getenv("MAILER_FROM_NAME")); name != "" && !strings.Contains(from, "<") {
+			from = fmt.Sprintf("%s <%s>", name, from)
+		}
+	}
+	if from == "" {
+		from = strings.TrimSpace(os.Getenv("EMAIL_FROM"))
+	}
 	if from == "" {
 		from = strings.TrimSpace(os.Getenv("SMTP_FROM"))
 	}
@@ -636,7 +647,7 @@ func sendWithSMTPOnce(cfg emailConfig, message emailMessage) error {
 		auth = smtp.PlainAuth("", cfg.SMTPUser, cfg.SMTPPass, cfg.SMTPHost)
 	}
 
-	mime := buildMIMEMessage(fromAddress, recipients, message)
+	mime := buildMIMEMessage(cfg.From, recipients, message)
 
 	// Port 465 is implicit TLS (encrypt before talking SMTP); everything
 	// else (587, 25, ...) is plaintext-then-STARTTLS.
@@ -736,15 +747,48 @@ func deliverSMTP(client *smtp.Client, auth smtp.Auth, from string, recipients []
 	return client.Quit()
 }
 
+// formatFromHeader เข้ารหัสชื่อผู้ส่งที่ไม่ใช่ ASCII (เช่นภาษาไทย) ตาม RFC 2047
+// ถ้าไม่เข้ารหัส เมลเซิร์ฟเวอร์บางตัวจะทิ้งชื่อหรือแสดงเป็นตัวอักษรเพี้ยน
+func formatFromHeader(from string) string {
+	address := extractEmailAddress(from)
+	name := ""
+	if idx := strings.LastIndex(from, "<"); idx > 0 {
+		name = strings.Trim(strings.TrimSpace(from[:idx]), "\"")
+	}
+	if name == "" {
+		return address
+	}
+	return (&mail.Address{Name: name, Address: address}).String()
+}
+
 func buildMIMEMessage(from string, recipients []string, message emailMessage) []byte {
 	var builder strings.Builder
-	builder.WriteString(fmt.Sprintf("From: %s\r\n", from))
+	boundary := fmt.Sprintf("=_itii_%d", time.Now().UnixNano())
+	builder.WriteString(fmt.Sprintf("From: %s\r\n", formatFromHeader(from)))
 	builder.WriteString(fmt.Sprintf("To: %s\r\n", strings.Join(recipients, ", ")))
-	builder.WriteString(fmt.Sprintf("Subject: %s\r\n", message.Subject))
+	builder.WriteString(fmt.Sprintf("Subject: %s\r\n", mime.QEncoding.Encode("utf-8", message.Subject)))
+	builder.WriteString(fmt.Sprintf("Date: %s\r\n", time.Now().Format(time.RFC1123Z)))
+	builder.WriteString(fmt.Sprintf("Message-ID: <%d.%s>\r\n", time.Now().UnixNano(), strings.TrimPrefix(extractEmailAddress(from), "@")))
 	builder.WriteString("MIME-Version: 1.0\r\n")
-	builder.WriteString("Content-Type: text/html; charset=\"UTF-8\"\r\n")
+	if strings.TrimSpace(message.Plain) == "" {
+		builder.WriteString("Content-Type: text/html; charset=\"UTF-8\"\r\n")
+		builder.WriteString("Content-Transfer-Encoding: 8bit\r\n")
+		builder.WriteString("\r\n")
+		builder.WriteString(message.HTML)
+		return []byte(builder.String())
+	}
+	// multipart/alternative: ตัวกรองสแปมให้คะแนนดีกว่าเมลที่มีแต่ HTML
+	builder.WriteString(fmt.Sprintf("Content-Type: multipart/alternative; boundary=\"%s\"\r\n", boundary))
 	builder.WriteString("\r\n")
+	builder.WriteString(fmt.Sprintf("--%s\r\n", boundary))
+	builder.WriteString("Content-Type: text/plain; charset=\"UTF-8\"\r\n")
+	builder.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
+	builder.WriteString(message.Plain)
+	builder.WriteString(fmt.Sprintf("\r\n--%s\r\n", boundary))
+	builder.WriteString("Content-Type: text/html; charset=\"UTF-8\"\r\n")
+	builder.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
 	builder.WriteString(message.HTML)
+	builder.WriteString(fmt.Sprintf("\r\n--%s--\r\n", boundary))
 	return []byte(builder.String())
 }
 
