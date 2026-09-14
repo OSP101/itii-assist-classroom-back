@@ -223,6 +223,15 @@ func getCourseTAMap(courseIDs []string) map[string][]UserBasic {
 // Course CRUD
 // ============================================================
 
+// GetCourseNameByID returns just the course name, for places that only need
+// it for display (e.g. composing a notification) and would otherwise have to
+// pull the full course detail with all its joins.
+func GetCourseNameByID(courseID string) (string, error) {
+	var name string
+	err := config.DB.Model(&models.Course{}).Where("id = ?", courseID).Limit(1).Pluck("name", &name).Error
+	return name, err
+}
+
 func GetCourses(params CourseListParams) (CourseListResult, error) {
 	db := config.DB
 

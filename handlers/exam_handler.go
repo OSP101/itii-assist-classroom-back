@@ -6,6 +6,7 @@ import (
 	"itii-assist/models"
 	"itii-assist/repositories"
 	"itii-assist/services"
+	"log"
 	"strconv"
 	"strings"
 
@@ -74,7 +75,53 @@ func UpdateExamSettingHandler(c fiber.Ctx) error {
 		examSettingChangeFields(setting),
 	)
 	logCourseActivity(c, courseID, actorID, "update_exam_setting", "score", "exam_setting", settingID, "", settingDetail)
+
+	// Only the moment scores go from hidden to visible is worth an email —
+	// re-saving other fields on an already-visible setting must not re-notify
+	// everyone, and hiding scores again isn't an announcement either.
+	if previousSetting != nil && !previousSetting.IsVisible && setting.IsVisible {
+		notifyExamScorePublished(courseID, setting)
+	}
+
 	return c.JSON(fiber.Map{"success": true, "data": setting})
+}
+
+// notifyExamScorePublished emails every enrolled student that an exam score
+// just became visible. Runs in the background so the instructor's save
+// request doesn't wait on a course-wide round of SMTP deliveries.
+func notifyExamScorePublished(courseID string, setting *models.ExamSetting) {
+	if setting == nil {
+		return
+	}
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Printf("⚠️  exam score notification panicked for setting %d: %v", setting.ID, recovered)
+			}
+		}()
+
+		courseName, err := repositories.GetCourseNameByID(courseID)
+		if err != nil {
+			log.Printf("⚠️  failed to load course name for exam score notification: %v", err)
+			return
+		}
+
+		students, err := repositories.GetEnrolledStudents(courseID)
+		if err != nil {
+			log.Printf("⚠️  failed to load enrolled students for exam score notification: %v", err)
+			return
+		}
+
+		link := services.StudentExamScoreURL(courseID)
+		for _, student := range students {
+			if strings.TrimSpace(student.Email) == "" {
+				continue
+			}
+			if err := services.SendExamScorePublishedEmail(student.Email, student.FullName, courseName, setting.ExamType, setting.Component, link); err != nil {
+				services.LogEmailDeliveryError("exam_score_published", err)
+			}
+		}
+	}()
 }
 
 // GET /api/courses/:courseId/exam-scores
