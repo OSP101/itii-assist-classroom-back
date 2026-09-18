@@ -1285,6 +1285,12 @@ func UpdateAttendanceRecordReturningPrevious(sessionID uint, studentID uint, sta
 			}).Error; err != nil {
 			return err
 		}
+		// ถ้าก่อนหน้านี้เป็น leave จากคำขอลา ให้ถือว่าคำขอนั้นถูกแทนที่ด้วยการแก้ไขนี้
+		if record.Status == "leave" && record.LeaveRequestID != nil {
+			if err := SupersedeLeaveRequestItemForRecord(tx, record.ID); err != nil {
+				return err
+			}
+		}
 		actor := updatedBy
 		return RecordAttendanceStatusHistory(tx, AttendanceStatusChange{
 			RecordID:       record.ID,
@@ -1333,6 +1339,12 @@ func BulkUpdateAttendanceRecords(sessionID uint, updates []AttendanceRecordUpdat
 					"status_source": AttendanceSourceManual,
 				}).Error; err != nil {
 				return err
+			}
+			// ถ้าก่อนหน้านี้เป็น leave จากคำขอลา ให้ถือว่าคำขอนั้นถูกแทนที่ด้วยการแก้ไขนี้
+			if record.Status == "leave" && record.LeaveRequestID != nil {
+				if err := SupersedeLeaveRequestItemForRecord(tx, record.ID); err != nil {
+					return err
+				}
 			}
 			actor := updatedBy
 			if err := RecordAttendanceStatusHistory(tx, AttendanceStatusChange{
@@ -1518,7 +1530,7 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 		// ถ้าก่อนหน้านี้เป็น leave จากคำขอลา ให้ present ทับ (มาเรียนดีกว่า)
 		// และบันทึกว่า item ของคำขอนั้นถูกแทนที่แล้ว
 		if record.Status == "leave" && record.LeaveRequestID != nil {
-			if err := supersedeLeaveRequestItemForRecord(tx, record.ID); err != nil {
+			if err := SupersedeLeaveRequestItemForRecord(tx, record.ID); err != nil {
 				return err
 			}
 		}

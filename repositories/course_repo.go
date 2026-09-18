@@ -1452,7 +1452,7 @@ func ArchiveAndRemoveStudentFromSection(sectionID uint, studentID uint, removedB
 			return err
 		}
 		if remaining == 0 {
-			if err := CancelPendingLeaveRequestsForStudent(tx, section.CourseID, studentID); err != nil {
+			if err := CancelPendingLeaveRequestsForStudent(tx, section.CourseID, studentID, removal.ID); err != nil {
 				return err
 			}
 		}
@@ -1563,6 +1563,11 @@ func RestoreStudentToSection(sectionID uint, studentID uint) (bool, error) {
 		if err := tx.Model(&models.CourseSectionStudentRemoval{}).
 			Where("id = ?", removal.ID).
 			Update("restored_at", now).Error; err != nil {
+			return err
+		}
+
+		// คืนคำขอลาที่ถูกยกเลิกอัตโนมัติตอนถอดออกกลับเป็น pending ด้วย
+		if err := RestorePendingLeaveRequestsByRemoval(tx, removal.ID); err != nil {
 			return err
 		}
 

@@ -1166,6 +1166,12 @@ func (h *AttendanceHandler) UpdateAttendanceRecordByRecordID(c fiber.Ctx) error 
 		if err := tx.Save(&record).Error; err != nil {
 			return err
 		}
+		// ถ้าก่อนหน้านี้เป็น leave จากคำขอลา ให้ถือว่าคำขอนั้นถูกแทนที่ด้วยการแก้ไขนี้
+		if previousStatus == "leave" && record.LeaveRequestID != nil {
+			if err := repositories.SupersedeLeaveRequestItemForRecord(tx, record.ID); err != nil {
+				return err
+			}
+		}
 		return repositories.RecordAttendanceStatusHistory(tx, repositories.AttendanceStatusChange{
 			RecordID:       record.ID,
 			SessionID:      record.AttendanceSessionID,

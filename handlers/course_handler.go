@@ -532,18 +532,19 @@ func CreateCourseHandler(c fiber.Ctx) error {
 // they change often and say nothing about how the course is run.
 func courseChangeFields(course models.Course) map[string]interface{} {
 	return map[string]interface{}{
-		"code":                  course.Code,
-		"name":                  course.Name,
-		"year":                  course.Year,
-		"semester":              course.Semester,
-		"description":           course.Description,
-		"is_active":             course.IsActive,
-		"attention_threshold":   course.AttentionThreshold,
-		"leave_request_enabled": course.LeaveRequestEnabled == nil || *course.LeaveRequestEnabled,
-		"leave_evidence_policy": course.LeaveEvidencePolicy,
-		"leave_backdate_days":   course.LeaveBackdateDays,
-		"leave_advance_days":    course.LeaveAdvanceDays,
-		"leave_max_pending":     course.LeaveMaxPending,
+		"code":                   course.Code,
+		"name":                   course.Name,
+		"year":                   course.Year,
+		"semester":               course.Semester,
+		"description":            course.Description,
+		"is_active":              course.IsActive,
+		"attention_threshold":    course.AttentionThreshold,
+		"leave_request_enabled":  course.LeaveRequestEnabled == nil || *course.LeaveRequestEnabled,
+		"leave_evidence_policy":  course.LeaveEvidencePolicy,
+		"leave_backdate_days":    course.LeaveBackdateDays,
+		"leave_advance_days":     course.LeaveAdvanceDays,
+		"leave_max_pending":      course.LeaveMaxPending,
+		"leave_auto_expire_days": course.LeaveAutoExpireDays,
 	}
 }
 
@@ -582,6 +583,7 @@ func UpdateCourseHandler(c fiber.Ctx) error {
 		LeaveBackdateDays   *int    `json:"leave_backdate_days"`
 		LeaveAdvanceDays    *int    `json:"leave_advance_days"`
 		LeaveMaxPending     *int    `json:"leave_max_pending"`
+		LeaveAutoExpireDays *int    `json:"leave_auto_expire_days"`
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ถูกต้อง"})
@@ -668,6 +670,12 @@ func UpdateCourseHandler(c fiber.Ctx) error {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "จำนวนคำขอค้างสูงสุดต้องอยู่ระหว่าง 1 ถึง 50"})
 		}
 		updated.LeaveMaxPending = *input.LeaveMaxPending
+	}
+	if input.LeaveAutoExpireDays != nil {
+		if *input.LeaveAutoExpireDays < 0 || *input.LeaveAutoExpireDays > 180 {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "จำนวนวันหมดอายุอัตโนมัติต้องอยู่ระหว่าง 0 (ปิด) ถึง 180"})
+		}
+		updated.LeaveAutoExpireDays = *input.LeaveAutoExpireDays
 	}
 
 	// Update instructors

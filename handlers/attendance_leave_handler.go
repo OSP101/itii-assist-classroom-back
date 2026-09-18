@@ -29,8 +29,8 @@ import (
 // =============================================================================
 
 const (
-	leaveEvidenceMaxFiles    = 5
-	leaveEvidenceMaxFileSize = 5 * 1024 * 1024
+	leaveEvidenceMaxFiles    = 3
+	leaveEvidenceMaxFileSize = 2 * 1024 * 1024
 	// เก็บใต้ uploads/private ซึ่งถูกกันไม่ให้ static เสิร์ฟ (ดู cmd/api/main.go)
 	leaveEvidenceDir = "uploads/private/leave-evidence"
 )
@@ -87,9 +87,11 @@ func leaveRequestErrorResponse(c fiber.Ctx, err error) error {
 	case errors.Is(err, repositories.ErrLeaveRequestNoItems):
 		return respond(400, "no_items", "กรุณาเลือกวันหรือคาบเรียนที่ต้องการลาอย่างน้อย 1 รายการ")
 	case errors.Is(err, repositories.ErrLeaveRequestTooManyPending):
-		return respond(429, "too_many_pending", "คุณมีคำขอลาที่รอพิจารณาอยู่ครบจำนวนแล้ว กรุณารอผลก่อนส่งใหม่")
+		// ใช้ 409 ไม่ใช่ 429: นี่คือกฎทางธุรกิจ ไม่ใช่ rate limit จริง ถ้าใช้ 429
+		// ฝั่ง frontend จะเข้าใจผิดว่าต้อง retry อัตโนมัติ (ส่งไฟล์หลักฐานซ้ำโดยไม่จำเป็น)
+		return respond(409, "too_many_pending", "คุณมีคำขอลาที่รอพิจารณาอยู่ครบจำนวนแล้ว กรุณารอผลก่อนส่งใหม่")
 	case errors.Is(err, repositories.ErrLeaveRequestEvidence):
-		return respond(400, "evidence_required", "การลาประเภทนี้ต้องแนบหลักฐาน")
+		return respond(400, "evidence_required", "กรุณาแนบหลักฐาน (รูปภาพหรือ PDF) อย่างน้อย 1 ไฟล์")
 	case errors.Is(err, repositories.ErrLeaveRequestDuplicate):
 		return respond(409, "duplicate", "วันหรือคาบที่เลือกมีคำขอลาอยู่แล้ว")
 	case errors.Is(err, repositories.ErrLeaveRequestOutOfWindow):
@@ -100,10 +102,16 @@ func leaveRequestErrorResponse(c fiber.Ctx, err error) error {
 		return respond(409, "already_present", "คาบนี้คุณเช็กชื่อเข้าเรียนแล้ว ไม่ต้องขอลา")
 	case errors.Is(err, repositories.ErrLeaveRequestReasonRequired):
 		return respond(400, "reason_required", "กรุณาระบุเหตุผลการลา")
+	case errors.Is(err, repositories.ErrLeaveRequestReasonTooShort):
+		return respond(400, "reason_too_short", fmt.Sprintf("เหตุผลสั้นเกินไป (อย่างน้อย %d ตัวอักษร)", repositories.LeaveReasonMinLength))
+	case errors.Is(err, repositories.ErrLeaveRequestReasonTooLong):
+		return respond(400, "reason_too_long", fmt.Sprintf("เหตุผลยาวเกินไป (ไม่เกิน %d ตัวอักษร)", repositories.LeaveReasonMaxLength))
 	case errors.Is(err, repositories.ErrLeaveRequestNotReviewable):
 		return respond(409, "not_reviewable", "คำขอนี้ถูกพิจารณาหรือยกเลิกไปแล้ว")
 	case errors.Is(err, repositories.ErrLeaveRequestNotRevocable):
 		return respond(409, "not_revocable", "ถอนการอนุมัติได้เฉพาะคำขอที่อนุมัติแล้วเท่านั้น")
+	case errors.Is(err, repositories.ErrLeaveRequestCourseInactive):
+		return respond(403, "course_inactive", "รายวิชานี้ถูกปิดแล้ว ไม่สามารถพิจารณาคำขอลาได้")
 	}
 	log.Printf("event=leave_request_error err=%v", err)
 	return respond(500, "internal", "ดำเนินการไม่สำเร็จ กรุณาลองใหม่")
@@ -326,9 +334,6 @@ func CreateLeaveRequestHandler(c fiber.Ctx) error {
 
 	leaveType := strings.TrimSpace(c.FormValue("leave_type"))
 	reason := strings.TrimSpace(c.FormValue("reason"))
-	if len(reason) > 2000 {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "เหตุผลยาวเกิน 2000 ตัวอักษร"})
-	}
 	itemsRaw := strings.TrimSpace(c.FormValue("items"))
 	type itemInput struct {
 		SessionID *uint  `json:"session_id"`
@@ -362,8 +367,8 @@ func CreateLeaveRequestHandler(c fiber.Ctx) error {
 	if !repositories.IsValidLeaveType(leaveType) {
 		return leaveRequestErrorResponse(c, repositories.ErrLeaveRequestInvalidType)
 	}
-	if reason == "" {
-		return leaveRequestErrorResponse(c, repositories.ErrLeaveRequestReasonRequired)
+	if err := repositories.ValidateLeaveReason(reason); err != nil {
+		return leaveRequestErrorResponse(c, err)
 	}
 
 	var files []*multipart.FileHeader
@@ -375,7 +380,8 @@ func CreateLeaveRequestHandler(c fiber.Ctx) error {
 			}
 		}
 	}
-	if repositories.LeaveEvidenceRequired(settings.EvidencePolicy, leaveType) && len(files) == 0 {
+	// หลักฐานบังคับแนบทุกกรณี ไม่ว่าประเภทลาไหนหรือวิชาตั้งนโยบายอย่างไร
+	if len(files) == 0 {
 		return leaveRequestErrorResponse(c, repositories.ErrLeaveRequestEvidence)
 	}
 	evidence, err := saveLeaveEvidenceFiles(courseID, files)
@@ -404,6 +410,124 @@ func CreateLeaveRequestHandler(c fiber.Ctx) error {
 	writeStudentLeaveActivity(c, courseID, student, "leave_request_submitted", view)
 	go notifyLeaveRequestSubmitted(view)
 	return c.Status(201).JSON(fiber.Map{"success": true, "message": "ส่งคำขอลาแล้ว รอผู้สอนพิจารณา", "data": view})
+}
+
+// PUT /api/students/me/courses/:courseId/leave-requests/:id  (multipart/form-data)
+// fields: leave_type, reason, items (JSON เหมือนตอนสร้าง)
+// evidence[] ไฟล์ใหม่ = แทนที่หลักฐานเดิมทั้งหมด, replace_evidence=1 (ไม่แนบไฟล์เลย) = ลบหลักฐานเดิมทิ้ง
+// ไม่ส่งทั้งคู่ = คงหลักฐานเดิมไว้ เพื่อไม่ต้องอัปโหลดซ้ำถ้าแค่แก้วันลา
+// แก้ไขได้เฉพาะคำขอที่ยัง "รอพิจารณา" เท่านั้น
+func UpdateLeaveRequestHandler(c fiber.Ctx) error {
+	courseID := c.Params("courseId")
+	student, errResp := requireLeaveStudent(c, courseID)
+	if errResp != nil {
+		return errResp
+	}
+	id, err := strconv.ParseUint(c.Params("id"), 10, 64)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "รหัสคำขอไม่ถูกต้อง"})
+	}
+	if !courseActiveForLeave(courseID) {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "รายวิชานี้ปิดแล้ว ไม่สามารถแก้ไขคำขอลาได้"})
+	}
+	existing, err := repositories.GetLeaveRequestByID(uint(id))
+	if err != nil || existing.StudentID != student.ID || existing.CourseID != courseID {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบคำขอลา"})
+	}
+	if existing.Status != repositories.LeaveStatusPending {
+		return c.Status(409).JSON(fiber.Map{"success": false, "message": "คำขอนี้ถูกพิจารณาไปแล้ว แก้ไขไม่ได้", "code": "not_pending"})
+	}
+
+	leaveType := strings.TrimSpace(c.FormValue("leave_type"))
+	reason := strings.TrimSpace(c.FormValue("reason"))
+	itemsRaw := strings.TrimSpace(c.FormValue("items"))
+	type itemInput struct {
+		SessionID *uint  `json:"session_id"`
+		Date      string `json:"date"`
+	}
+	var itemInputs []itemInput
+	if itemsRaw != "" {
+		if err := json.Unmarshal([]byte(itemsRaw), &itemInputs); err != nil {
+			return c.Status(400).JSON(fiber.Map{"success": false, "message": "รูปแบบรายการวันลาไม่ถูกต้อง"})
+		}
+	}
+	if len(itemInputs) == 0 {
+		return leaveRequestErrorResponse(c, repositories.ErrLeaveRequestNoItems)
+	}
+	if len(itemInputs) > 30 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ขอลาได้สูงสุด 30 รายการต่อคำขอ"})
+	}
+	items := make([]repositories.LeaveRequestItemInput, 0, len(itemInputs))
+	for _, it := range itemInputs {
+		items = append(items, repositories.LeaveRequestItemInput{SessionID: it.SessionID, Date: it.Date})
+	}
+
+	settings, _, err := repositories.GetLeaveCourseSettings(courseID)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "ไม่พบรายวิชา"})
+	}
+	if !settings.Enabled {
+		return leaveRequestErrorResponse(c, repositories.ErrLeaveRequestDisabled)
+	}
+	if !repositories.IsValidLeaveType(leaveType) {
+		return leaveRequestErrorResponse(c, repositories.ErrLeaveRequestInvalidType)
+	}
+	if err := repositories.ValidateLeaveReason(reason); err != nil {
+		return leaveRequestErrorResponse(c, err)
+	}
+
+	oldEvidence := existing.EvidenceList
+	var newEvidence []string
+	replacingEvidence := false
+	if strings.HasPrefix(strings.ToLower(c.Get("Content-Type")), "multipart/form-data") {
+		if form, err := c.MultipartForm(); err == nil && form != nil {
+			files := form.File["evidence"]
+			if len(files) == 0 {
+				files = form.File["evidence[]"]
+			}
+			_, wantsClear := form.Value["replace_evidence"]
+			if wantsClear || len(files) > 0 {
+				replacingEvidence = true
+				ev, err := saveLeaveEvidenceFiles(courseID, files)
+				if err != nil {
+					return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
+				}
+				newEvidence = ev
+				if newEvidence == nil {
+					newEvidence = []string{}
+				}
+			}
+		}
+	}
+
+	input := repositories.UpdateLeaveRequestInput{
+		CourseID:  courseID,
+		StudentID: student.ID,
+		LeaveType: leaveType,
+		Reason:    reason,
+		Items:     items,
+	}
+	if replacingEvidence {
+		input.Evidence = newEvidence
+	}
+
+	updated, err := repositories.UpdateLeaveRequest(uint(id), input)
+	if err != nil {
+		if replacingEvidence {
+			deleteLeaveEvidenceFiles(newEvidence)
+		}
+		return leaveRequestErrorResponse(c, err)
+	}
+	if replacingEvidence {
+		deleteLeaveEvidenceFiles(oldEvidence)
+	}
+
+	view, err := repositories.GetLeaveRequestByID(updated.ID)
+	if err != nil {
+		return c.JSON(fiber.Map{"success": true, "data": updated})
+	}
+	writeStudentLeaveActivity(c, courseID, student, "leave_request_updated", view)
+	return c.JSON(fiber.Map{"success": true, "message": "แก้ไขคำขอลาแล้ว", "data": view})
 }
 
 // DELETE /api/students/me/courses/:courseId/leave-requests/:id
@@ -779,6 +903,8 @@ func GetAttendanceRecordHistoryHandler(c fiber.Ctx) error {
 		actorName := ""
 		if r.ActorType == repositories.AttendanceActorUser && r.ActorID != nil {
 			actorName = names[*r.ActorID]
+		} else if r.ActorType == repositories.AttendanceActorSystem {
+			actorName = "ระบบ"
 		}
 		items = append(items, fiber.Map{
 			"id":               r.ID,
@@ -846,7 +972,7 @@ func notifyLeaveRequestSubmitted(view *repositories.LeaveRequestView) {
 		courseName = view.CourseID
 	}
 	typeLabel := services.LeaveTypeLabelTH(view.LeaveType)
-	link := "/classroom/" + view.CourseID + "?tab=leave-requests"
+	link := "/classroom/" + view.CourseID + "/leave-requests"
 	title := fmt.Sprintf("คำขอ%sใหม่ %s: %s", typeLabel, services.LeaveRequestReference(view.ID), studentName)
 	message := fmt.Sprintf("%s %s ส่งคำขอ%s %d วัน ในวิชา %s", studentCode, studentName, typeLabel, len(view.Items), courseName)
 	data := buildNotifData(view.CourseID, strconv.Itoa(int(view.ID)), "leave_request", studentName)
@@ -882,6 +1008,25 @@ func notifyLeaveRequestReviewed(view *repositories.LeaveRequestView) {
 	}
 	if err := services.SendLeaveRequestReviewedEmail(view.ID, view.Student.Email, view.Student.FullName, courseName, view.LeaveType, view.Status, view.ReviewComment, leaveEmailItems(view), services.StudentLeaveRequestURL(view.CourseID)); err != nil {
 		services.LogEmailDeliveryError("leave_request_reviewed", err)
+	}
+}
+
+// RunLeaveRequestAutoExpire ปิดคำขอที่ค้าง "รอพิจารณา" เกินนโยบายของวิชาอัตโนมัติ แล้วแจ้งนักศึกษาทางอีเมล
+// (เรียกจาก ticker วันละครั้ง)
+func RunLeaveRequestAutoExpire() {
+	grouped, err := repositories.ExpireStalePendingLeaveRequests()
+	if err != nil {
+		log.Printf("event=leave_auto_expire_failed err=%v", err)
+		return
+	}
+	for _, requests := range grouped {
+		for _, r := range requests {
+			view, err := repositories.GetLeaveRequestByID(r.ID)
+			if err != nil {
+				continue
+			}
+			notifyLeaveRequestReviewed(view)
+		}
 	}
 }
 

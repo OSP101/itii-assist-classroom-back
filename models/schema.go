@@ -150,11 +150,13 @@ type Course struct {
 	IsActive           bool    `gorm:"type:boolean;default:true" json:"is_active"`
 	AttentionThreshold int     `gorm:"default:60" json:"attention_threshold"`
 	// ตั้งค่าคำขอลา (ต่อวิชา)
-	LeaveRequestEnabled *bool     `gorm:"type:boolean;default:true" json:"leave_request_enabled"`
-	LeaveEvidencePolicy string    `gorm:"type:varchar(20);default:'sick_personal'" json:"leave_evidence_policy"` // none, sick_only, sick_personal, all
-	LeaveBackdateDays   int       `gorm:"default:7" json:"leave_backdate_days"`
-	LeaveAdvanceDays    int       `gorm:"default:60" json:"leave_advance_days"`
-	LeaveMaxPending     int       `gorm:"default:5" json:"leave_max_pending"`
+	LeaveRequestEnabled *bool  `gorm:"type:boolean;default:true" json:"leave_request_enabled"`
+	LeaveEvidencePolicy string `gorm:"type:varchar(20);default:'sick_personal'" json:"leave_evidence_policy"` // none, sick_only, sick_personal, all
+	LeaveBackdateDays   int    `gorm:"default:7" json:"leave_backdate_days"`
+	LeaveAdvanceDays    int    `gorm:"default:60" json:"leave_advance_days"`
+	LeaveMaxPending     int    `gorm:"default:5" json:"leave_max_pending"`
+	// คำขอที่ค้าง "รอพิจารณา" นานเกินจำนวนวันนี้ ระบบจะปิดอัตโนมัติ (0 = ปิดฟีเจอร์นี้)
+	LeaveAutoExpireDays int       `gorm:"default:21" json:"leave_auto_expire_days"`
 	CreatedAt           time.Time `gorm:"type:timestamptz" json:"created_at"`
 	UpdatedAt           time.Time `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
 }
@@ -520,8 +522,11 @@ type AttendanceLeaveRequest struct {
 	ReviewedAt    *time.Time     `gorm:"type:timestamptz" json:"reviewed_at,omitempty"`
 	ReviewComment string         `gorm:"type:text" json:"review_comment"`
 	SubmittedIP   string         `gorm:"type:varchar(64)" json:"-"`
-	CreatedAt     time.Time      `gorm:"type:timestamptz" json:"created_at"`
-	UpdatedAt     time.Time      `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+	// CancelledByRemovalID อ้างอิง removal ที่ทำให้คำขอนี้ถูกยกเลิกอัตโนมัติ (นักศึกษาหลุดวิชา)
+	// ใช้คืนสถานะกลับเป็น pending ถ้านักศึกษาถูก restore ภายในเวลาที่กำหนด
+	CancelledByRemovalID *uint     `gorm:"index" json:"cancelled_by_removal_id,omitempty"`
+	CreatedAt            time.Time `gorm:"type:timestamptz" json:"created_at"`
+	UpdatedAt            time.Time `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
 }
 
 // AttendanceLeaveRequestItem วันที่ลา 1 วันในคำขอ ผูกกับ session ถ้ามีอยู่แล้ว

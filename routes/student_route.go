@@ -16,6 +16,7 @@ func SetupStudentRoutes(app *fiber.App) {
 	self.Get("/courses/:courseId/leave-requests", middlewares.NoStore(), handlers.GetMyLeaveRequestsHandler)
 	self.Post("/courses/:courseId/leave-requests", handlers.CreateLeaveRequestHandler)
 	self.Get("/courses/:courseId/leave-requests/:id", middlewares.NoStore(), handlers.GetMyLeaveRequestHandler)
+	self.Put("/courses/:courseId/leave-requests/:id", handlers.UpdateLeaveRequestHandler)
 	self.Delete("/courses/:courseId/leave-requests/:id", handlers.CancelMyLeaveRequestHandler)
 	self.Get("/courses/:courseId/leave-requests/:id/evidence/:file", handlers.GetMyLeaveEvidenceHandler)
 

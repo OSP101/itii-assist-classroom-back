@@ -265,6 +265,14 @@ func main() {
 			handlers.RunLeaveRequestPendingReminder(72 * time.Hour)
 		}
 	}()
+	// Background job: ปิดคำขอลาที่ค้าง "รอพิจารณา" เกินนโยบายของวิชาอัตโนมัติวันละครั้ง (กันค้างตลอดไปถ้าผู้สอนเพิกเฉย)
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			handlers.RunLeaveRequestAutoExpire()
+		}
+	}()
 	startLogRetentionWorker()
 	// Was written but never started: the function existed, R2 and
 	// BACKUP_DAILY_HOUR/MINUTE were configured in .env, and nothing ever called

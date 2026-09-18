@@ -97,7 +97,8 @@ func leaveItemsPlain(items []LeaveEmailItem, showResult bool) string {
 
 func LeaveRequestReviewURL(courseID string) string {
 	cfg := loadEmailConfig()
-	return strings.TrimRight(cfg.Frontend, "/") + "/classroom/" + courseID + "?tab=leave-requests"
+	// path จริง ไม่ใช่ query string: classroom-detail-page.tsx อ่านแท็บจาก path segment เท่านั้น
+	return strings.TrimRight(cfg.Frontend, "/") + "/classroom/" + courseID + "/leave-requests"
 }
 
 func StudentLeaveRequestURL(courseID string) string {
@@ -149,6 +150,7 @@ func SendLeaveRequestReviewedEmail(requestID uint, toEmail, toName, courseName, 
 
 	resultText := "ได้รับการอนุมัติ"
 	gradient := emailGradientSuccess
+	commentLabel := "ความเห็นของผู้สอน"
 	switch status {
 	case "partially_approved":
 		resultText = "ได้รับการอนุมัติบางส่วน"
@@ -159,12 +161,18 @@ func SendLeaveRequestReviewedEmail(requestID uint, toEmail, toName, courseName, 
 	case "revoked":
 		resultText = "ถูกถอนการอนุมัติ"
 		gradient = emailGradientDanger
+	case "expired":
+		resultText = "หมดอายุอัตโนมัติ (พ้นกำหนดโดยไม่มีการพิจารณา)"
+		gradient = emailGradientDanger
+		commentLabel = "หมายเหตุจากระบบ"
 	}
 	subject := fmt.Sprintf("[%s] คำขอ%s %s %s: %s", cfg.AppName, typeLabel, ref, resultText, courseName)
 
 	note := ""
 	if status == "approved" || status == "partially_approved" {
 		note = emailMuted(`วันที่อนุมัติแล้ว ระบบบันทึกสถานะเช็กชื่อเป็น "ลา" ให้อัตโนมัติ ถ้าคาบเรียนของวันนั้นยังไม่ถูกสร้าง ระบบจะบันทึกให้เมื่อผู้สอนสร้างคาบ`)
+	} else if status == "expired" {
+		note = emailMuted(`คำขอนี้ไม่มีการพิจารณาภายในเวลาที่รายวิชากำหนด ระบบจึงปิดคำขออัตโนมัติ หากยังต้องการลา กรุณาติดต่อผู้สอนโดยตรงหรือส่งคำขอใหม่ (ถ้ายังอยู่ในช่วงเวลาที่ขอลาได้)`)
 	}
 
 	content := emailContent{
@@ -176,7 +184,7 @@ func SendLeaveRequestReviewedEmail(requestID uint, toEmail, toName, courseName, 
 		BodyHTML: emailGreeting(toName) +
 			emailParagraph(fmt.Sprintf(`คำขอ%sของคุณในวิชา %s %sแล้ว รายละเอียดรายวัน:`, html.EscapeString(typeLabel), html.EscapeString(courseName), html.EscapeString(resultText))) +
 			leaveItemsTableHTML(items, true) +
-			emailQuoteBlock("ความเห็นของผู้สอน", comment) +
+			emailQuoteBlock(commentLabel, comment) +
 			note +
 			emailButton("ดูคำขอลาของฉัน", link),
 	}

@@ -8,6 +8,7 @@ import (
 	"itii-assist/models"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -30,6 +31,7 @@ const (
 	LeaveStatusRejected          = "rejected"
 	LeaveStatusCancelled         = "cancelled"
 	LeaveStatusRevoked           = "revoked"
+	LeaveStatusExpired           = "expired" // ค้าง "รอพิจารณา" เกินนโยบายของวิชา ระบบปิดคำขอให้อัตโนมัติ
 
 	LeaveItemPending         = "pending"
 	LeaveItemApproved        = "approved" // อนุมัติแล้วแต่ยังไม่ได้ลง record (ใช้ชั่วคราวใน transaction)
@@ -60,8 +62,11 @@ var (
 	ErrLeaveRequestSessionInvalid = errors.New("session not eligible")
 	ErrLeaveRequestAlreadyPresent = errors.New("already present")
 	ErrLeaveRequestReasonRequired = errors.New("reason required")
+	ErrLeaveRequestReasonTooShort = errors.New("reason too short")
+	ErrLeaveRequestReasonTooLong  = errors.New("reason too long")
 	ErrLeaveRequestNotReviewable  = errors.New("leave request cannot be reviewed")
 	ErrLeaveRequestNotRevocable   = errors.New("leave request cannot be revoked")
+	ErrLeaveRequestCourseInactive = errors.New("course is not active")
 )
 
 // leaveLocation คือเขตเวลาที่ใช้ตีความ "วัน" ของคาบเรียน
@@ -88,6 +93,27 @@ func IsValidLeaveType(t string) bool {
 	return false
 }
 
+const (
+	LeaveReasonMinLength = 10
+	LeaveReasonMaxLength = 100
+)
+
+// ValidateLeaveReason บังคับความยาวเหตุผล 10-100 ตัวอักษร (นับเป็นตัวอักษรจริง ไม่ใช่ byte กันภาษาไทยเพี้ยน)
+func ValidateLeaveReason(reason string) error {
+	trimmed := strings.TrimSpace(reason)
+	if trimmed == "" {
+		return ErrLeaveRequestReasonRequired
+	}
+	length := utf8.RuneCountInString(trimmed)
+	if length < LeaveReasonMinLength {
+		return ErrLeaveRequestReasonTooShort
+	}
+	if length > LeaveReasonMaxLength {
+		return ErrLeaveRequestReasonTooLong
+	}
+	return nil
+}
+
 // LeaveEvidenceRequired ตัดสินจากนโยบายของวิชาว่าประเภทการลานี้ต้องมีหลักฐานไหม
 func LeaveEvidenceRequired(policy string, leaveType string) bool {
 	switch strings.TrimSpace(policy) {
@@ -104,7 +130,9 @@ func LeaveEvidenceRequired(policy string, leaveType string) bool {
 
 // LeaveCourseSettings ค่าตั้งค่าคำขอลาของวิชา (คืนค่าเริ่มต้นถ้ายังไม่ได้ตั้ง)
 type LeaveCourseSettings struct {
-	Enabled        bool   `json:"enabled"`
+	Enabled bool `json:"enabled"`
+	// AutoExpireDays: คำขอที่ค้าง "รอพิจารณา" เกินจำนวนวันนี้จะถูกปิดอัตโนมัติ (0 = ปิดฟีเจอร์นี้)
+	AutoExpireDays int    `json:"auto_expire_days"`
 	EvidencePolicy string `json:"evidence_policy"`
 	BackdateDays   int    `json:"backdate_days"`
 	AdvanceDays    int    `json:"advance_days"`
@@ -112,7 +140,7 @@ type LeaveCourseSettings struct {
 }
 
 func LeaveSettingsFromCourse(course *models.Course) LeaveCourseSettings {
-	s := LeaveCourseSettings{Enabled: true, EvidencePolicy: LeaveEvidencePolicySickPersonal, BackdateDays: 7, AdvanceDays: 60, MaxPending: 5}
+	s := LeaveCourseSettings{Enabled: true, EvidencePolicy: LeaveEvidencePolicySickPersonal, BackdateDays: 7, AdvanceDays: 60, MaxPending: 5, AutoExpireDays: 21}
 	if course == nil {
 		return s
 	}
@@ -131,12 +159,14 @@ func LeaveSettingsFromCourse(course *models.Course) LeaveCourseSettings {
 	if course.LeaveMaxPending > 0 {
 		s.MaxPending = course.LeaveMaxPending
 	}
+	// 0 = ปิดฟีเจอร์หมดอายุอัตโนมัติโดยตั้งใจ ต่างจากค่าอื่นที่ 0/ลบ = ยังไม่ได้ตั้ง จึงไม่ fallback
+	s.AutoExpireDays = course.LeaveAutoExpireDays
 	return s
 }
 
 func GetLeaveCourseSettings(courseID string) (LeaveCourseSettings, *models.Course, error) {
 	var course models.Course
-	if err := config.DB.Select("id, code, name, is_active, leave_request_enabled, leave_evidence_policy, leave_backdate_days, leave_advance_days, leave_max_pending").First(&course, "id = ?", courseID).Error; err != nil {
+	if err := config.DB.Select("id, code, name, is_active, leave_request_enabled, leave_evidence_policy, leave_backdate_days, leave_advance_days, leave_max_pending, leave_auto_expire_days").First(&course, "id = ?", courseID).Error; err != nil {
 		return LeaveCourseSettings{}, nil, err
 	}
 	return LeaveSettingsFromCourse(&course), &course, nil
@@ -322,6 +352,168 @@ type LeaveRequestValidationError struct {
 func (e *LeaveRequestValidationError) Error() string { return e.Err.Error() + ": " + e.Detail }
 func (e *LeaveRequestValidationError) Unwrap() error { return e.Err }
 
+// buildLeaveItemForSession ตรวจซ้ำ + ตรวจว่ามาเรียนแล้วหรือยัง แล้วสร้าง item ให้ 1 session
+// ใช้ร่วมกันทั้งสอง path ของ CreateLeaveRequest (เลือก session ตรง / เลือกวันแล้วจับคู่ session ให้)
+// กันกฎ (ซ้ำ/มาเรียนแล้ว) drift ระหว่างสอง path
+// prefetchedRecords (ถ้ามี) คือ record ที่ query แบบ batch มาล่วงหน้าแล้ว (กัน query ต่อรายการ) ไม่มีก็ query เดี่ยวเหมือนเดิม
+func buildLeaveItemForSession(tx *gorm.DB, idx int, day time.Time, sid uint, byDate bool, detail string, studentID uint, now time.Time, seenSessions, openSessions map[uint]bool, prefetchedRecords map[uint]models.AttendanceRecord) (models.AttendanceLeaveRequestItem, error) {
+	if seenSessions[sid] || openSessions[sid] {
+		return models.AttendanceLeaveRequestItem{}, &LeaveRequestValidationError{Err: ErrLeaveRequestDuplicate, ItemIndex: idx, Detail: detail}
+	}
+	record, found := prefetchedRecords[sid]
+	if prefetchedRecords == nil {
+		found = tx.Where("attendance_session_id = ? AND student_id = ?", sid, studentID).First(&record).Error == nil
+	}
+	if found && record.Status == "present" {
+		return models.AttendanceLeaveRequestItem{}, &LeaveRequestValidationError{Err: ErrLeaveRequestAlreadyPresent, ItemIndex: idx, Detail: detail}
+	}
+	seenSessions[sid] = true
+	return models.AttendanceLeaveRequestItem{
+		LeaveDate:           day,
+		AttendanceSessionID: &sid,
+		ByDate:              byDate,
+		ItemStatus:          LeaveItemPending,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}, nil
+}
+
+// buildLeaveRequestItems ตรวจซ้ำ/ตรวจกรอบเวลา/ตรวจสิทธิ์ แล้วสร้างรายการ item ของคำขอลา
+// ใช้ร่วมกันทั้ง CreateLeaveRequest และ UpdateLeaveRequest
+// excludeRequestID (ถ้ามี) กันไม่ให้ item เดิมของคำขอนี้เองถูกนับเป็น "ค้างซ้ำ" ตอนแก้ไขคำขอที่ยัง pending
+func buildLeaveRequestItems(tx *gorm.DB, courseID string, studentID uint, inputs []LeaveRequestItemInput, from, to time.Time, now time.Time, excludeRequestID uint) ([]models.AttendanceLeaveRequestItem, error) {
+	// ล็อกคำขอที่ค้างของนักศึกษาคนนี้ กันส่งซ้ำพร้อมกัน
+	type openRow struct {
+		SessionID *uint
+		LeaveDate time.Time
+	}
+	excludeClause := ""
+	args := []interface{}{courseID, studentID}
+	if excludeRequestID > 0 {
+		excludeClause = " AND q.id <> ?"
+		args = append(args, excludeRequestID)
+	}
+	var openRows []openRow
+	if err := tx.Raw(`
+		SELECT i.attendance_session_id AS session_id, i.leave_date
+		FROM attendance_leave_request_items i
+		JOIN attendance_leave_requests q ON q.id = i.leave_request_id
+		WHERE q.course_id = ? AND q.student_id = ?
+		  AND i.item_status IN ('pending','approved','applied','awaiting_session')`+excludeClause+leaveRowLockClause(tx), args...).Scan(&openRows).Error; err != nil {
+		return nil, err
+	}
+	openSessions := map[uint]bool{}
+	openDates := map[string]bool{}
+	for _, r := range openRows {
+		if r.SessionID != nil {
+			openSessions[*r.SessionID] = true
+		}
+		openDates[leaveDateOf(r.LeaveDate).Format("2006-01-02")] = true
+	}
+
+	// prefetch แบบ batch สำหรับ item ที่เลือก session ตรง ๆ กัน query ต่อรายการ (session + record)
+	explicitSessionIDs := make([]uint, 0, len(inputs))
+	for _, in := range inputs {
+		if in.SessionID != nil && *in.SessionID > 0 {
+			explicitSessionIDs = append(explicitSessionIDs, *in.SessionID)
+		}
+	}
+	sessionsByID := map[uint]models.AttendanceSession{}
+	recordsBySessionID := map[uint]models.AttendanceRecord{}
+	if len(explicitSessionIDs) > 0 {
+		var sessions []models.AttendanceSession
+		if err := tx.Where("id IN ?", explicitSessionIDs).Find(&sessions).Error; err != nil {
+			return nil, err
+		}
+		for _, s := range sessions {
+			sessionsByID[s.ID] = s
+		}
+		var records []models.AttendanceRecord
+		if err := tx.Where("attendance_session_id IN ? AND student_id = ?", explicitSessionIDs, studentID).Find(&records).Error; err != nil {
+			return nil, err
+		}
+		for _, r := range records {
+			recordsBySessionID[r.AttendanceSessionID] = r
+		}
+	}
+
+	items := make([]models.AttendanceLeaveRequestItem, 0, len(inputs))
+	seenSessions := map[uint]bool{}
+	seenDates := map[string]bool{}
+	for idx, in := range inputs {
+		if in.SessionID != nil && *in.SessionID > 0 {
+			sid := *in.SessionID
+			session, ok := sessionsByID[sid]
+			if !ok || session.CourseID != courseID {
+				return nil, &LeaveRequestValidationError{Err: ErrLeaveRequestSessionInvalid, ItemIndex: idx, Detail: "session not in course"}
+			}
+			sectionIDs, err := attendanceSessionSectionIDsWithDB(tx, &session)
+			if err != nil {
+				return nil, err
+			}
+			eligible, err := attendanceStudentEligibleWithDB(tx, session.CourseID, sectionIDs, studentID)
+			if err != nil {
+				return nil, err
+			}
+			if !eligible {
+				return nil, &LeaveRequestValidationError{Err: ErrLeaveRequestSessionInvalid, ItemIndex: idx, Detail: "not in section"}
+			}
+			day := leaveDateOf(session.StartTime)
+			if day.Before(from) || day.After(to) {
+				return nil, &LeaveRequestValidationError{Err: ErrLeaveRequestOutOfWindow, ItemIndex: idx, Detail: day.Format("2006-01-02")}
+			}
+			dayKey := day.Format("2006-01-02")
+			if openDates[dayKey] && !openSessions[sid] {
+				// มีคำขอแบบ "เลือกวัน" ครอบวันนี้อยู่แล้ว
+				return nil, &LeaveRequestValidationError{Err: ErrLeaveRequestDuplicate, ItemIndex: idx, Detail: dayKey}
+			}
+			item, err := buildLeaveItemForSession(tx, idx, day, sid, false, fmt.Sprintf("session %d", sid), studentID, now, seenSessions, openSessions, recordsBySessionID)
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, item)
+			continue
+		}
+
+		day, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(in.Date), leaveLocation)
+		if err != nil {
+			return nil, &LeaveRequestValidationError{Err: ErrLeaveRequestNoItems, ItemIndex: idx, Detail: "invalid date"}
+		}
+		dayKey := day.Format("2006-01-02")
+		if seenDates[dayKey] || openDates[dayKey] {
+			return nil, &LeaveRequestValidationError{Err: ErrLeaveRequestDuplicate, ItemIndex: idx, Detail: dayKey}
+		}
+		if day.Before(from) || day.After(to) {
+			return nil, &LeaveRequestValidationError{Err: ErrLeaveRequestOutOfWindow, ItemIndex: idx, Detail: dayKey}
+		}
+		// ถ้าวันนั้นมี session ที่นักศึกษามีสิทธิ์อยู่แล้ว ผูกให้เลย (อาจมีหลายคาบ)
+		bound, err := leaveSessionsOnDate(tx, courseID, studentID, day)
+		if err != nil {
+			return nil, err
+		}
+		if len(bound) == 0 {
+			seenDates[dayKey] = true
+			items = append(items, models.AttendanceLeaveRequestItem{
+				LeaveDate:  day,
+				ByDate:     true,
+				ItemStatus: LeaveItemPending,
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			})
+			continue
+		}
+		for _, s := range bound {
+			item, err := buildLeaveItemForSession(tx, idx, day, s.ID, true, dayKey, studentID, now, seenSessions, openSessions, nil)
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, item)
+		}
+		seenDates[dayKey] = true
+	}
+	return items, nil
+}
+
 func CreateLeaveRequest(input CreateLeaveRequestInput) (*models.AttendanceLeaveRequest, error) {
 	settings, _, err := GetLeaveCourseSettings(input.CourseID)
 	if err != nil {
@@ -333,13 +525,14 @@ func CreateLeaveRequest(input CreateLeaveRequestInput) (*models.AttendanceLeaveR
 	if !IsValidLeaveType(input.LeaveType) {
 		return nil, ErrLeaveRequestInvalidType
 	}
-	if strings.TrimSpace(input.Reason) == "" {
-		return nil, ErrLeaveRequestReasonRequired
+	if err := ValidateLeaveReason(input.Reason); err != nil {
+		return nil, err
 	}
 	if len(input.Items) == 0 {
 		return nil, ErrLeaveRequestNoItems
 	}
-	if LeaveEvidenceRequired(settings.EvidencePolicy, input.LeaveType) && len(input.Evidence) == 0 {
+	// หลักฐานบังคับแนบทุกกรณี ไม่ว่าประเภทลาไหนหรือวิชาตั้งนโยบายอย่างไร
+	if len(input.Evidence) == 0 {
 		return nil, ErrLeaveRequestEvidence
 	}
 	if !IsStudentInCourse(input.CourseID, input.StudentID) {
@@ -351,6 +544,11 @@ func CreateLeaveRequest(input CreateLeaveRequestInput) (*models.AttendanceLeaveR
 
 	var created models.AttendanceLeaveRequest
 	err = config.DB.Transaction(func(tx *gorm.DB) error {
+		// ล็อกทั้ง transaction ต่อคู่ (วิชา, นักศึกษา) กันส่งคำขอลาซ้ำพร้อมกัน
+		// (FOR UPDATE ด้านล่างล็อกได้แค่แถวที่มีอยู่แล้ว ถ้ายังไม่มีแถวเลยจะไม่มีอะไรกันชน)
+		if err := acquireLeaveRequestLock(tx, input.CourseID, input.StudentID); err != nil {
+			return err
+		}
 		var pendingCount int64
 		if err := tx.Model(&models.AttendanceLeaveRequest{}).
 			Where("course_id = ? AND student_id = ? AND status = ?", input.CourseID, input.StudentID, LeaveStatusPending).
@@ -361,128 +559,9 @@ func CreateLeaveRequest(input CreateLeaveRequestInput) (*models.AttendanceLeaveR
 			return ErrLeaveRequestTooManyPending
 		}
 
-		// ล็อกคำขอที่ค้างของนักศึกษาคนนี้ กันส่งซ้ำพร้อมกัน
-		type openRow struct {
-			SessionID *uint
-			LeaveDate time.Time
-		}
-		var openRows []openRow
-		if err := tx.Raw(`
-			SELECT i.attendance_session_id AS session_id, i.leave_date
-			FROM attendance_leave_request_items i
-			JOIN attendance_leave_requests q ON q.id = i.leave_request_id
-			WHERE q.course_id = ? AND q.student_id = ?
-			  AND i.item_status IN ('pending','approved','applied','awaiting_session')
-		`+leaveRowLockClause(tx), input.CourseID, input.StudentID).Scan(&openRows).Error; err != nil {
+		items, err := buildLeaveRequestItems(tx, input.CourseID, input.StudentID, input.Items, from, to, now, 0)
+		if err != nil {
 			return err
-		}
-		openSessions := map[uint]bool{}
-		openDates := map[string]bool{}
-		for _, r := range openRows {
-			if r.SessionID != nil {
-				openSessions[*r.SessionID] = true
-			}
-			openDates[leaveDateOf(r.LeaveDate).Format("2006-01-02")] = true
-		}
-
-		items := make([]models.AttendanceLeaveRequestItem, 0, len(input.Items))
-		seenSessions := map[uint]bool{}
-		seenDates := map[string]bool{}
-		for idx, in := range input.Items {
-			if in.SessionID != nil && *in.SessionID > 0 {
-				sid := *in.SessionID
-				if seenSessions[sid] || openSessions[sid] {
-					return &LeaveRequestValidationError{Err: ErrLeaveRequestDuplicate, ItemIndex: idx, Detail: fmt.Sprintf("session %d", sid)}
-				}
-				var session models.AttendanceSession
-				if err := tx.First(&session, sid).Error; err != nil || session.CourseID != input.CourseID {
-					return &LeaveRequestValidationError{Err: ErrLeaveRequestSessionInvalid, ItemIndex: idx, Detail: "session not in course"}
-				}
-				sectionIDs, err := attendanceSessionSectionIDsWithDB(tx, &session)
-				if err != nil {
-					return err
-				}
-				eligible, err := attendanceStudentEligibleWithDB(tx, session.CourseID, sectionIDs, input.StudentID)
-				if err != nil {
-					return err
-				}
-				if !eligible {
-					return &LeaveRequestValidationError{Err: ErrLeaveRequestSessionInvalid, ItemIndex: idx, Detail: "not in section"}
-				}
-				day := leaveDateOf(session.StartTime)
-				if day.Before(from) || day.After(to) {
-					return &LeaveRequestValidationError{Err: ErrLeaveRequestOutOfWindow, ItemIndex: idx, Detail: day.Format("2006-01-02")}
-				}
-				var record models.AttendanceRecord
-				if err := tx.Where("attendance_session_id = ? AND student_id = ?", sid, input.StudentID).First(&record).Error; err == nil {
-					if record.Status == "present" {
-						return &LeaveRequestValidationError{Err: ErrLeaveRequestAlreadyPresent, ItemIndex: idx, Detail: fmt.Sprintf("session %d", sid)}
-					}
-				}
-				dayKey := day.Format("2006-01-02")
-				if openDates[dayKey] && !openSessions[sid] {
-					// มีคำขอแบบ "เลือกวัน" ครอบวันนี้อยู่แล้ว
-					return &LeaveRequestValidationError{Err: ErrLeaveRequestDuplicate, ItemIndex: idx, Detail: dayKey}
-				}
-				seenSessions[sid] = true
-				items = append(items, models.AttendanceLeaveRequestItem{
-					LeaveDate:           day,
-					AttendanceSessionID: &sid,
-					ByDate:              false,
-					ItemStatus:          LeaveItemPending,
-					CreatedAt:           now,
-					UpdatedAt:           now,
-				})
-				continue
-			}
-
-			day, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(in.Date), leaveLocation)
-			if err != nil {
-				return &LeaveRequestValidationError{Err: ErrLeaveRequestNoItems, ItemIndex: idx, Detail: "invalid date"}
-			}
-			dayKey := day.Format("2006-01-02")
-			if seenDates[dayKey] || openDates[dayKey] {
-				return &LeaveRequestValidationError{Err: ErrLeaveRequestDuplicate, ItemIndex: idx, Detail: dayKey}
-			}
-			if day.Before(from) || day.After(to) {
-				return &LeaveRequestValidationError{Err: ErrLeaveRequestOutOfWindow, ItemIndex: idx, Detail: dayKey}
-			}
-			// ถ้าวันนั้นมี session ที่นักศึกษามีสิทธิ์อยู่แล้ว ผูกให้เลย (อาจมีหลายคาบ)
-			bound, err := leaveSessionsOnDate(tx, input.CourseID, input.StudentID, day)
-			if err != nil {
-				return err
-			}
-			if len(bound) == 0 {
-				seenDates[dayKey] = true
-				items = append(items, models.AttendanceLeaveRequestItem{
-					LeaveDate:  day,
-					ByDate:     true,
-					ItemStatus: LeaveItemPending,
-					CreatedAt:  now,
-					UpdatedAt:  now,
-				})
-				continue
-			}
-			for _, s := range bound {
-				if seenSessions[s.ID] || openSessions[s.ID] {
-					return &LeaveRequestValidationError{Err: ErrLeaveRequestDuplicate, ItemIndex: idx, Detail: dayKey}
-				}
-				var record models.AttendanceRecord
-				if err := tx.Where("attendance_session_id = ? AND student_id = ?", s.ID, input.StudentID).First(&record).Error; err == nil && record.Status == "present" {
-					return &LeaveRequestValidationError{Err: ErrLeaveRequestAlreadyPresent, ItemIndex: idx, Detail: dayKey}
-				}
-				sid := s.ID
-				seenSessions[sid] = true
-				items = append(items, models.AttendanceLeaveRequestItem{
-					LeaveDate:           day,
-					AttendanceSessionID: &sid,
-					ByDate:              true,
-					ItemStatus:          LeaveItemPending,
-					CreatedAt:           now,
-					UpdatedAt:           now,
-				})
-			}
-			seenDates[dayKey] = true
 		}
 
 		evidence := datatypes.JSON([]byte("[]"))
@@ -512,6 +591,101 @@ func CreateLeaveRequest(input CreateLeaveRequestInput) (*models.AttendanceLeaveR
 		return nil, err
 	}
 	return &created, nil
+}
+
+// UpdateLeaveRequestInput ข้อมูลแก้ไขคำขอลาที่ยัง pending (Evidence = nil หมายถึงไม่เปลี่ยนหลักฐานเดิม)
+type UpdateLeaveRequestInput struct {
+	CourseID  string
+	StudentID uint
+	LeaveType string
+	Reason    string
+	Evidence  []string
+	Items     []LeaveRequestItemInput
+}
+
+// UpdateLeaveRequest แก้ไขคำขอลาที่ยัง pending เท่านั้น (แทนที่รายการวันลาทั้งหมดด้วยชุดใหม่)
+// ใช้กฎเดียวกับตอนสร้าง (ซ้ำ/มาเรียนแล้ว/นอกกรอบเวลา/หลักฐานบังคับ) ผ่าน buildLeaveRequestItems ร่วมกัน
+func UpdateLeaveRequest(id uint, input UpdateLeaveRequestInput) (*models.AttendanceLeaveRequest, error) {
+	settings, _, err := GetLeaveCourseSettings(input.CourseID)
+	if err != nil {
+		return nil, err
+	}
+	if !settings.Enabled {
+		return nil, ErrLeaveRequestDisabled
+	}
+	if !IsValidLeaveType(input.LeaveType) {
+		return nil, ErrLeaveRequestInvalidType
+	}
+	if err := ValidateLeaveReason(input.Reason); err != nil {
+		return nil, err
+	}
+	if len(input.Items) == 0 {
+		return nil, ErrLeaveRequestNoItems
+	}
+
+	now := time.Now()
+	from, to := leaveWindow(settings, now)
+
+	var updated models.AttendanceLeaveRequest
+	err = config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := acquireLeaveRequestLock(tx, input.CourseID, input.StudentID); err != nil {
+			return err
+		}
+		var request models.AttendanceLeaveRequest
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&request, id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrLeaveRequestNotFound
+			}
+			return err
+		}
+		if request.CourseID != input.CourseID || request.StudentID != input.StudentID {
+			return ErrLeaveRequestNotFound
+		}
+		if request.Status != LeaveStatusPending {
+			return ErrLeaveRequestNotPending
+		}
+
+		evidenceCount := len(decodeEvidence(request.Evidence))
+		if input.Evidence != nil {
+			evidenceCount = len(input.Evidence)
+		}
+		// หลักฐานบังคับแนบทุกกรณี (เก็บของเดิมไว้นับด้วยได้ ไม่ต้องอัปโหลดซ้ำถ้ามีอยู่แล้ว)
+		if evidenceCount == 0 {
+			return ErrLeaveRequestEvidence
+		}
+
+		items, err := buildLeaveRequestItems(tx, input.CourseID, input.StudentID, input.Items, from, to, now, request.ID)
+		if err != nil {
+			return err
+		}
+
+		// คำขอนี้ยัง pending ทั้งใบ (item เดิมทั้งหมดยังไม่ถูกอนุมัติ/ลง record) แทนที่ได้ทั้งชุด
+		if err := tx.Where("leave_request_id = ?", request.ID).Delete(&models.AttendanceLeaveRequestItem{}).Error; err != nil {
+			return err
+		}
+		requestUpdates := map[string]interface{}{
+			"leave_type": input.LeaveType,
+			"reason":     strings.TrimSpace(input.Reason),
+			"updated_at": now,
+		}
+		if input.Evidence != nil {
+			requestUpdates["evidence"] = stringsJSON(input.Evidence)
+		}
+		if err := tx.Model(&models.AttendanceLeaveRequest{}).Where("id = ?", request.ID).Updates(requestUpdates).Error; err != nil {
+			return err
+		}
+		for i := range items {
+			items[i].LeaveRequestID = request.ID
+		}
+		if err := tx.Create(&items).Error; err != nil {
+			return err
+		}
+		return tx.First(&updated, request.ID).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &updated, nil
 }
 
 func stringsJSON(values []string) datatypes.JSON {
@@ -793,6 +967,7 @@ type LeaveRequestCounts struct {
 	Rejected          int64 `json:"rejected"`
 	Cancelled         int64 `json:"cancelled"`
 	Revoked           int64 `json:"revoked"`
+	Expired           int64 `json:"expired"`
 	Total             int64 `json:"total"`
 }
 
@@ -821,6 +996,8 @@ func CountCourseLeaveRequests(courseID string) (LeaveRequestCounts, error) {
 			c.Cancelled = r.Count
 		case LeaveStatusRevoked:
 			c.Revoked = r.Count
+		case LeaveStatusExpired:
+			c.Expired = r.Count
 		}
 	}
 	return c, nil
@@ -859,7 +1036,8 @@ func CancelLeaveRequest(id uint, studentID uint) (*models.AttendanceLeaveRequest
 }
 
 // CancelPendingLeaveRequestsForStudent ใช้ตอนนักศึกษาถูกถอดออกจากวิชา
-func CancelPendingLeaveRequestsForStudent(tx *gorm.DB, courseID string, studentID uint) error {
+// removalID (ถ้ามี) ใช้ผูกไว้คืนสถานะกลับถ้านักศึกษาถูก restore ภายในเวลาที่กำหนด (ดู RestorePendingLeaveRequestsByRemoval)
+func CancelPendingLeaveRequestsForStudent(tx *gorm.DB, courseID string, studentID uint, removalID uint) error {
 	if tx == nil {
 		tx = config.DB
 	}
@@ -871,10 +1049,40 @@ func CancelPendingLeaveRequestsForStudent(tx *gorm.DB, courseID string, studentI
 	if len(ids) == 0 {
 		return nil
 	}
-	if err := tx.Model(&models.AttendanceLeaveRequest{}).Where("id IN ?", ids).Updates(map[string]interface{}{"status": LeaveStatusCancelled, "updated_at": now}).Error; err != nil {
+	updates := map[string]interface{}{"status": LeaveStatusCancelled, "updated_at": now}
+	if removalID > 0 {
+		updates["cancelled_by_removal_id"] = removalID
+	}
+	if err := tx.Model(&models.AttendanceLeaveRequest{}).Where("id IN ?", ids).Updates(updates).Error; err != nil {
 		return err
 	}
 	return tx.Model(&models.AttendanceLeaveRequestItem{}).Where("leave_request_id IN ? AND item_status = ?", ids, LeaveItemPending).Updates(map[string]interface{}{"item_status": LeaveItemCancelled, "updated_at": now}).Error
+}
+
+// RestorePendingLeaveRequestsByRemoval คืนคำขอลาที่ถูกยกเลิกอัตโนมัติจากการถอดออกครั้งนี้กลับเป็น pending
+// เรียกตอน RestoreStudentToSection คืนสมาชิกภาพให้นักศึกษาภายในเวลาที่กำหนด
+func RestorePendingLeaveRequestsByRemoval(tx *gorm.DB, removalID uint) error {
+	if tx == nil {
+		tx = config.DB
+	}
+	now := time.Now()
+	var ids []uint
+	if err := tx.Model(&models.AttendanceLeaveRequest{}).
+		Where("cancelled_by_removal_id = ? AND status = ?", removalID, LeaveStatusCancelled).
+		Pluck("id", &ids).Error; err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	if err := tx.Model(&models.AttendanceLeaveRequest{}).Where("id IN ?", ids).Updates(map[string]interface{}{
+		"status":                  LeaveStatusPending,
+		"cancelled_by_removal_id": nil,
+		"updated_at":              now,
+	}).Error; err != nil {
+		return err
+	}
+	return tx.Model(&models.AttendanceLeaveRequestItem{}).Where("leave_request_id IN ? AND item_status = ?", ids, LeaveItemCancelled).Updates(map[string]interface{}{"item_status": LeaveItemPending, "updated_at": now}).Error
 }
 
 // -----------------------------------------------------------------------------
@@ -910,6 +1118,13 @@ func ReviewLeaveRequest(id uint, reviewerID uint, approveAll bool, decisions []L
 		}
 		if request.Status != LeaveStatusPending {
 			return ErrLeaveRequestNotReviewable
+		}
+		var course models.Course
+		if err := tx.Select("is_active").First(&course, "id = ?", request.CourseID).Error; err != nil {
+			return err
+		}
+		if !course.IsActive {
+			return ErrLeaveRequestCourseInactive
 		}
 		var items []models.AttendanceLeaveRequestItem
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("leave_request_id = ?", id).Order("id ASC").Find(&items).Error; err != nil {
@@ -1006,8 +1221,9 @@ func applyLeaveToRecord(tx *gorm.DB, request *models.AttendanceLeaveRequest, ite
 		return "", err
 	}
 	now := time.Now()
-	// มาเรียนแล้ว (เช็กชื่อเอง) ไม่ทับ ให้ถือว่าคำขอวันนี้ถูกแทนที่
-	if (record.Status == "present" || record.Status == "late") && record.StatusSource == AttendanceSourceCheckIn {
+	// มาเรียนแล้ว (เช็กชื่อเอง หรือผู้สอน/TA แก้ให้ด้วยมือ) ไม่ทับ ให้ถือว่าคำขอวันนี้ถูกแทนที่
+	if (record.Status == "present" || record.Status == "late") &&
+		(record.StatusSource == AttendanceSourceCheckIn || record.StatusSource == AttendanceSourceManual) {
 		return LeaveItemSuperseded, tx.Model(item).Updates(map[string]interface{}{
 			"item_status":       LeaveItemSuperseded,
 			"applied_record_id": record.ID,
@@ -1028,6 +1244,14 @@ func applyLeaveToRecord(tx *gorm.DB, request *models.AttendanceLeaveRequest, ite
 	}).Error; err != nil {
 		return "", err
 	}
+	// actorID=0 หมายถึงระบบสั่งเอง (auto-bind/reapply ตอนสร้าง/แก้ session) ไม่ใช่ผู้ใช้จริง
+	actorType := AttendanceActorUser
+	var actorIDPtr *uint
+	if actorID == 0 {
+		actorType = AttendanceActorSystem
+	} else {
+		actorIDPtr = &actorID
+	}
 	if err := RecordAttendanceStatusHistory(tx, AttendanceStatusChange{
 		RecordID:       record.ID,
 		SessionID:      session.ID,
@@ -1035,8 +1259,8 @@ func applyLeaveToRecord(tx *gorm.DB, request *models.AttendanceLeaveRequest, ite
 		FromStatus:     record.Status,
 		ToStatus:       "leave",
 		Source:         AttendanceSourceLeaveRequest,
-		ActorType:      AttendanceActorUser,
-		ActorID:        &actorID,
+		ActorType:      actorType,
+		ActorID:        actorIDPtr,
 		LeaveRequestID: &requestID,
 		Note:           note,
 	}); err != nil {
@@ -1081,6 +1305,13 @@ func RevokeLeaveRequest(id uint, reviewerID uint, comment string) (*models.Atten
 		}
 		if request.Status != LeaveStatusApproved && request.Status != LeaveStatusPartiallyApproved {
 			return ErrLeaveRequestNotRevocable
+		}
+		var course models.Course
+		if err := tx.Select("is_active").First(&course, "id = ?", request.CourseID).Error; err != nil {
+			return err
+		}
+		if !course.IsActive {
+			return ErrLeaveRequestCourseInactive
 		}
 		var items []models.AttendanceLeaveRequestItem
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("leave_request_id = ?", id).Find(&items).Error; err != nil {
@@ -1158,8 +1389,8 @@ func RevokeLeaveRequest(id uint, reviewerID uint, comment string) (*models.Atten
 // hook กับวงจรชีวิตของ session
 // -----------------------------------------------------------------------------
 
-// supersedeLeaveRequestItemForRecord ถูกเรียกตอนนักศึกษาเช็กชื่อทับ record ที่เป็น leave จากคำขอ
-func supersedeLeaveRequestItemForRecord(tx *gorm.DB, recordID uint) error {
+// SupersedeLeaveRequestItemForRecord ถูกเรียกตอนนักศึกษาเช็กชื่อทับ record ที่เป็น leave จากคำขอ
+func SupersedeLeaveRequestItemForRecord(tx *gorm.DB, recordID uint) error {
 	return tx.Model(&models.AttendanceLeaveRequestItem{}).
 		Where("applied_record_id = ? AND item_status = ?", recordID, LeaveItemApplied).
 		Updates(map[string]interface{}{"item_status": LeaveItemSuperseded, "updated_at": time.Now()}).Error
@@ -1309,7 +1540,7 @@ func ReapplyLeaveForSession(sessionID uint) error {
 			if err == nil && record.Status == "leave" && record.LeaveRequestID != nil && *record.LeaveRequestID == r.LeaveRequestID {
 				continue
 			}
-			if err == nil && record.StatusSource == AttendanceSourceCheckIn && record.Status != "absent" {
+			if err == nil && (record.StatusSource == AttendanceSourceCheckIn || record.StatusSource == AttendanceSourceManual) && record.Status != "absent" {
 				continue
 			}
 			request := models.AttendanceLeaveRequest{ID: r.LeaveRequestID, StudentID: r.ReqStudentID, Status: r.ReqStatus, LeaveType: r.ReqLeaveType}
@@ -1370,6 +1601,51 @@ func uniqueUints(in []uint) []uint {
 	return out
 }
 
+// ExpireStalePendingLeaveRequests ปิดคำขอที่ยัง "รอพิจารณา" นานเกินนโยบายของวิชา (LeaveAutoExpireDays) อัตโนมัติ
+// item ที่ยัง pending จะถูกยกเลิกไปด้วย (ยังไม่เคยถูกอนุมัติ ไม่มี record ที่ต้องคืนสถานะ)
+// คืนคำขอที่หมดอายุรอบนี้ (ตั้งสถานะแล้ว) จัดกลุ่มตามวิชา ใช้แจ้งนักศึกษาต่อ — เรียกจาก ticker วันละครั้ง
+func ExpireStalePendingLeaveRequests() (map[string][]models.AttendanceLeaveRequest, error) {
+	now := time.Now()
+	var courses []models.Course
+	if err := config.DB.Select("id", "leave_auto_expire_days").Where("leave_auto_expire_days > 0").Find(&courses).Error; err != nil {
+		return nil, err
+	}
+	grouped := map[string][]models.AttendanceLeaveRequest{}
+	for _, course := range courses {
+		cutoff := now.AddDate(0, 0, -course.LeaveAutoExpireDays)
+		var stale []models.AttendanceLeaveRequest
+		if err := config.DB.Where("course_id = ? AND status = ? AND created_at < ?", course.ID, LeaveStatusPending, cutoff).Find(&stale).Error; err != nil {
+			return grouped, err
+		}
+		if len(stale) == 0 {
+			continue
+		}
+		ids := make([]uint, 0, len(stale))
+		for _, r := range stale {
+			ids = append(ids, r.ID)
+		}
+		note := fmt.Sprintf("หมดอายุอัตโนมัติ: ไม่มีการพิจารณาภายใน %d วัน", course.LeaveAutoExpireDays)
+		err := config.DB.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Model(&models.AttendanceLeaveRequest{}).Where("id IN ?", ids).Updates(map[string]interface{}{
+				"status": LeaveStatusExpired, "review_comment": note, "updated_at": now,
+			}).Error; err != nil {
+				return err
+			}
+			return tx.Model(&models.AttendanceLeaveRequestItem{}).Where("leave_request_id IN ? AND item_status = ?", ids, LeaveItemPending).
+				Updates(map[string]interface{}{"item_status": LeaveItemCancelled, "updated_at": now}).Error
+		})
+		if err != nil {
+			return grouped, err
+		}
+		for i := range stale {
+			stale[i].Status = LeaveStatusExpired
+			stale[i].ReviewComment = note
+		}
+		grouped[course.ID] = append(grouped[course.ID], stale...)
+	}
+	return grouped, nil
+}
+
 // PendingLeaveRequestsOlderThan คืนคำขอค้างที่ส่งมาก่อนเวลา before จัดกลุ่มตามวิชา (ใช้ส่งเมลเตือน)
 func PendingLeaveRequestsOlderThan(before time.Time) (map[string][]models.AttendanceLeaveRequest, error) {
 	var rows []models.AttendanceLeaveRequest
@@ -1395,4 +1671,15 @@ func leaveRowLockClause(tx *gorm.DB) string {
 		return " FOR UPDATE OF i"
 	}
 	return ""
+}
+
+// acquireLeaveRequestLock ล็อกทั้ง transaction ต่อคู่ (วิชา, นักศึกษา) ด้วย advisory lock ของ Postgres
+// เฉพาะ Postgres เท่านั้น (sqlite ที่ใช้ในเทสต์ไม่รองรับ pg_advisory_xact_lock) กัน CreateLeaveRequest
+// สองคำขอพร้อมกันแซงกันผ่าน FOR UPDATE ที่ล็อกได้แค่แถวที่มีอยู่แล้ว
+func acquireLeaveRequestLock(tx *gorm.DB, courseID string, studentID uint) error {
+	if tx == nil || tx.Dialector == nil || tx.Dialector.Name() != "postgres" {
+		return nil
+	}
+	key := fmt.Sprintf("leave-request:%s:%d", courseID, studentID)
+	return tx.Exec("SELECT pg_advisory_xact_lock(hashtext(?))", key).Error
 }
