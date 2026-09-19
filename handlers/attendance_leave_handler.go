@@ -993,18 +993,53 @@ func notifyLeaveRequestSubmitted(view *repositories.LeaveRequestView) {
 	}
 }
 
+// leaveReviewResultLabelTH คำสั้น ๆ บอกผลการพิจารณา ใช้ทั้งในหัวข้อแจ้งเตือนในระบบและอีเมล
+// ต้องตรงกับ leaveItemResultLabel/resultText ฝั่งอีเมล (services/email_leave_request.go) เพื่อไม่ให้ผู้ใช้เห็นคำไม่ตรงกันระหว่างสองช่องทาง
+func leaveReviewResultLabelTH(status string) string {
+	switch status {
+	case "partially_approved":
+		return "ได้รับการอนุมัติบางส่วน"
+	case "rejected":
+		return "ไม่ได้รับการอนุมัติ"
+	case "revoked":
+		return "ถูกถอนการอนุมัติ"
+	case "expired":
+		return "หมดอายุอัตโนมัติ"
+	default:
+		return "ได้รับการอนุมัติ"
+	}
+}
+
 func notifyLeaveRequestReviewed(view *repositories.LeaveRequestView) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("event=leave_notify_reviewed_panic err=%v", r)
 		}
 	}()
-	if view.Student == nil || strings.TrimSpace(view.Student.Email) == "" {
+	if view.Student == nil {
 		return
 	}
 	courseName := view.CourseName
 	if courseName == "" {
 		courseName = view.CourseID
+	}
+
+	// แจ้งเตือนในระบบ (กระดิ่ง + realtime) ให้เสมอ ไม่ผูกกับว่ามีอีเมลหรือไม่
+	// เดิมมีแต่ตอนส่งคำขอ (notifyLeaveRequestSubmitted) ฝั่งพิจารณาผลไม่เคยสร้างให้เลย
+	typeLabel := services.LeaveTypeLabelTH(view.LeaveType)
+	resultLabel := leaveReviewResultLabelTH(view.Status)
+	title := fmt.Sprintf("คำขอ%s %s %s", typeLabel, services.LeaveRequestReference(view.ID), resultLabel)
+	message := fmt.Sprintf("คำขอ%sของคุณในวิชา %s %sแล้ว", typeLabel, courseName, resultLabel)
+	link := "/student/courses/" + view.CourseID + "?tab=leave"
+	reviewerName := ""
+	if view.Reviewer != nil {
+		reviewerName = view.Reviewer.FullName
+	}
+	data := buildNotifData(view.CourseID, strconv.Itoa(int(view.ID)), "leave_request", reviewerName)
+	createNotificationForUser(view.StudentID, view.CourseID, "leave_request_reviewed", title, message, link, data)
+
+	if strings.TrimSpace(view.Student.Email) == "" {
+		return
 	}
 	if err := services.SendLeaveRequestReviewedEmail(view.ID, view.Student.Email, view.Student.FullName, courseName, view.LeaveType, view.Status, view.ReviewComment, leaveEmailItems(view), services.StudentLeaveRequestURL(view.CourseID)); err != nil {
 		services.LogEmailDeliveryError("leave_request_reviewed", err)
