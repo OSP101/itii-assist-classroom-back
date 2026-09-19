@@ -77,6 +77,7 @@ func SetupQueueRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	workerActions.Get("/bookings/:bookingId/scores", middlewares.RequireQueueWorkerOrCoursePermission("sessionId", repositories.PermissionManageQueueBookings, "instructor", "ta"), handlers.GetQueueBookingExistingScoresHandler)
 	sessionMgmt.Get("/group", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionViewQueue, "instructor", "ta"), handlers.GetConcurrentGroupHandler)
 	sessionMgmt.Post("/group/link", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionUpdateQueueSessions, "instructor", "ta"), handlers.LinkConcurrentSessionsHandler)
+	sessionMgmt.Patch("/group/mode", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionUpdateQueueSessions, "instructor", "ta"), handlers.UpdateConcurrentGroupModeHandler)
 	sessionMgmt.Delete("/group/unlink", middlewares.RequireCoursePermission(middlewares.CourseIDFromQueueSessionParam("sessionId"), repositories.PermissionUpdateQueueSessions, "instructor", "ta"), handlers.UnlinkConcurrentSessionHandler)
 
 	// Student-accessible endpoints (any authenticated user)

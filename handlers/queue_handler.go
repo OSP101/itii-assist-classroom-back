@@ -123,6 +123,7 @@ func GetQueueSessionsHandler(c fiber.Ctx) error {
 			"updated_at":                   item.QueueSession.UpdatedAt,
 			"concurrent_group_id":          item.QueueSession.ConcurrentGroupID,
 			"group_pin_code":               item.QueueSession.GroupPinCode,
+			"link_mode":                    item.QueueSession.LinkMode,
 			"concurrent_partner":           item.ConcurrentPartner,
 			"classroom":                    item.Classroom,
 			"linkedAssignment":             item.LinkedAssignment,
@@ -216,6 +217,9 @@ func GetQueueSessionHandler(c fiber.Ctx) error {
 		"created_by":                   session.CreatedBy,
 		"created_at":                   session.CreatedAt,
 		"updated_at":                   session.UpdatedAt,
+		"concurrent_group_id":          session.ConcurrentGroupID,
+		"group_pin_code":               session.GroupPinCode,
+		"link_mode":                    session.LinkMode,
 	}
 
 	if session.LinkedAssignmentID != nil {
@@ -357,10 +361,11 @@ func GetConcurrentGroupHandler(c fiber.Ctx) error {
 		CourseName   string  `json:"course_name"`
 		Status       string  `json:"status"`
 		GroupPinCode *string `json:"group_pin_code,omitempty"`
+		LinkMode     string  `json:"link_mode"`
 	}
 	var sessions []sessionBasic
 	config.DB.Table("queue_sessions qs").
-		Select("qs.id, qs.title, qs.course_id, c.name AS course_name, qs.status, qs.group_pin_code").
+		Select("qs.id, qs.title, qs.course_id, c.name AS course_name, qs.status, qs.group_pin_code, qs.link_mode").
 		Joins("JOIN courses c ON c.id = qs.course_id").
 		Where("qs.id IN ?", sessionIDs).
 		Scan(&sessions)
@@ -369,7 +374,15 @@ func GetConcurrentGroupHandler(c fiber.Ctx) error {
 	if len(sessions) > 0 {
 		groupPinCode = sessions[0].GroupPinCode
 	}
-	return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"is_grouped": isGrouped, "group_pin_code": groupPinCode, "sessions": sessions}})
+	// Normalized the same way every other reader of link_mode is (falls back to
+	// "joint" for anything but the two valid constants) rather than trusting
+	// sessions[0].LinkMode verbatim, so a corrupt/legacy value can't make this
+	// endpoint disagree with what the dispatcher and middleware actually do.
+	linkMode, modeErr := repositories.GetConcurrentGroupMode(sessionID)
+	if modeErr != nil {
+		linkMode = repositories.QueueLinkModeJoint
+	}
+	return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"is_grouped": isGrouped, "group_pin_code": groupPinCode, "link_mode": linkMode, "sessions": sessions}})
 }
 
 // POST /api/courses/:courseId/queue/sessions/:sessionId/group/link
@@ -377,9 +390,16 @@ func LinkConcurrentSessionsHandler(c fiber.Ctx) error {
 	sessionID := c.Params("sessionId")
 	var input struct {
 		PartnerSessionID string `json:"partner_session_id"`
+		Mode             string `json:"mode"`
 	}
 	if err := c.Bind().JSON(&input); err != nil || input.PartnerSessionID == "" {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "partner_session_id is required"})
+	}
+	// Default to "joint" so older frontend builds that don't send `mode` yet
+	// keep today's always-joint behavior unchanged.
+	mode := strings.TrimSpace(input.Mode)
+	if mode == "" {
+		mode = repositories.QueueLinkModeJoint
 	}
 	session, err := repositories.GetQueueSessionByID(sessionID)
 	if err != nil {
@@ -388,10 +408,32 @@ func LinkConcurrentSessionsHandler(c fiber.Ctx) error {
 	if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
 		return err
 	}
-	if err := repositories.LinkConcurrentSessions(sessionID, input.PartnerSessionID); err != nil {
+	if err := repositories.LinkConcurrentSessions(sessionID, input.PartnerSessionID, mode); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
 	return c.JSON(fiber.Map{"success": true, "message": "เชื่อมคิวสำเร็จ"})
+}
+
+// PATCH /api/courses/:courseId/queue/sessions/:sessionId/group/mode
+func UpdateConcurrentGroupModeHandler(c fiber.Ctx) error {
+	sessionID := c.Params("sessionId")
+	var input struct {
+		Mode string `json:"mode"`
+	}
+	if err := c.Bind().JSON(&input); err != nil || strings.TrimSpace(input.Mode) == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "mode is required"})
+	}
+	session, err := repositories.GetQueueSessionByID(sessionID)
+	if err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Session not found"})
+	}
+	if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
+		return err
+	}
+	if err := repositories.SetConcurrentGroupMode(sessionID, strings.TrimSpace(input.Mode)); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
+	}
+	return c.JSON(fiber.Map{"success": true, "message": "เปลี่ยนโหมดการเชื่อมคิวสำเร็จ"})
 }
 
 // DELETE /api/courses/:courseId/queue/sessions/:sessionId/group/unlink

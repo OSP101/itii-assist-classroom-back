@@ -59,7 +59,8 @@ func setupConcurrentGroupTestDB(t *testing.T) (func(), models.QueueSession, mode
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	migrateWithSQLiteTimestamps(t, db, &models.QueueSession{}, &models.QueueWorker{}, &models.QueueBooking{}, &models.QueueDeskStatus{})
+	migrateWithSQLiteTimestamps(t, db, &models.QueueSession{}, &models.QueueWorker{}, &models.QueueBooking{}, &models.QueueDeskStatus{},
+		&models.Course{}, &models.CourseMember{}, &models.CourseInstructor{}, &models.CourseTA{})
 	// AutoMigrate does not create the partial/unique indexes that config.database
 	// installs in production; mirrorWorkerRowTx relies on this one for idempotency.
 	if err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_queue_workers_session_user ON queue_workers (queue_session_id, user_id)`).Error; err != nil {
@@ -84,15 +85,35 @@ func setupConcurrentGroupTestDB(t *testing.T) (func(), models.QueueSession, mode
 	if err := config.DB.Create(&[]models.QueueSession{sessionA, sessionB}).Error; err != nil {
 		t.Fatalf("create sessions: %v", err)
 	}
+	sharedInstructorID := uint(999)
+	courseA := models.Course{ID: "course_a", Code: "COURSE_A", Name: "Course A", Year: 2569, Semester: 1, InstructorID: &sharedInstructorID}
+	courseB := models.Course{ID: "course_b", Code: "COURSE_B", Name: "Course B", Year: 2569, Semester: 1, InstructorID: &sharedInstructorID}
+	if err := config.DB.Create(&[]models.Course{courseA, courseB}).Error; err != nil {
+		t.Fatalf("create courses: %v", err)
+	}
 
 	cleanup := func() {
 		db.Exec("DELETE FROM queue_bookings")
 		db.Exec("DELETE FROM queue_workers")
 		db.Exec("DELETE FROM queue_sessions")
 		db.Exec("DELETE FROM queue_desk_statuses")
+		db.Exec("DELETE FROM courses")
+		db.Exec("DELETE FROM course_members")
+		db.Exec("DELETE FROM course_instructors")
+		db.Exec("DELETE FROM course_tas")
 		config.DB = prevDB
 	}
 	return cleanup, sessionA, sessionB
+}
+
+// addCourseMember seeds a genuine (non-mirrored) course membership row so
+// repositories.UserHasCourseAccess recognizes userID as a real member of
+// courseID - distinct from merely holding a queue_workers row there.
+func addCourseMember(t *testing.T, courseID string, userID uint, role string) {
+	t.Helper()
+	if err := config.DB.Create(&models.CourseMember{CourseID: courseID, UserID: userID, Role: role, Status: "active"}).Error; err != nil {
+		t.Fatalf("create course member: %v", err)
+	}
 }
 
 func createPartnerBooking(t *testing.T, sessionID string, workerUserID uint) models.QueueBooking {

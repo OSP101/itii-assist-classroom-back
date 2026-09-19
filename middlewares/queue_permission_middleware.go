@@ -3,6 +3,7 @@ package middlewares
 import (
 	"errors"
 	"itii-assist/repositories"
+	"strconv"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
@@ -71,6 +72,28 @@ func RequireQueueWorkerOrCoursePermission(sessionParam string, permissionKey str
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to validate queue worker access"})
 		}
 		if !isWorker {
+			return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์ใช้งานฟังก์ชันนี้"})
+		}
+
+		// A "separated" group still mirrors worker rows for visibility, but that
+		// row must never grant *new* cross-course authorization - only a genuine
+		// course-role permission (already checked above) may open a booking a
+		// worker doesn't already hold. The one exception: AssignNextWaitingBookingToWorker
+		// guarantees a booking already assigned to this worker stays completable
+		// even after the group later switches to "separated" (see its comment) -
+		// so finishing a booking that is already theirs must still get through,
+		// or it would be stuck in_progress forever with nobody able to close it.
+		groupMode, modeErr := repositories.GetConcurrentGroupMode(sessionID)
+		if modeErr != nil {
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to validate queue group mode"})
+		}
+		if groupMode == repositories.QueueLinkModeSeparated {
+			if bookingID, parseErr := strconv.ParseUint(strings.TrimSpace(c.Params("bookingId")), 10, 64); parseErr == nil {
+				if booking, bookingErr := repositories.GetBookingByID(uint(bookingID)); bookingErr == nil && booking != nil &&
+					booking.AssignedWorkerID != nil && *booking.AssignedWorkerID == userID {
+					return c.Next()
+				}
+			}
 			return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์ใช้งานฟังก์ชันนี้"})
 		}
 

@@ -28,7 +28,19 @@ const (
 	// is assigned to whoever asks, same as before.
 	queueFairnessLoadMargin  = 2
 	queueFairnessGraceWindow = 20 * time.Second
+
+	// QueueLinkModeJoint (default) lets mirrored TAs in a concurrent group receive
+	// and grade bookings from either linked course.
+	QueueLinkModeJoint = "joint"
+	// QueueLinkModeSeparated still mirrors worker visibility across the group (so
+	// each side can see who is online) but never dispatches a booking, nor grants
+	// authorization, across the course boundary.
+	QueueLinkModeSeparated = "separated"
 )
+
+func isValidQueueLinkMode(mode string) bool {
+	return mode == QueueLinkModeJoint || mode == QueueLinkModeSeparated
+}
 
 // ---------- helpers ----------
 
@@ -173,7 +185,12 @@ func GetConcurrentSessionIDs(sessionID string) ([]string, error) {
 
 // LinkConcurrentSessions links two queue sessions as concurrent (same classroom required).
 // Both sessions must belong to different courses. At most 2 sessions per group.
-func LinkConcurrentSessions(sessionID1, sessionID2 string) error {
+// mode is persisted on both sessions and governs whether cross-course booking
+// dispatch is allowed within the group (see QueueLinkModeJoint/Separated).
+func LinkConcurrentSessions(sessionID1, sessionID2, mode string) error {
+	if !isValidQueueLinkMode(mode) {
+		return fmt.Errorf("โหมดการเชื่อมคิวไม่ถูกต้อง")
+	}
 	if sessionID1 == sessionID2 {
 		return fmt.Errorf("ไม่สามารถเชื่อมคิวกับตัวเอง")
 	}
@@ -201,18 +218,21 @@ func LinkConcurrentSessions(sessionID1, sessionID2 string) error {
 	if c1.InstructorID == nil || c2.InstructorID == nil || *c1.InstructorID != *c2.InstructorID {
 		return fmt.Errorf("สามารถเชื่อมคิวร่วมได้เฉพาะวิชาที่สอนโดยอาจารย์คนเดียวกันเท่านั้น")
 	}
-	// Already linked together — also generate a group PIN if one was never created
+	// Already linked together — re-apply mode (a caller retrying with a
+	// different mode must not silently no-op) and backfill a group PIN if one
+	// was never created.
 	if s1.ConcurrentGroupID != nil && s2.ConcurrentGroupID != nil && *s1.ConcurrentGroupID == *s2.ConcurrentGroupID {
+		updates := map[string]interface{}{"link_mode": mode}
 		if s1.GroupPinCode == nil {
 			groupPIN, err := generateUniqueGroupPIN()
 			if err != nil {
 				return err
 			}
-			return config.DB.Model(&models.QueueSession{}).
-				Where("concurrent_group_id = ?", *s1.ConcurrentGroupID).
-				Update("group_pin_code", groupPIN).Error
+			updates["group_pin_code"] = groupPIN
 		}
-		return nil
+		return config.DB.Model(&models.QueueSession{}).
+			Where("concurrent_group_id = ?", *s1.ConcurrentGroupID).
+			Updates(updates).Error
 	}
 	// Reject if either already belongs to a different group
 	if s1.ConcurrentGroupID != nil {
@@ -235,6 +255,7 @@ func LinkConcurrentSessions(sessionID1, sessionID2 string) error {
 			Updates(map[string]interface{}{
 				"concurrent_group_id": groupID,
 				"group_pin_code":      groupPIN,
+				"link_mode":           mode,
 			}).Error; err != nil {
 			return err
 		}
@@ -332,13 +353,61 @@ func UnlinkConcurrentSession(sessionID string) error {
 		return nil // already not in a group
 	}
 	groupID := *s.ConcurrentGroupID
-	// Clear entire group (max 2 sessions supported)
+	// Clear entire group (max 2 sessions supported). link_mode resets to the
+	// default too - it is meaningless outside a group, and a future re-link
+	// always passes its own mode explicitly rather than inheriting a stale one.
 	return config.DB.Model(&models.QueueSession{}).
 		Where("concurrent_group_id = ?", groupID).
 		Updates(map[string]interface{}{
 			"concurrent_group_id": nil,
 			"group_pin_code":      nil,
+			"link_mode":           QueueLinkModeJoint,
 		}).Error
+}
+
+// SetConcurrentGroupMode changes the dispatch mode of the entire concurrent
+// group sessionID belongs to (both sessions are kept in sync so neither side
+// can observe a different mode than the other). Returns an error if sessionID
+// is not currently in a group.
+func SetConcurrentGroupMode(sessionID, mode string) error {
+	if !isValidQueueLinkMode(mode) {
+		return fmt.Errorf("โหมดการเชื่อมคิวไม่ถูกต้อง")
+	}
+	var s models.QueueSession
+	if err := config.DB.Select("concurrent_group_id").Where("id = ?", sessionID).First(&s).Error; err != nil {
+		return err
+	}
+	if s.ConcurrentGroupID == nil {
+		return fmt.Errorf("session นี้ยังไม่ได้เชื่อมคิวร่วม")
+	}
+	result := config.DB.Model(&models.QueueSession{}).
+		Where("concurrent_group_id = ?", *s.ConcurrentGroupID).
+		Update("link_mode", mode)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		// The group the initial read saw was unlinked by a concurrent
+		// UnlinkConcurrentSession between that read and this write - report it
+		// rather than a false "success" for a mode that was never actually set.
+		return fmt.Errorf("session นี้ยังไม่ได้เชื่อมคิวร่วม")
+	}
+	return nil
+}
+
+// GetConcurrentGroupMode returns the dispatch mode ("joint"/"separated") of the
+// concurrent group sessionID belongs to. Ungrouped sessions, and any row whose
+// link_mode is unexpectedly empty, default to "joint" so behavior predating
+// this feature is preserved exactly.
+func GetConcurrentGroupMode(sessionID string) (string, error) {
+	var s models.QueueSession
+	if err := config.DB.Select("link_mode").Where("id = ?", sessionID).First(&s).Error; err != nil {
+		return "", err
+	}
+	if !isValidQueueLinkMode(s.LinkMode) {
+		return QueueLinkModeJoint, nil
+	}
+	return s.LinkMode, nil
 }
 
 // ---------- QueueSession ----------
@@ -380,6 +449,7 @@ type QueueSessionConcurrentPartner struct {
 	CourseName   string  `json:"course_name"`
 	Status       string  `json:"status"`
 	GroupPinCode *string `json:"group_pin_code,omitempty"`
+	LinkMode     string  `json:"link_mode"`
 }
 
 type QueueSessionListItem struct {
@@ -548,6 +618,7 @@ func GetQueueSessions(courseID string, status string) ([]QueueSessionListItem, e
 		CourseName        string  `gorm:"column:course_name"`
 		Status            string  `gorm:"column:status"`
 		GroupPinCode      *string `gorm:"column:group_pin_code"`
+		LinkMode          string  `gorm:"column:link_mode"`
 	}
 	groupIDsMap := map[string]struct{}{}
 	for _, s := range sessions {
@@ -562,7 +633,7 @@ func GetQueueSessions(courseID string, status string) ([]QueueSessionListItem, e
 		}
 		var partnerRows []partnerRow
 		config.DB.Table("queue_sessions qs").
-			Select("qs.concurrent_group_id, qs.id, qs.title, qs.course_id, c.name AS course_name, qs.status, qs.group_pin_code").
+			Select("qs.concurrent_group_id, qs.id, qs.title, qs.course_id, c.name AS course_name, qs.status, qs.group_pin_code, qs.link_mode").
 			Joins("JOIN courses c ON c.id = qs.course_id").
 			Where("qs.concurrent_group_id IN ? AND qs.id NOT IN ?", groupIDs, sessionIDs).
 			Scan(&partnerRows)
@@ -575,6 +646,7 @@ func GetQueueSessions(courseID string, status string) ([]QueueSessionListItem, e
 				CourseName:   p.CourseName,
 				Status:       p.Status,
 				GroupPinCode: p.GroupPinCode,
+				LinkMode:     p.LinkMode,
 			}
 		}
 	}
@@ -1148,6 +1220,30 @@ func concurrentSessionIDsTx(tx *gorm.DB, sessionID string) ([]string, error) {
 	return ids, nil
 }
 
+// dispatchGroupContextTx loads everything AssignNextWaitingBookingToWorker
+// needs about sessionID's concurrent group in one row read (plus one Pluck
+// when actually grouped): every session id sharing its group (or just
+// [sessionID] if ungrouped), its own link_mode, and its own course_id. It
+// reads through tx so a caller holding row locks sees a consistent group -
+// see concurrentSessionIDsTx, whose group-expansion logic this mirrors.
+func dispatchGroupContextTx(tx *gorm.DB, sessionID string) (groupSessionIDs []string, linkMode string, courseID string, err error) {
+	var s models.QueueSession
+	if err = tx.Select("concurrent_group_id", "link_mode", "course_id").Where("id = ?", sessionID).First(&s).Error; err != nil {
+		return nil, "", "", err
+	}
+	linkMode = s.LinkMode
+	courseID = s.CourseID
+	if s.ConcurrentGroupID == nil || *s.ConcurrentGroupID == "" {
+		return []string{sessionID}, linkMode, courseID, nil
+	}
+	if err = tx.Model(&models.QueueSession{}).
+		Where("concurrent_group_id = ?", *s.ConcurrentGroupID).
+		Pluck("id", &groupSessionIDs).Error; err != nil {
+		return nil, "", "", err
+	}
+	return groupSessionIDs, linkMode, courseID, nil
+}
+
 // insertWorkerRowTx inserts a worker row for targetSessionID, doing nothing if one
 // already exists — the unique index uq_queue_workers_session_user makes it
 // idempotent under concurrency.
@@ -1642,9 +1738,17 @@ func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.
 		}
 
 		// Collect all session IDs in the concurrent group (may be just [sessionID])
-		groupSessionIDs, _ := GetConcurrentSessionIDs(sessionID)
+		// along with this session's own link_mode/course_id in the same row read.
+		groupSessionIDs, groupLinkMode, groupCourseID, err := dispatchGroupContextTx(tx, sessionID)
+		if err != nil {
+			return err
+		}
 
 		// If worker already has an assigned active booking (in any grouped session), return it.
+		// This runs before the separated-mode gate below on purpose: a booking
+		// handed out while the group was "joint" (or dispatched via a different
+		// session id than the one passed in here) must still be found and
+		// completable, regardless of what the group's mode is now.
 		var existing models.QueueBooking
 		existingErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("queue_session_id IN ? AND assigned_worker_id = ? AND status IN ?", groupSessionIDs, workerID, []string{"waiting", "in_progress"}).
@@ -1674,9 +1778,37 @@ func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.
 			return nil
 		}
 
+		// dispatchSessionIDs narrows which sessions a *new* booking may be pulled
+		// from. A "separated" group still shares worker visibility, but a booking
+		// must never be handed to a worker outside its own course. This runs only
+		// once the "already assigned" path above is ruled out, so a pre-existing
+		// cross-course assignment (from before a switch to "separated") is always
+		// found and returned regardless of this gate. Read fresh every call (no
+		// caching) so a mode change takes effect on the very next dispatch.
+		dispatchSessionIDs := groupSessionIDs
+		if len(groupSessionIDs) > 1 && groupLinkMode == QueueLinkModeSeparated {
+			// This function is also the target of the background push sweep
+			// (dispatchWaitingBookingsToAvailableWorkers), which calls it for
+			// every QueueWorker row physically sitting in sessionID - including
+			// a mirrored row that exists purely for cross-group visibility.
+			// Narrowing the *booking pool* to sessionID alone is not enough by
+			// itself: a mirrored-only worker's row lives right there in
+			// sessionID's own worker table, so without this membership check
+			// they would still be handed sessionID's own bookings. Only a
+			// genuine member of this session's course may receive them.
+			hasRealAccess, accessErr := UserHasCourseAccess(groupCourseID, workerID, "instructor", "ta")
+			if accessErr != nil {
+				return accessErr
+			}
+			if !hasRealAccess {
+				return nil
+			}
+			dispatchSessionIDs = []string{sessionID}
+		}
+
 		var waiting models.QueueBooking
 		waitingErr := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
-			Where("queue_session_id IN ? AND status = ? AND assigned_worker_id IS NULL AND booking_type IN ?", groupSessionIDs, "waiting", bookingTypes).
+			Where("queue_session_id IN ? AND status = ? AND assigned_worker_id IS NULL AND booking_type IN ?", dispatchSessionIDs, "waiting", bookingTypes).
 			Where("last_offer_worker_id IS NULL OR last_offer_worker_id <> ? OR last_offer_timed_out_at IS NULL OR last_offer_timed_out_at < ?", workerID, now.Add(-queueOfferReassignGraceWindow)).
 			Order("queue_number ASC, created_at ASC, id ASC").
 			First(&waiting).Error
