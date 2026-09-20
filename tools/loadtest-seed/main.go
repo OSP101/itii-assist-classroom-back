@@ -342,12 +342,17 @@ func createAttendanceSession(client *http.Client, baseURL, token, courseID strin
 	now := time.Now()
 	pin := fmt.Sprintf("%06d", rand.Intn(900000)+100000)
 	body := map[string]any{
-		"course_id":              courseID,
-		"section_ids":            []uint{sectionID},
-		"title":                  "loadtest-" + strconv.FormatInt(now.UnixMilli(), 10),
-		"pin_code":               pin,
-		"auto_rotate_pin":        autoRotate,
-		"session_type":           "lecture",
+		"course_id":       courseID,
+		"section_ids":     []uint{sectionID},
+		"title":           "loadtest-" + strconv.FormatInt(now.UnixMilli(), 10),
+		"pin_code":        pin,
+		"auto_rotate_pin": autoRotate,
+		// "online" exempts the campus network guard (utils/campus_network_guard.go)
+		// entirely: it checks device UA / exact Host / real client IP in the
+		// campus WiFi range, none of which a load-test runner off campus can
+		// satisfy. That guard is a separate concern with its own tests — this
+		// tool measures backend throughput, not the guard's enforcement.
+		"session_type":           "online",
 		"check_location":         false,
 		"radius_meters":          50,
 		"start_time":             now.Add(-5 * time.Minute).Format(time.RFC3339),
