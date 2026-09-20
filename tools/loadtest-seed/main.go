@@ -287,17 +287,30 @@ func searchStudentIDs(client *http.Client, baseURL, token string, codes []string
 		if end > len(codes) {
 			end = len(codes)
 		}
+		// Matches handlers.SearchStudentsByIDsCompatHandler's actual response
+		// shape: data is an object with found/not_found, and each found entry
+		// wraps the student one level deeper under "student" — not a flat
+		// array of {id, student_id} (caught live: the earlier shape assumed
+		// here didn't match the real handler and failed to unmarshal).
 		var resp struct {
-			Data []struct {
-				ID        uint   `json:"id"`
-				StudentID string `json:"student_id"`
+			Data struct {
+				Found []struct {
+					Student struct {
+						ID        uint   `json:"id"`
+						StudentID string `json:"student_id"`
+					} `json:"student"`
+				} `json:"found"`
+				NotFound []string `json:"not_found"`
 			} `json:"data"`
 		}
 		if err := doJSON(client, http.MethodPost, baseURL+"/api/students/search-by-ids", token, map[string]any{"studentIds": codes[start:end]}, &resp); err != nil {
 			return nil, err
 		}
-		for _, s := range resp.Data {
-			idMap[s.StudentID] = s.ID
+		if len(resp.Data.NotFound) > 0 {
+			return nil, fmt.Errorf("search-by-ids: %d student(s) not found, e.g. %s", len(resp.Data.NotFound), resp.Data.NotFound[0])
+		}
+		for _, f := range resp.Data.Found {
+			idMap[f.Student.StudentID] = f.Student.ID
 		}
 	}
 	ids := make([]uint, 0, len(codes))
