@@ -20,9 +20,11 @@ import (
 // silent, and shows up only as a user staring at a value they just changed.
 
 const (
-	cacheKeyCourseOverview = "cache:course:overview:"
-	cacheKeyClassroomList  = "cache:classroom:list:"
-	cacheKeyMyCourses      = "cache:mycourses:"
+	cacheKeyCourseOverview         = "cache:course:overview:"
+	cacheKeyClassroomList          = "cache:classroom:list:"
+	cacheKeyMyCourses              = "cache:mycourses:"
+	cacheKeyAttendanceCourseBasic  = "cache:attendance:course-basic:"
+	cacheKeyAttendanceSectionBasic = "cache:attendance:section-basic:"
 )
 
 // TTLs are the backstop, not the primary correctness mechanism — writes
@@ -39,6 +41,16 @@ func classroomListTTL() time.Duration {
 
 func myCoursesTTL() time.Duration {
 	return cacheTTLFromEnv("CACHE_MY_COURSES_SECONDS", 30)
+}
+
+// attendanceCourseSectionBasicTTL backs the tiny course/section labels shown
+// on the public check-in info screen (plan.md ระยะ 1.1). Deliberately no
+// explicit invalidation: a course/section rename reaching a live check-in
+// page within 5 minutes is a harmless cosmetic delay, and skipping
+// invalidation avoids wiring this into every course/section edit path for a
+// case that essentially never happens mid-session.
+func attendanceCourseSectionBasicTTL() time.Duration {
+	return cacheTTLFromEnv("CACHE_ATTENDANCE_COURSE_SECTION_SECONDS", 300)
 }
 
 // cacheTTLFromEnv reads a TTL override. A value of 0 disables that cache
@@ -60,6 +72,14 @@ func cacheTTLFromEnv(name string, defaultSeconds int) time.Duration {
 
 func courseOverviewCacheKey(courseID string) string {
 	return cacheKeyCourseOverview + courseID
+}
+
+func attendanceCourseBasicCacheKey(courseID string) string {
+	return cacheKeyAttendanceCourseBasic + courseID
+}
+
+func attendanceSectionBasicCacheKey(sectionID uint) string {
+	return cacheKeyAttendanceSectionBasic + strconv.FormatUint(uint64(sectionID), 10)
 }
 
 // classroomListCacheKey hashes the parameter set rather than concatenating it.

@@ -14,11 +14,16 @@ func SetupAttendanceRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	// Public check-in endpoints (no auth). NoStore keeps these per-session,
 	// identity-bearing responses out of every intermediary cache (browser, KKU
 	// edge, Cloudflare), closing the cache-poisoning surface.
-	app.Get("/api/attendance/check-in/:sessionId/info", middlewares.NoStore(), handlers.GetSessionInfoHandler)
+	// AttendanceInfoRateLimit/AttendancePinLookupRateLimit/
+	// AttendanceVerifyStudentRateLimit are defense-in-depth behind nginx's own
+	// zones (nginx.conf.template api_ip/pin_ip) — see their doc comments in
+	// middlewares/attendance_guard_middleware.go (plan.md ระยะ 2.2). These
+	// three routes had no app-level limiter at all before.
+	app.Get("/api/attendance/check-in/:sessionId/info", middlewares.NoStore(), middlewares.AttendanceInfoRateLimit(), handlers.GetSessionInfoHandler)
 	app.Post("/api/attendance/check-in/:sessionId", middlewares.NoStore(), middlewares.OptionalProtected(), middlewares.AttendanceCheckInGuard(), middlewares.AttendanceNetworkGuard(), handlers.StudentCheckInHandler)
 	app.Post("/api/attendance/check-in", middlewares.NoStore(), middlewares.OptionalProtected(), middlewares.AttendanceCheckInGuard(), middlewares.AttendanceNetworkGuard(), handlers.StudentCheckInByPINHandler)
-	app.Post("/api/attendance/verify-pin", middlewares.NoStore(), handlers.VerifyAttendancePINHandler)
-	app.Post("/api/attendance/verify-student", middlewares.NoStore(), middlewares.OptionalProtected(), handlers.VerifyStudentHandler)
+	app.Post("/api/attendance/verify-pin", middlewares.NoStore(), middlewares.AttendancePinLookupRateLimit(), handlers.VerifyAttendancePINHandler)
+	app.Post("/api/attendance/verify-student", middlewares.NoStore(), middlewares.OptionalProtected(), middlewares.AttendanceVerifyStudentRateLimit(), handlers.VerifyStudentHandler)
 	app.Post("/api/attendance/display/bootstrap", handlers.BootstrapAttendanceDisplayHandler)
 	app.Post("/api/attendance/display/confirm", handlers.ConfirmAttendanceDisplayHandler)
 	app.Get("/api/attendance/display/pairing-status", handlers.GetAttendanceDisplayPairingStatusHandler)

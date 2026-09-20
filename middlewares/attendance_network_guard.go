@@ -18,6 +18,11 @@ import (
 	"gorm.io/gorm"
 )
 
+// AttendanceGuardResolvedSessionIDLocal is the fiber.Ctx Locals key
+// AttendanceNetworkGuard stores its resolved session id under (see the
+// c.Locals call in AttendanceNetworkGuard below).
+const AttendanceGuardResolvedSessionIDLocal = "attendance_guard_resolved_session_id"
+
 // logCheckInGuardEvent records a guard rejection (network-blocked or
 // rate-limited) to SystemLog from middleware context, so blocked attempts are
 // as visible as successful ones. Student identity is only known here when the
@@ -109,6 +114,17 @@ func AttendanceNetworkGuard() fiber.Handler {
 		if !found {
 			return c.Next()
 		}
+
+		// Stash the session id this guard already resolved (from the PIN body
+		// on the PIN-only route; from the path param on the :sessionId route)
+		// so StudentCheckInByPINHandler doesn't repeat the exact same
+		// LookupAttendanceSessionIDByPIN call a second time just to learn what
+		// this middleware already knows. This is purely a cache of "which
+		// session did this PIN resolve to a moment ago" — it changes nothing
+		// about authorization: repositories.StudentCheckIn still re-resolves
+		// and re-validates the PIN itself, right before the DB write, as the
+		// sole authoritative check (plan.md ระยะ 1.2).
+		c.Locals(AttendanceGuardResolvedSessionIDLocal, sessionID)
 
 		result := utils.EvaluateCampusCheckIn(
 			c.Get(fiber.HeaderHost),

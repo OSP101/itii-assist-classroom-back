@@ -153,6 +153,22 @@ func attendanceCheckInIdempotencyKey(sessionID uint, studentID uint, clientReque
 	return fmt.Sprintf("attendance:checkin:%d:%d:%s", sessionID, studentID, attendancePinHash(clientRequestID))
 }
 
+// attendanceCheckInCachePayload is the idempotency cache's Redis wire format.
+// It embeds AttendanceCheckInResult for every field except Record: the
+// embedded type tags Record `json:"-"` because AttendanceCheckInResult also
+// doubles as StudentCheckInByPINHandler's directly-serialized public API
+// response ("data": result), which must never expose the full
+// attendance_records row (internal fields like UpdatedBy/StatusSource).
+// Shadowing just Record here lets the cache entry — never sent to a client —
+// round-trip it through Redis. Without this, a retried check-in that hits
+// the idempotency cache always got Record == nil back, silently forcing
+// emitAttendanceCheckedInRealtime's fallback SELECT on exactly the
+// retry-storm traffic ระยะ 1.3 was written to spare (found in code review).
+type attendanceCheckInCachePayload struct {
+	AttendanceCheckInResult
+	Record *models.AttendanceRecord `json:"record,omitempty"`
+}
+
 func getAttendanceCheckInCachedResult(ctx context.Context, sessionID uint, studentID uint, clientRequestID string) (*AttendanceCheckInResult, error) {
 	if !attendanceCheckInIdempotencyEnabled() || !attendanceRedisAvailable() {
 		return nil, nil
@@ -179,11 +195,13 @@ func getAttendanceCheckInCachedResult(ctx context.Context, sessionID uint, stude
 	}
 	attendanceRedisBreaker.RecordSuccess()
 
-	var cached AttendanceCheckInResult
+	var cached attendanceCheckInCachePayload
 	if err := json.Unmarshal([]byte(raw), &cached); err != nil {
 		return nil, nil
 	}
-	return &cached, nil
+	result := cached.AttendanceCheckInResult
+	result.Record = cached.Record
+	return &result, nil
 }
 
 // setAttendanceCheckInCachedResultAsync writes the idempotency cache entry in
@@ -202,7 +220,7 @@ func setAttendanceCheckInCachedResultAsync(sessionID uint, studentID uint, clien
 		return
 	}
 
-	payload, err := json.Marshal(result)
+	payload, err := json.Marshal(attendanceCheckInCachePayload{AttendanceCheckInResult: *result, Record: result.Record})
 	if err != nil {
 		return
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"itii-assist/config"
+	"itii-assist/middlewares"
 	"itii-assist/models"
 	"itii-assist/observability"
 	"itii-assist/realtime"
@@ -124,6 +125,31 @@ func normalizeGoogleBool(value string) bool {
 	return normalized == "true" || normalized == "1" || normalized == "yes"
 }
 
+// googleTokenInfoClient is a package-level client with a tuned transport so
+// bursts of anonymous check-ins (each verifying a Google ID token) reuse
+// keep-alive connections to the tokeninfo endpoint instead of paying a fresh
+// TLS handshake per request under load. http.DefaultClient's default
+// transport caps MaxIdleConnsPerHost at 2, which serializes outbound calls
+// under concurrency.
+var googleTokenInfoClient = &http.Client{
+	Timeout: 4 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        128,
+		MaxIdleConnsPerHost: 64,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
+// googleTokenInfoEndpoint returns the tokeninfo base URL, overridable via
+// GOOGLE_TOKENINFO_URL for load testing against tools/tokeninfo-stub instead
+// of the real Google endpoint (see scripts/loadtest/README_TH.md).
+func googleTokenInfoEndpoint() string {
+	if override := strings.TrimSpace(os.Getenv("GOOGLE_TOKENINFO_URL")); override != "" {
+		return override
+	}
+	return "https://oauth2.googleapis.com/tokeninfo"
+}
+
 func verifyGoogleIDToken(ctx context.Context, idToken string) (*googleTokenInfo, error) {
 	token := strings.TrimSpace(idToken)
 	if token == "" {
@@ -135,13 +161,13 @@ func verifyGoogleIDToken(ctx context.Context, idToken string) (*googleTokenInfo,
 		return nil, errors.New("google client id is not configured")
 	}
 
-	endpoint := "https://oauth2.googleapis.com/tokeninfo?id_token=" + url.QueryEscape(token)
+	endpoint := googleTokenInfoEndpoint() + "?id_token=" + url.QueryEscape(token)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := googleTokenInfoClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -581,6 +607,50 @@ func VerifyAttendancePINHandler(c fiber.Ctx) error {
 	})
 }
 
+// emitAttendanceCheckedInRealtime pushes a "student-checked-in" event to both
+// the instructor live view and the projector display after a successful
+// check-in. Shared by StudentCheckInHandler and StudentCheckInByPINHandler —
+// the PIN-only route used to skip this entirely, so the instructor's live
+// roster never updated for check-ins made that way (plan.md ระยะ 1.2). Keeping
+// one implementation also guarantees both routes broadcast an identical
+// payload shape.
+func emitAttendanceCheckedInRealtime(sessionID uint, studentID uint, student models.Student, result *repositories.AttendanceCheckInResult) {
+	recordPayload := fiber.Map{
+		"attendance_session_id": sessionID,
+		"student_id":            studentID,
+		"check_in_time":         result.CheckInTime,
+		"status":                result.Status,
+		"location_verified":     result.LocationVerified,
+		"distance_meters":       result.DistanceMeters,
+		"student":               fiber.Map{"id": student.ID, "student_id": student.StudentID, "full_name": student.FullName, "email": student.Email},
+	}
+	// result.Record is the row StudentCheckIn already wrote, mirrored
+	// in-memory — no extra SELECT needed (plan.md ระยะ 1.3). Fall back to a
+	// SELECT only if some caller ever passes a result without it, so this
+	// helper stays safe to reuse even if that invariant is broken later.
+	checkedInRecord := result.Record
+	if checkedInRecord == nil {
+		checkedInRecord = &models.AttendanceRecord{}
+		if err := config.DB.Where("attendance_session_id = ? AND student_id = ?", sessionID, studentID).First(checkedInRecord).Error; err != nil {
+			checkedInRecord = nil
+		}
+	}
+	if checkedInRecord != nil {
+		recordPayload["id"] = checkedInRecord.ID
+		recordPayload["pin_verified"] = checkedInRecord.PinVerified
+		recordPayload["google_email"] = nullableAttendanceString(checkedInRecord.GoogleEmail)
+		recordPayload["google_id"] = nullableAttendanceString(checkedInRecord.GoogleID)
+		recordPayload["location_lat"] = nullableAttendanceFloatString(checkedInRecord.LocationLat)
+		recordPayload["location_lng"] = nullableAttendanceFloatString(checkedInRecord.LocationLng)
+		recordPayload["note"] = nullableAttendanceString(checkedInRecord.Note)
+		recordPayload["updated_by"] = checkedInRecord.UpdatedBy
+		recordPayload["created_at"] = checkedInRecord.CreatedAt
+		recordPayload["updated_at"] = checkedInRecord.UpdatedAt
+	}
+	realtime.EmitToInstructor(sessionID, "student-checked-in", fiber.Map{"record": recordPayload})
+	realtime.EmitToAttendanceDisplay(sessionID, "student-checked-in", fiber.Map{"record": recordPayload})
+}
+
 // POST /api/attendance/check-in/:sessionId  (public)
 func StudentCheckInHandler(c fiber.Ctx) error {
 	idStr := c.Params("sessionId")
@@ -707,30 +777,7 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 		message = "เช็กชื่อสำเร็จ: มาสาย"
 	}
 
-	recordPayload := fiber.Map{
-		"attendance_session_id": id,
-		"student_id":            studentID,
-		"check_in_time":         result.CheckInTime,
-		"status":                result.Status,
-		"location_verified":     result.LocationVerified,
-		"distance_meters":       result.DistanceMeters,
-		"student":               fiber.Map{"id": student.ID, "student_id": student.StudentID, "full_name": student.FullName, "email": student.Email},
-	}
-	var checkedInRecord models.AttendanceRecord
-	if err := config.DB.Where("attendance_session_id = ? AND student_id = ?", uint(id), studentID).First(&checkedInRecord).Error; err == nil {
-		recordPayload["id"] = checkedInRecord.ID
-		recordPayload["pin_verified"] = checkedInRecord.PinVerified
-		recordPayload["google_email"] = nullableAttendanceString(checkedInRecord.GoogleEmail)
-		recordPayload["google_id"] = nullableAttendanceString(checkedInRecord.GoogleID)
-		recordPayload["location_lat"] = nullableAttendanceFloatString(checkedInRecord.LocationLat)
-		recordPayload["location_lng"] = nullableAttendanceFloatString(checkedInRecord.LocationLng)
-		recordPayload["note"] = nullableAttendanceString(checkedInRecord.Note)
-		recordPayload["updated_by"] = checkedInRecord.UpdatedBy
-		recordPayload["created_at"] = checkedInRecord.CreatedAt
-		recordPayload["updated_at"] = checkedInRecord.UpdatedAt
-	}
-	realtime.EmitToInstructor(id, "student-checked-in", fiber.Map{"record": recordPayload})
-	realtime.EmitToAttendanceDisplay(id, "student-checked-in", fiber.Map{"record": recordPayload})
+	emitAttendanceCheckedInRealtime(uint(id), studentID, student, result)
 
 	return c.JSON(fiber.Map{
 		"success": true,
@@ -1502,24 +1549,35 @@ func StudentCheckInByPINHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "pin_code is required"})
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	sessionID, err := repositories.LookupAttendanceSessionIDByPIN(ctx, input.PinCode)
-	if err != nil {
-		return c.Status(repositories.ErrAttendanceInvalidPINPublic.HTTPStatus).JSON(fiber.Map{
-			"success": false,
-			"code":    repositories.ErrAttendanceInvalidPINPublic.Code,
-			"title":   repositories.ErrAttendanceInvalidPINPublic.Title,
-			"message": repositories.ErrAttendanceInvalidPINPublic.Message,
-		})
+	// AttendanceNetworkGuard, which already ran, resolves this exact PIN to a
+	// session id for its own campus/device check and stashes it — reuse that
+	// instead of repeating the same LookupAttendanceSessionIDByPIN call. This
+	// is only a hint for routing this request; repositories.StudentCheckIn
+	// still independently re-resolves and re-validates the PIN as the
+	// authoritative check right before the DB write (plan.md ระยะ 1.2).
+	var sessionID uint
+	if cached, ok := c.Locals(middlewares.AttendanceGuardResolvedSessionIDLocal).(uint); ok && cached > 0 {
+		sessionID = cached
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		lookedUp, err := repositories.LookupAttendanceSessionIDByPIN(ctx, input.PinCode)
+		cancel()
+		if err != nil {
+			return c.Status(repositories.ErrAttendanceInvalidPINPublic.HTTPStatus).JSON(fiber.Map{
+				"success": false,
+				"code":    repositories.ErrAttendanceInvalidPINPublic.Code,
+				"title":   repositories.ErrAttendanceInvalidPINPublic.Title,
+				"message": repositories.ErrAttendanceInvalidPINPublic.Message,
+			})
+		}
+		sessionID = lookedUp
 	}
 
 	verifiedEmail := ""
 	verifiedGoogleID := ""
 	var student models.Student
 	if authStudentID := authenticatedStudentIDFromContext(c); authStudentID > 0 {
-		if err := config.DB.Select("id", "email").Where("id = ?", authStudentID).First(&student).Error; err != nil {
+		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("id = ?", authStudentID).First(&student).Error; err != nil {
 			return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
 				"success": false,
 				"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
@@ -1548,7 +1606,7 @@ func StudentCheckInByPINHandler(c fiber.Ctx) error {
 			return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
 		}
 
-		if err := config.DB.Select("id", "email").Where("LOWER(email) = LOWER(?)", verifiedEmail).First(&student).Error; err != nil {
+		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?)", verifiedEmail).First(&student).Error; err != nil {
 			return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
 				"success": false,
 				"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
@@ -1590,6 +1648,8 @@ func StudentCheckInByPINHandler(c fiber.Ctx) error {
 		StatusCode:    200,
 		ClientSignals: input.ClientSignals,
 	})
+
+	emitAttendanceCheckedInRealtime(sessionID, student.ID, student, result)
 
 	return c.JSON(fiber.Map{"success": true, "data": result})
 }

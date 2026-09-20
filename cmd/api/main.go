@@ -4,8 +4,11 @@ import (
 	"context"
 	"log"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	// เปลี่ยน "itii-assist" เป็นชื่อโมดูลของคุณในไฟล์ go.mod หากคุณตั้งชื่ออื่น
@@ -27,6 +30,31 @@ import (
 )
 
 func main() {
+	// Graceful shutdown (caught in review): every leader-election-gated
+	// worker below is a `for range ticker.C` loop whose `defer leader.Stop()`
+	// was only reachable by the goroutine returning — and with no signal
+	// handling anywhere, SIGTERM (what `docker compose stop` sends during a
+	// routine blue/green cutover) killed the process without ever running
+	// it. That left the old slot's Redis leader keys alive until their full
+	// leaderTTL expired, so every deploy left periodic workers (PIN
+	// rotation, queue sweeps, ...) with no active leader for up to 15s
+	// instead of the near-immediate handoff plan.md ระยะ 4.1 relies on.
+	// shutdownCtx is threaded into every worker's select loop below so
+	// SIGTERM makes them return (and release their lock) promptly instead
+	// of being killed mid-lease; shutdownWG lets main() wait for that to
+	// actually finish before the process exits.
+	shutdownCtx, cancelShutdown := context.WithCancel(context.Background())
+	defer cancelShutdown()
+	var shutdownWG sync.WaitGroup
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		log.Printf("🛑 Received %s, shutting down gracefully (releasing leader locks)...", sig)
+		cancelShutdown()
+	}()
+
 	// 1. โหลดไฟล์ .env
 	err := godotenv.Load()
 	if err != nil {
@@ -133,13 +161,30 @@ func main() {
 	// Must run before the lifecycle worker starts, so the worker's first tick
 	// already sees a clean working set instead of every session ever stuck.
 	config.MigrateCloseStaleAttendanceSessions()
+	// One-time cleanup of legacy duplicate attendance_records rows that
+	// predate idx_attendance_session_student — gated by a completion marker
+	// so it actually runs once, not on every boot (caught in review: an
+	// earlier version of this comment said "safe to redo every boot," which
+	// stopped being true once the marker was added). See
+	// DedupeAllAttendanceRecordsWithDB's own comment for the full reasoning.
+	if cleaned, err := repositories.DedupeAllAttendanceRecordsWithDB(config.DB); err != nil {
+		log.Printf("⚠️  Failed to deduplicate legacy attendance records: %v", err)
+	} else if cleaned > 0 {
+		log.Printf("🧹 Deduplicated attendance_records for %d session/student pair(s)", cleaned)
+	}
 
 	// Last step of the DB setup: every migration above has run its DDL as a
 	// plain statement, so from here on the request path can use the prepared
 	// statement cache.
 	config.EnablePreparedStatements()
 
-	startAttendancePinLifecycleWorker()
+	// Cross-replica realtime fan-out (plan.md ระยะ 4.1) — a no-op single-
+	// instance-only log line if Redis isn't configured. Started before the
+	// workers below so their first broadcasts (if this replica happens to
+	// win early leadership) already reach other replicas' clients.
+	realtime.StartRedisBus()
+
+	startAttendancePinLifecycleWorker(shutdownCtx, &shutdownWG)
 
 	// Web Push (webpush-go, VAPID) needs VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY set
 	// or every push subscription attempt fails silently (503 on the frontend's
@@ -245,45 +290,111 @@ func main() {
 
 	log.Println("🚀 Starting server on port 8000...")
 	// Background job: cleanup expired student removal archive records daily
+	shutdownWG.Add(1)
 	go func() {
+		defer shutdownWG.Done()
+		leader := config.StartLeaderElection("cleanup-expired-removals", leaderTTL)
+		defer leader.Stop()
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
-		for range ticker.C {
-			deleted, err := repositories.CleanupExpiredRemovals()
-			if err != nil {
-				log.Printf("⚠️  Cleanup expired removals error: %v", err)
-			} else if deleted > 0 {
-				log.Printf("🧹 Cleaned up %d expired student removal record(s)", deleted)
+		for {
+			select {
+			case <-shutdownCtx.Done():
+				return
+			case <-ticker.C:
+				if !leader.IsLeader() {
+					continue
+				}
+				deleted, err := repositories.CleanupExpiredRemovals()
+				if err != nil {
+					log.Printf("⚠️  Cleanup expired removals error: %v", err)
+				} else if deleted > 0 {
+					log.Printf("🧹 Cleaned up %d expired student removal record(s)", deleted)
+				}
 			}
 		}
 	}()
 	// Background job: เตือนผู้สอนวันละครั้งเมื่อมีคำขอลาค้างเกิน 3 วัน
+	shutdownWG.Add(1)
 	go func() {
+		defer shutdownWG.Done()
+		leader := config.StartLeaderElection("leave-request-pending-reminder", leaderTTL)
+		defer leader.Stop()
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
-		for range ticker.C {
-			handlers.RunLeaveRequestPendingReminder(72 * time.Hour)
+		for {
+			select {
+			case <-shutdownCtx.Done():
+				return
+			case <-ticker.C:
+				if !leader.IsLeader() {
+					continue
+				}
+				handlers.RunLeaveRequestPendingReminder(72 * time.Hour)
+			}
 		}
 	}()
 	// Background job: ปิดคำขอลาที่ค้าง "รอพิจารณา" เกินนโยบายของวิชาอัตโนมัติวันละครั้ง (กันค้างตลอดไปถ้าผู้สอนเพิกเฉย)
+	shutdownWG.Add(1)
 	go func() {
+		defer shutdownWG.Done()
+		leader := config.StartLeaderElection("leave-request-auto-expire", leaderTTL)
+		defer leader.Stop()
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
-		for range ticker.C {
-			handlers.RunLeaveRequestAutoExpire()
+		for {
+			select {
+			case <-shutdownCtx.Done():
+				return
+			case <-ticker.C:
+				if !leader.IsLeader() {
+					continue
+				}
+				handlers.RunLeaveRequestAutoExpire()
+			}
 		}
 	}()
-	startLogRetentionWorker()
+	startLogRetentionWorker(shutdownCtx, &shutdownWG)
 	// Was written but never started: the function existed, R2 and
 	// BACKUP_DAILY_HOUR/MINUTE were configured in .env, and nothing ever called
 	// it — so the scheduled backup had never run once. Manual backups from the
 	// admin screen were unaffected, which is why it went unnoticed.
-	services.StartDailyDatabaseBackupWorker()
-	startQueueMidnightWorker()
-	startQueuePausedSessionLeaseWorker()
-	startQueueOfferTimeoutWorker()
-	log.Fatal(app.Listen(":8000"))
+	services.StartDailyDatabaseBackupWorker(shutdownCtx, &shutdownWG)
+	startQueueMidnightWorker(shutdownCtx, &shutdownWG)
+	startQueuePausedSessionLeaseWorker(shutdownCtx, &shutdownWG)
+	startQueueOfferTimeoutWorker(shutdownCtx, &shutdownWG)
+
+	// GracefulContext makes Fiber's own Listen loop stop accepting new
+	// connections and drain in-flight ones as soon as shutdownCtx is
+	// canceled (SIGTERM/SIGINT above), instead of the process being killed
+	// out from under it. Per fasthttp's own ShutdownWithContext contract, a
+	// CLEAN drain always makes Listen return nil — so any non-nil err here
+	// is abnormal by construction, whether or not a shutdown signal had
+	// already been received (caught in review: checking shutdownCtx.Err()
+	// to decide fatal-vs-not conflated "was shutdown requested" with "did
+	// Listen actually drain cleanly," which let a genuine error racing a
+	// shutdown signal get silently logged as "Graceful shutdown complete").
+	// So any error at all here means: cancel shutdownCtx ourselves (a
+	// bind failure never got one; a harmless no-op if a signal already did),
+	// wait for every worker to release its lock, and exit non-zero so a
+	// process supervisor notices and can restart — matching what the old
+	// log.Fatal(app.Listen(":8000")) did for every Listen failure.
+	if err := app.Listen(":8000", fiber.ListenConfig{GracefulContext: shutdownCtx}); err != nil {
+		cancelShutdown()
+		shutdownWG.Wait()
+		log.Fatalf("❌ Server stopped abnormally: %v", err)
+	}
+	shutdownWG.Wait()
+	log.Println("✅ Graceful shutdown complete")
 }
+
+// leaderTTL is the lease length every StartLeaderElection call in this file
+// uses (plan.md ระยะ 4.1). One shared value rather than per-worker tuning:
+// the renewal loop runs independently of each worker's own tick cadence (at
+// leaderTTL/3, regardless of whether that worker ticks every 5s or once a
+// day), so the only thing this controls is failover latency if an instance
+// dies — how long another replica waits before it can safely take over.
+const leaderTTL = 15 * time.Second
 
 // attendancePinTickInterval is how often the PIN lifecycle worker sweeps.
 //
@@ -309,14 +420,32 @@ func attendancePinTickInterval() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-func startAttendancePinLifecycleWorker() {
+func startAttendancePinLifecycleWorker(ctx context.Context, wg *sync.WaitGroup) {
 	interval := attendancePinTickInterval()
 	log.Printf("⏱️  Attendance PIN lifecycle worker interval: %s", interval)
 	ticker := time.NewTicker(interval)
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+		leader := config.StartLeaderElection("attendance-pin-lifecycle", leaderTTL)
+		defer leader.Stop()
 		defer ticker.Stop()
-		for range ticker.C {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			// Gated: N replicas each rotating the same session's PIN and
+			// broadcasting their own "new PIN" event every tick would have
+			// students and the projector disagreeing about which PIN is
+			// current (plan.md ระยะ 4.1). reconcileAttendanceRuntimeMode's
+			// own DB condition (pin_rotates_at <= now()) is the second,
+			// independent safety net if leadership ever briefly overlaps.
+			if !leader.IsLeader() {
+				continue
+			}
 			now := time.Now()
 			changes := make([]repositories.AttendancePinStateChange, 0, 4)
 
@@ -389,7 +518,7 @@ func startAttendancePinLifecycleWorker() {
 //
 // Safety: only 'waiting' bookings are cancelled. Bookings that are already
 // 'in_progress' are left untouched so TAs can finish grading naturally.
-func startQueueMidnightWorker() {
+func startQueueMidnightWorker(ctx context.Context, wg *sync.WaitGroup) {
 	loc, err := time.LoadLocation("Asia/Bangkok")
 	if err != nil {
 		log.Printf("⚠️  startQueueMidnightWorker: cannot load Asia/Bangkok, falling back to UTC: %v", err)
@@ -419,19 +548,33 @@ func startQueueMidnightWorker() {
 		}
 	}
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+		leader := config.StartLeaderElection("queue-midnight", leaderTTL)
+		defer leader.Stop()
+
 		// Run once at startup
-		runCleanup()
+		if leader.IsLeader() {
+			runCleanup()
+		}
 
 		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
 
 		lastDate := time.Now().In(loc).YearDay()
-		for range ticker.C {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
 			today := time.Now().In(loc).YearDay()
 			if today != lastDate {
 				lastDate = today
-				runCleanup()
+				if leader.IsLeader() {
+					runCleanup()
+				}
 			}
 		}
 	}()
@@ -447,7 +590,7 @@ func startQueueMidnightWorker() {
 //
 // The sweep also re-dispatches sessions holding an unassigned waiting booking,
 // which covers the tasks released by a decline or by a TA closing intake.
-func startQueueOfferTimeoutWorker() {
+func startQueueOfferTimeoutWorker(ctx context.Context, wg *sync.WaitGroup) {
 	const queueOfferSweepInterval = 10 * time.Second
 
 	runSweep := func() {
@@ -472,17 +615,29 @@ func startQueueOfferTimeoutWorker() {
 		}
 	}
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+		leader := config.StartLeaderElection("queue-offer-timeout", leaderTTL)
+		defer leader.Stop()
 		ticker := time.NewTicker(queueOfferSweepInterval)
 		defer ticker.Stop()
 
-		for range ticker.C {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if !leader.IsLeader() {
+				continue
+			}
 			runSweep()
 		}
 	}()
 }
 
-func startQueuePausedSessionLeaseWorker() {
+func startQueuePausedSessionLeaseWorker(ctx context.Context, wg *sync.WaitGroup) {
 	const (
 		queuePausedLeaseTimeout = 2 * time.Minute
 		queuePausedLeaseCheck   = 30 * time.Second
@@ -511,13 +666,28 @@ func startQueuePausedSessionLeaseWorker() {
 		}
 	}
 
+	wg.Add(1)
 	go func() {
-		runCleanup()
+		defer wg.Done()
+		leader := config.StartLeaderElection("queue-paused-lease", leaderTTL)
+		defer leader.Stop()
+
+		if leader.IsLeader() {
+			runCleanup()
+		}
 
 		ticker := time.NewTicker(queuePausedLeaseCheck)
 		defer ticker.Stop()
 
-		for range ticker.C {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if !leader.IsLeader() {
+				continue
+			}
 			runCleanup()
 		}
 	}()
@@ -536,7 +706,7 @@ const retentionStartupDelay = 5 * time.Minute
 // worst possible time for it. Batching inside PurgeExpiredLogs caps how much
 // any single run can delete, so a large backlog drains over several days
 // instead of in one long stall.
-func startLogRetentionWorker() {
+func startLogRetentionWorker(ctx context.Context, wg *sync.WaitGroup) {
 	runPurge := func() {
 		for _, result := range repositories.PurgeExpiredLogs() {
 			if result.Deleted == 0 {
@@ -550,13 +720,32 @@ func startLogRetentionWorker() {
 		}
 	}
 
+	wg.Add(1)
 	go func() {
-		time.Sleep(retentionStartupDelay)
-		runPurge()
+		defer wg.Done()
+		leader := config.StartLeaderElection("log-retention", leaderTTL)
+		defer leader.Stop()
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retentionStartupDelay):
+		}
+		if leader.IsLeader() {
+			runPurge()
+		}
 
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
-		for range ticker.C {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if !leader.IsLeader() {
+				continue
+			}
 			runPurge()
 		}
 	}()

@@ -71,10 +71,15 @@ func AttendanceCheckInGuard() fiber.Handler {
 		}
 
 		// Session-wide backstop: catches a script that rotates its identity to
-		// dodge the per-principal limit above.
+		// dodge the per-principal limit above. Shares allowAttendanceCheckIn's
+		// Redis-first-then-memory-fallback path (plan.md ระยะ 2.2) — this used
+		// to always use the in-memory sessionAttendanceLimiter regardless of
+		// backend, which meant the "whole class checking in at once" backstop
+		// reset independently per process the instant there was more than one,
+		// silently multiplying the effective limit.
 		if sessionEnabled {
 			sessionKey := "sess:" + attendanceSessionScope(c)
-			sessionRetryAfter, sessionAllowed := sessionAttendanceLimiter.Allow(sessionKey, sessionConfig)
+			sessionRetryAfter, sessionAllowed := allowAttendanceSessionCheckIn(sessionKey, sessionConfig, backend)
 			if !sessionAllowed {
 				return rejectAttendanceRateLimited(c, sessionRetryAfter)
 			}
@@ -82,6 +87,74 @@ func AttendanceCheckInGuard() fiber.Handler {
 
 		return c.Next()
 	}
+}
+
+// attendancePrincipalKey is the "who" half of a rate-limit key, shared by
+// every attendance limiter in this file: the authenticated student id
+// (services.StudentIDFromContext, set only after OptionalProtected verifies
+// a real JWT) if present, else the caller's IP — never anything the request
+// body claims. See attendanceClientKey's comment for why.
+func attendancePrincipalKey(c fiber.Ctx) string {
+	if studentID := services.StudentIDFromContext(c); studentID > 0 {
+		return "student:" + strconv.FormatUint(uint64(studentID), 10)
+	}
+	return "ip:" + strings.TrimSpace(c.IP())
+}
+
+// AttendanceInfoRateLimit / AttendancePinLookupRateLimit /
+// AttendanceVerifyStudentRateLimit are lighter defense-in-depth limits for
+// the public attendance endpoints AttendanceCheckInGuard doesn't cover
+// (plan.md ระยะ 2.2). nginx's own zones (nginx.conf.template: api_ip,
+// pin_ip) are the primary defense for these; this only matters when a
+// request reaches the backend without going through nginx, or once Redis
+// makes the limit shared across more than one backend process.
+//
+// Three separate functions rather than one parameterized by "include session
+// scope or not": AttendancePinLookupRateLimit specifically must NOT key on
+// the PIN itself (attendanceSessionScope falls back to hashing pin_code from
+// the body when no :sessionId route param exists, which is exactly this
+// route) — a brute-forcer sending a different guess every request would get
+// a fresh bucket every time and the limit would never engage, the same class
+// of evasion attendanceClientKey's rewrite above just closed for a different
+// field. Keeping that route's guard deliberately principal-only avoids
+// reintroducing the same bug by accident via a shared helper.
+func attendancePublicGuard(limit int, windowSeconds int, keyFn func(c fiber.Ctx) string) fiber.Handler {
+	enabled := attendanceRateLimitEnabled()
+	backend := loadAttendanceRateLimitBackend()
+	cfg := attendanceRateLimitConfig{Limit: limit, Window: time.Duration(windowSeconds) * time.Second}
+
+	return func(c fiber.Ctx) error {
+		if c.Method() == fiber.MethodOptions {
+			return c.Next()
+		}
+		if !enabled {
+			return c.Next()
+		}
+
+		retryAfter, allowed := allowAttendanceCheckIn(keyFn(c), cfg, backend)
+		if !allowed {
+			return rejectAttendanceRateLimited(c, retryAfter)
+		}
+		return c.Next()
+	}
+}
+
+func AttendanceInfoRateLimit() fiber.Handler {
+	return attendancePublicGuard(10, 60, func(c fiber.Ctx) string {
+		return "info:" + attendanceSessionScope(c) + "|" + attendancePrincipalKey(c)
+	})
+}
+
+func AttendancePinLookupRateLimit() fiber.Handler {
+	return attendancePublicGuard(5, 60, func(c fiber.Ctx) string {
+		return "pinlookup:" + attendancePrincipalKey(c)
+	})
+}
+
+func AttendanceVerifyStudentRateLimit() fiber.Handler {
+	return attendancePublicGuard(10, 60, func(c fiber.Ctx) string {
+		return "verifystudent:" + attendancePrincipalKey(c)
+	})
 }
 
 func rejectAttendanceRateLimited(c fiber.Ctx, retryAfter int) error {
@@ -162,6 +235,23 @@ func allowAttendanceCheckIn(key string, config attendanceRateLimitConfig, backen
 	}
 
 	return publicAttendanceLimiter.Allow(key, config)
+}
+
+// allowAttendanceSessionCheckIn is allowAttendanceCheckIn's counterpart for
+// the session-wide backstop: same Redis-key namespace (the "sess:" prefix
+// already baked into the key its one caller passes keeps it from colliding
+// with per-principal keys), same Redis-first-then-memory-fallback shape, but
+// its own dedicated in-memory limiter — sessionAttendanceLimiter, not
+// publicAttendanceLimiter — since the two are different tiers with different
+// configs and must not share entries.
+func allowAttendanceSessionCheckIn(key string, config attendanceRateLimitConfig, backend string) (int, bool) {
+	if strings.EqualFold(backend, "redis") {
+		if retryAfter, allowed, ok := allowAttendanceCheckInRedis(key, config); ok {
+			return retryAfter, allowed
+		}
+	}
+
+	return sessionAttendanceLimiter.Allow(key, config)
 }
 
 func allowAttendanceCheckInRedis(key string, cfg attendanceRateLimitConfig) (int, bool, bool) {
@@ -261,52 +351,50 @@ func loadAttendanceRateLimitConfig() attendanceRateLimitConfig {
 	}
 }
 
+// loadAttendanceRateLimitBackend defaults to "redis" (plan.md ระยะ 2.2) so
+// the limit is shared across every process that ends up handling check-ins,
+// not reset per-process. allowAttendanceCheckIn already falls back to the
+// in-memory limiter whenever Redis errors (allowAttendanceCheckInRedis's
+// third return value), so a Redis outage degrades this to the old
+// per-process behavior rather than either blocking everyone (fail-closed) or
+// disabling the limit outright — nginx's own zones (nginx.conf.template)
+// stay in front of this regardless of which backend is active.
 func loadAttendanceRateLimitBackend() string {
 	backend := strings.TrimSpace(os.Getenv("ATTENDANCE_RATE_LIMITER_BACKEND"))
 	if backend == "" {
-		return "memory"
+		return "redis"
 	}
 	return strings.ToLower(backend)
 }
 
+// attendanceClientKey builds the rate-limit bucket key: session scope +
+// principal scope.
+//
+// The principal half used to prefer whatever identity field the request body
+// happened to carry — student_id, then google_email, then google_id, then
+// client_request_id — all of which are client-supplied and unverified at
+// this point in the middleware chain (OptionalProtected has only set
+// c.Locals("student_id") when a real JWT cookie/token was present; nothing
+// here checked that Locals value at all). A caller who wanted more than the
+// configured limit just had to send a different fake student_id (or
+// google_email, or a fresh client_request_id) on every request to land in a
+// fresh, never-before-seen bucket every time — the rate limit never actually
+// engaged for that caller (found during plan.md ระยะ 2 review).
+//
+// The fix: the only "who is this" the principal scope trusts is
+// services.StudentIDFromContext(c), which reads the value OptionalProtected
+// set after verifying a JWT — i.e. something the caller cannot pick for
+// themselves per-request. Everyone else (anonymous / Google-token check-ins,
+// which is most of this endpoint's real traffic) is keyed by IP, which nginx
+// already resolves through real_ip_module to the genuine client address (see
+// nginx.conf.template) — not by anything the request body claims.
+// client_request_id/google_email/google_id remain exactly what they always
+// were meant for: StudentCheckIn's idempotency cache
+// (repositories/attendance_runtime_repo.go), never a rate-limit identity.
 func attendanceClientKey(c fiber.Ctx) string {
-	type attendanceCheckInIdentity struct {
-		StudentID       *uint  `json:"student_id"`
-		GoogleEmail     string `json:"google_email"`
-		GoogleID        string `json:"google_id"`
-		ClientRequestID string `json:"client_request_id"`
-		PinCode         string `json:"pin_code"`
-	}
-
-	identity := attendanceCheckInIdentity{}
-	if body := c.Body(); len(body) > 0 {
-		_ = json.Unmarshal(body, &identity)
-	}
-
-	sessionScope := strings.TrimSpace(c.Params("sessionId"))
-	if sessionScope == "" {
-		sessionScope = hashedAttendanceKeyPart(identity.PinCode)
-	}
-	if sessionScope == "" {
-		sessionScope = "session-unknown"
-	}
-
-	principalScope := ""
-	if identity.StudentID != nil && *identity.StudentID > 0 {
-		principalScope = "student:" + strconv.FormatUint(uint64(*identity.StudentID), 10)
-	} else if email := strings.ToLower(strings.TrimSpace(identity.GoogleEmail)); email != "" {
-		principalScope = "email:" + hashedAttendanceKeyPart(email)
-	} else if googleID := strings.TrimSpace(identity.GoogleID); googleID != "" {
-		principalScope = "gid:" + hashedAttendanceKeyPart(googleID)
-	} else if clientRequestID := strings.TrimSpace(identity.ClientRequestID); clientRequestID != "" {
-		principalScope = "req:" + hashedAttendanceKeyPart(clientRequestID)
-	} else {
-		principalScope = "ip:" + strings.TrimSpace(c.IP())
-	}
-
 	parts := []string{
-		sessionScope,
-		principalScope,
+		attendanceSessionScope(c),
+		attendancePrincipalKey(c),
 	}
 	return strings.ToLower(strings.Join(parts, "|"))
 }

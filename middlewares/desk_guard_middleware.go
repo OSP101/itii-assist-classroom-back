@@ -29,6 +29,17 @@ type paramRateLimiter struct {
 	entries map[string]paramRateLimitEntry
 }
 
+// allowParamGuard tries the shared Redis-backed limiter first (plan.md
+// ระยะ 4.1) and only falls back to this guard's own in-memory map when
+// Redis is unavailable — matching attendance_guard_middleware.go's
+// fail-to-memory (never fail-closed) shape.
+func allowParamGuard(redisKeyPrefix string, key string, cfg paramRateLimitConfig, fallback *paramRateLimiter) (int, bool) {
+	if retryAfter, allowed, ok := redisIncrLimiter(redisKeyPrefix, key, cfg.Limit, cfg.Window); ok {
+		return retryAfter, allowed
+	}
+	return fallback.Allow(key, cfg)
+}
+
 func (limiter *paramRateLimiter) Allow(key string, config paramRateLimitConfig) (int, bool) {
 	if key == "" {
 		key = "unknown"
@@ -122,7 +133,7 @@ func DeskLookupGuard() fiber.Handler {
 		}
 
 		key := paramClientKey(c, "desk", "deskId")
-		retryAfter, allowed := publicDeskLimiter.Allow(key, config)
+		retryAfter, allowed := allowParamGuard("attendance:ratelimit:desk:", key, config, publicDeskLimiter)
 		if allowed {
 			return c.Next()
 		}
@@ -161,7 +172,7 @@ func QueueStatusPublicGuard() fiber.Handler {
 		}
 
 		key := paramClientKey(c, "queue-status", "sessionId")
-		retryAfter, allowed := publicQueueStatusLimiter.Allow(key, config)
+		retryAfter, allowed := allowParamGuard("attendance:ratelimit:queuestatus:", key, config, publicQueueStatusLimiter)
 		if allowed {
 			return c.Next()
 		}

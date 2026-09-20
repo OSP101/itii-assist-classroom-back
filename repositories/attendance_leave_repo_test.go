@@ -55,7 +55,7 @@ func setupLeaveRepoTestDB(t *testing.T) func() {
 		&models.CourseInstructor{}, &models.CourseTA{}, &models.Student{}, &models.User{},
 		&models.AttendanceSession{}, &models.AttendanceSessionSection{}, &models.AttendanceRecord{},
 		&models.AttendanceRecordHistory{}, &models.AttendanceLeaveRequest{}, &models.AttendanceLeaveRequestItem{},
-		&models.CourseSectionStudentRemoval{},
+		&models.CourseSectionStudentRemoval{}, &models.AppConfig{},
 	); err != nil {
 		t.Fatalf("migrate sqlite: %v", err)
 	}

@@ -29,6 +29,7 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -94,7 +95,18 @@ var backupOpState = struct {
 	running bool
 }{}
 
-func StartDailyDatabaseBackupWorker() {
+// StartDailyDatabaseBackupWorker takes the same (ctx, wg) shutdown contract
+// every other periodic worker in cmd/api/main.go uses (caught in review:
+// this worker was the one call site left on the old zero-argument signature
+// when graceful shutdown was added, so SIGTERM could kill it mid-backup with
+// no chance to run — the fenced Redis lock acquireDailyBackupLock/
+// releaseDailyBackupLock added would then sit held until its 35-minute TTL
+// instead of releasing). Registering it in wg means main()'s
+// shutdownWG.Wait() now waits for an in-flight backup to finish naturally
+// (so its deferred releaseDailyBackupLock() actually runs) before the
+// process exits, and ctx.Done() stops it from starting a NEW backup once
+// shutdown has been requested.
+func StartDailyDatabaseBackupWorker(ctx context.Context, wg *sync.WaitGroup) {
 	if _, err := loadR2Config(); err != nil {
 		log.Printf("⚠️  Daily backup worker disabled: %v", err)
 		return
@@ -109,13 +121,20 @@ func StartDailyDatabaseBackupWorker() {
 		location = loc
 	}
 
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		tryRunDailyBackup(location)
 
 		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
-		for range ticker.C {
-			tryRunDailyBackup(location)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				tryRunDailyBackup(location)
+			}
 		}
 	}()
 }
@@ -406,6 +425,17 @@ func RestoreDatabaseFromBackup(record models.DatabaseBackupRecord) error {
 			UpdatedAt:   time.Now(),
 		})
 		return err
+	}
+
+	// A restore replaces the live data with whatever the backup contained —
+	// if that backup predates idx_attendance_session_student, it can
+	// reintroduce legacy duplicate attendance_records rows that
+	// DedupeAllAttendanceRecordsWithDB's completion marker would otherwise
+	// cause the next boot to permanently ignore (caught in review). Clearing
+	// it here means a restore always gets re-scanned, at the cost of one
+	// harmless extra sweep on a restore that didn't actually reintroduce any.
+	if err := repositories.ResetAttendanceDedupeMarker(config.DB); err != nil {
+		log.Printf("⚠️  Restore succeeded but failed to reset the attendance dedupe marker — if this backup reintroduced legacy duplicates, they won't be re-scanned until the marker is cleared manually: %v", err)
 	}
 
 	nowStatus := time.Now()
@@ -842,6 +872,29 @@ func setBackupStatus(next BackupOperationStatus) error {
 	return repositories.SetAppConfigValue(backupStatusConfigKey, string(raw))
 }
 
+// dailyBackupLockOwner holds the random token for whichever lock this
+// process currently holds, if any. tryRunDailyBackup only ever runs one
+// acquire/release pair at a time within a single process (one ticker
+// goroutine, never concurrent), so a package-level variable is safe without
+// extra locking.
+var dailyBackupLockOwner string
+
+// dailyBackupReleaseScript deletes the lock only if it still belongs to the
+// caller's owner token — without this check, an instance releasing after its
+// own lease already expired and was picked up by another instance would
+// delete THAT instance's lock instead of a no-op, letting a third instance
+// acquire it while the second still believes it holds it (caught in review:
+// the plain unconditional DEL this replaced could delete a stale-but-still-
+// running instance's freshly-acquired lock). Same fencing pattern as
+// config/leader.go's releaseScript.
+var dailyBackupReleaseScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+	return redis.call("DEL", KEYS[1])
+else
+	return 0
+end
+`)
+
 // acquireDailyBackupLock takes a cross-instance lock for the daily backup.
 //
 // Returns true when this process may proceed. If Redis is unavailable it also
@@ -856,12 +909,19 @@ func acquireDailyBackupLock() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	acquired, err := config.Redis.SetNX(ctx, dailyBackupLockKey, "1", dailyBackupLockTTL).Result()
+	ownerBytes := make([]byte, 16)
+	_, _ = rand.Read(ownerBytes) // crypto/rand.Read never errors on a live OS
+	owner := hex.EncodeToString(ownerBytes)
+
+	acquired, err := config.Redis.SetNX(ctx, dailyBackupLockKey, owner, dailyBackupLockTTL).Result()
 	if err != nil {
 		log.Printf("⚠️  Could not take the daily backup lock, proceeding anyway: %v", err)
 		return true
 	}
 
+	if acquired {
+		dailyBackupLockOwner = owner
+	}
 	return acquired
 }
 
@@ -873,7 +933,10 @@ func releaseDailyBackupLock() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := config.Redis.Del(ctx, dailyBackupLockKey).Err(); err != nil {
+	owner := dailyBackupLockOwner
+	dailyBackupLockOwner = ""
+
+	if _, err := dailyBackupReleaseScript.Run(ctx, config.Redis, []string{dailyBackupLockKey}, owner).Result(); err != nil {
 		// Not fatal: the TTL releases it regardless, just later than ideal.
 		log.Printf("⚠️  Could not release the daily backup lock: %v", err)
 	}

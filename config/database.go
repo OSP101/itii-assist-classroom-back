@@ -558,6 +558,21 @@ func MigratePerformanceIndexes() {
 			sql:  `CREATE INDEX IF NOT EXISTS idx_attendance_sessions_previous_pin_hash_status ON attendance_sessions (previous_pin_hash, status)`,
 		},
 		{
+			// Every anonymous check-in (no cookie session) resolves the
+			// student by `WHERE LOWER(email) = LOWER(?)` — StudentCheckInHandler,
+			// StudentCheckInByPINHandler, VerifyStudentHandler all do this on
+			// the hot path. students.email only has a plain index (if any) via
+			// its model tag, which LOWER(email) cannot use, forcing a seq scan
+			// on every anonymous check-in during exactly the burst this table
+			// grows fastest for (plan.md ระยะ 1.4). concurrent: true because
+			// students is read on every check-in and this must not block
+			// inserts/updates while it builds.
+			name:       "students_lower_email",
+			object:     "idx_students_lower_email",
+			concurrent: true,
+			sql:        `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_students_lower_email ON students (LOWER(email))`,
+		},
+		{
 			name: "queue_sessions_pin_code_status",
 			sql:  `CREATE INDEX IF NOT EXISTS idx_queue_sessions_pin_code_status ON queue_sessions (pin_code, status)`,
 		},

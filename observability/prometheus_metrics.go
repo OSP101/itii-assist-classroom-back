@@ -336,6 +336,61 @@ func (m *prometheusMetrics) register() {
 		fmt.Sscanf(raw, "%f", &value)
 		return value
 	})
+
+	// Exposes the in-process counters attendance_audit.go already keeps
+	// (services/attendance_audit.go, RecordAttendanceAuditDropped /
+	// RecordAttendanceGuardUnavailable) so plan.md ระยะ 6's "audit dropped >
+	// 0" alert has a Prometheus series to fire on — before this they were
+	// only visible via the JSON snapshot endpoint, not scrapeable. One
+	// Collector taking a single SnapshotAttendanceMetrics() per scrape
+	// (caught in review: 3 independent GaugeFunc callbacks each took their
+	// own snapshot, meaning 3 separate locks on globalAttendanceMetrics.mu
+	// per scrape — the same mutex the check-in hot path locks on every
+	// request — instead of 1).
+	prometheus.MustRegister(newAttendanceAuditCollector())
+}
+
+// attendanceAuditCollector exposes attendance_audit_writes_dropped,
+// attendance_audit_probes_dropped, and attendance_guard_unavailable from one
+// SnapshotAttendanceMetrics() call per Collect(), rather than each metric
+// independently re-locking and re-snapshotting.
+type attendanceAuditCollector struct {
+	writesDropped    *prometheus.Desc
+	probesDropped    *prometheus.Desc
+	guardUnavailable *prometheus.Desc
+}
+
+func newAttendanceAuditCollector() *attendanceAuditCollector {
+	return &attendanceAuditCollector{
+		writesDropped: prometheus.NewDesc(
+			prometheus.BuildFQName(optionalMetricNS, optionalMetricSS, "attendance_audit_writes_dropped"),
+			"Cumulative forensic check-in audit records discarded because the write lane was saturated (evidence loss, not just a stat).",
+			nil, nil,
+		),
+		probesDropped: prometheus.NewDesc(
+			prometheus.BuildFQName(optionalMetricNS, optionalMetricSS, "attendance_audit_probes_dropped"),
+			"Cumulative device-flip correlation probes discarded because the probe lane was saturated.",
+			nil, nil,
+		),
+		guardUnavailable: prometheus.NewDesc(
+			prometheus.BuildFQName(optionalMetricNS, optionalMetricSS, "attendance_guard_unavailable"),
+			"Cumulative check-ins rejected with 503 because the campus network guard could not resolve the session.",
+			nil, nil,
+		),
+	}
+}
+
+func (c *attendanceAuditCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.writesDropped
+	ch <- c.probesDropped
+	ch <- c.guardUnavailable
+}
+
+func (c *attendanceAuditCollector) Collect(ch chan<- prometheus.Metric) {
+	snapshot := SnapshotAttendanceMetrics()
+	ch <- prometheus.MustNewConstMetric(c.writesDropped, prometheus.GaugeValue, float64(snapshot.Audit.WritesDropped))
+	ch <- prometheus.MustNewConstMetric(c.probesDropped, prometheus.GaugeValue, float64(snapshot.Audit.ProbesDropped))
+	ch <- prometheus.MustNewConstMetric(c.guardUnavailable, prometheus.GaugeValue, float64(snapshot.Audit.GuardUnavailable))
 }
 
 func (m *prometheusMetrics) registerOptionalGauge(metricName string, tableName string, help string, fn func() float64) {

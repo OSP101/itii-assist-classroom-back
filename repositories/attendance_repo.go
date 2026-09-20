@@ -8,10 +8,12 @@ import (
 	"itii-assist/config"
 	"itii-assist/models"
 	"itii-assist/observability"
+	"log"
 	"math"
 	"strings"
 	"time"
 
+	"golang.org/x/sync/singleflight"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -164,6 +166,16 @@ type AttendanceCheckInResult struct {
 	LocationVerified bool      `json:"location_verified"`
 	DistanceMeters   *int      `json:"distance_meters,omitempty"`
 	IsDuplicate      bool      `json:"is_duplicate"`
+	// Record is the attendance_records row as it stood at the end of the
+	// check-in transaction — populated in-memory from the same write this
+	// function already did, never a fresh SELECT. It exists so callers
+	// building the "student-checked-in" realtime broadcast (see
+	// handlers/attendance_handler.go emitAttendanceCheckedInRealtime) don't
+	// have to pay a second round trip for the row this function just wrote
+	// (plan.md ระยะ 1.3). json:"-" because AttendanceCheckInResult is also
+	// this function's public API response shape — this field is an internal
+	// handoff, not a documented response field.
+	Record *models.AttendanceRecord `json:"-"`
 }
 
 type AttendanceStudentSessionStatus struct {
@@ -637,6 +649,94 @@ func dedupeAttendanceRecordsWithDB(db *gorm.DB, sessionID uint, studentID *uint)
 	return nil
 }
 
+// DedupeAllAttendanceRecordsWithDB removes duplicate attendance_records rows
+// across every session, keeping the same "best row" (non-absent, most
+// recent check-in) that ensureAttendanceRecordInTx's own lookup already
+// prefers when it encounters duplicates live.
+//
+// Before ระยะ 1.3, dedupeAttendanceRecordsWithDB ran on every check-in;
+// removing that (to avoid table-locking cost on the hot path) left cleanup
+// reachable only via GetAttendanceSession, i.e. only when an instructor
+// opens that specific session's live view. A session nobody ever opens the
+// live view for could carry legacy duplicate rows (from before
+// idx_attendance_session_student existed) forever — silently double-counted
+// by repositories/student_repo.go's and repositories/team_repo.go's
+// attendance aggregates, which read attendance_records directly with no
+// dedup of their own (caught in review).
+//
+// Called once at startup (cmd/api/main.go). Gated by attendanceDedupeDoneKey
+// (caught in review): the full-table GROUP BY this starts with, and the
+// per-group round trips after it, are only ever needed ONCE — the legacy
+// duplicates this cleans up can only predate idx_attendance_session_student,
+// which now prevents any new ones. Without the marker this re-scanned the
+// entire attendance_records table on every single boot of every replica
+// forever, an unbounded cost for a problem that's fixed for good the first
+// time it succeeds. The first run's cost (proportional to how much legacy
+// backlog exists) is unavoidable and still runs before app.Listen — but now
+// it happens at most once, not on every future deploy.
+const attendanceDedupeDoneKey = "system.attendance.dedupe_all_completed"
+
+func DedupeAllAttendanceRecordsWithDB(db *gorm.DB) (int, error) {
+	// Reads/writes the marker through db directly rather than
+	// GetAppConfigValue/SetAppConfigValue (caught in review: those two
+	// always operate on the package-global config.DB, which silently
+	// diverges from db the moment this function is ever called with a
+	// transaction handle — a real pattern elsewhere in this package, e.g.
+	// dedupeAttendanceRecordsWithDB's own callers inside
+	// db.Transaction(func(tx *gorm.DB) error {...}) blocks).
+	var marker models.AppConfig
+	if err := db.Where("key = ?", attendanceDedupeDoneKey).First(&marker).Error; err == nil && strings.TrimSpace(marker.Value) == "true" {
+		return 0, nil
+	}
+
+	type duplicateGroup struct {
+		AttendanceSessionID uint `gorm:"column:attendance_session_id"`
+		StudentID           uint `gorm:"column:student_id"`
+	}
+
+	var groups []duplicateGroup
+	if err := db.Table("attendance_records").
+		Select("attendance_session_id, student_id").
+		Group("attendance_session_id, student_id").
+		Having("COUNT(*) > 1").
+		Scan(&groups).Error; err != nil {
+		return 0, err
+	}
+
+	cleaned := 0
+	for _, group := range groups {
+		studentID := group.StudentID
+		if err := dedupeAttendanceRecordsWithDB(db, group.AttendanceSessionID, &studentID); err != nil {
+			return cleaned, err
+		}
+		cleaned++
+	}
+
+	// Only recorded once the sweep finishes without error — a failed run
+	// (returned above) must be retried on the next boot, not silently
+	// marked done. Upsert-by-key (Where+Assign+FirstOrCreate) rather than a
+	// separate exists-check-then-create/update, and against db rather than
+	// config.DB for the same reason as the read above.
+	if err := db.Where(models.AppConfig{Key: attendanceDedupeDoneKey}).
+		Assign(models.AppConfig{Value: "true"}).
+		FirstOrCreate(&models.AppConfig{}).Error; err != nil {
+		log.Printf("⚠️  Attendance dedupe finished but failed to record completion marker, will re-scan next boot: %v", err)
+	}
+	return cleaned, nil
+}
+
+// ResetAttendanceDedupeMarker clears the completion marker
+// DedupeAllAttendanceRecordsWithDB sets after a successful sweep, so the
+// NEXT boot re-scans attendance_records instead of trusting a marker that
+// may now be stale (caught in review: a restore from a backup taken before
+// idx_attendance_session_student existed can reintroduce exactly the
+// legacy-shaped duplicates the marker exists to remember are already gone,
+// with no other way to force a re-scan short of a manual DB edit). Called
+// by services.RestoreDatabaseFromBackup after a successful restore.
+func ResetAttendanceDedupeMarker(db *gorm.DB) error {
+	return db.Where("key = ?", attendanceDedupeDoneKey).Delete(&models.AppConfig{}).Error
+}
+
 func backfillAttendanceRecordsWithDB(db *gorm.DB, session *models.AttendanceSession, sectionIDs []uint) error {
 	type idRow struct {
 		StudentID uint `gorm:"column:student_id"`
@@ -714,12 +814,35 @@ func ensureAttendanceRecordInTx(tx *gorm.DB, session *models.AttendanceSession, 
 		return nil, ErrAttendanceStudentNotEligiblePublic
 	}
 
-	if err := dedupeAttendanceRecordsWithDB(tx, session.ID, &studentID); err != nil {
-		return nil, err
-	}
-
+	// No per-student dedupeAttendanceRecordsWithDB call here (removed —
+	// plan.md ระยะ 1.3): this ran a GROUP BY/HAVING on every single check-in,
+	// on the one path that has to survive a 1000-student burst. The unique
+	// index idx_attendance_session_student (attendance_session_id,
+	// student_id) is what actually prevents duplicates going forward — proven
+	// live by the fact the ON CONFLICT clause a few lines below names exactly
+	// those two columns, which Postgres refuses to accept unless a matching
+	// unique constraint exists. Whole-session cleanup for any pre-existing
+	// duplicate data still runs from backfillAttendanceRecordsWithDB
+	// (GetAttendanceSession and the manual-edit path below), just not on
+	// every check-in.
+	// ORDER BY here is a belt-and-suspenders match for any legacy duplicate
+	// (attendance_session_id, student_id) rows that predate the unique index
+	// above and were never cleaned up by backfillAttendanceRecordsWithDB (no
+	// instructor has opened the session's live view yet). Without it, First()
+	// would pick whichever row Postgres happens to return first — not
+	// necessarily the one with an actual check-in on it (found in code
+	// review). The ordering mirrors dedupeAttendanceRecordsWithDB's own
+	// "which duplicate survives" rule exactly, so this never disagrees with
+	// what that cleanup would have kept: a checked-in row over a blank
+	// "absent" placeholder, most recent check-in/update first.
 	var record models.AttendanceRecord
-	if err := tx.Where("attendance_session_id = ? AND student_id = ?", session.ID, studentID).First(&record).Error; err == nil {
+	err = tx.Where("attendance_session_id = ? AND student_id = ?", session.ID, studentID).
+		Order(clause.Expr{SQL: "CASE WHEN status <> 'absent' THEN 0 ELSE 1 END"}).
+		Order("check_in_time DESC NULLS LAST").
+		Order("updated_at DESC").
+		Order("id DESC").
+		First(&record).Error
+	if err == nil {
 		return &record, nil
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
@@ -1475,21 +1598,6 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 		}
 
 		checkInTime := now
-		updates := map[string]interface{}{
-			"status":            status,
-			"status_source":     AttendanceSourceCheckIn,
-			"check_in_time":     &checkInTime,
-			"pin_verified":      true,
-			"google_email":      googleEmail,
-			"google_id":         googleID,
-			"updated_at":        now,
-			"location_verified": locationVerified,
-			"distance_meters":   distanceMeters,
-		}
-		if lat != nil {
-			updates["location_lat"] = *lat
-			updates["location_lng"] = *lng
-		}
 
 		if record.CheckInTime != nil && record.Status != "absent" {
 			result = AttendanceCheckInResult{
@@ -1498,14 +1606,47 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 				LocationVerified: record.LocationVerified,
 				DistanceMeters:   record.DistanceMeters,
 				IsDuplicate:      true,
+				Record:           record,
 			}
 			observability.RecordAttendanceCheckInDuplicate(time.Since(startedAt))
 			return nil
 		}
 
+		// fromStatus/fromLeaveRequestID capture the pre-check-in state before
+		// record is mutated below — the "leave superseded?" check and the
+		// status-history row both need the OLD status, and record.Status is
+		// about to become the NEW one.
+		fromStatus := record.Status
+		fromLeaveRequestID := record.LeaveRequestID
+
+		// record is mutated here — BEFORE the write, not after — and the
+		// write below (Select + Updates(record)) persists these exact field
+		// values. That makes record itself the single source of truth for
+		// "what a successful check-in changes": no separate map of
+		// column->value has to be kept in sync with it by hand, which is
+		// what let the two silently drift out of sync before (found in code
+		// review — plan.md ระยะ 1.3's in-memory mirror used to be copied from
+		// a `updates` map defined ~15 lines above it).
+		record.Status = status
+		record.StatusSource = AttendanceSourceCheckIn
+		record.CheckInTime = &checkInTime
+		record.PinVerified = true
+		record.GoogleEmail = googleEmail
+		record.GoogleID = googleID
+		record.UpdatedAt = now
+		record.LocationVerified = locationVerified
+		record.DistanceMeters = distanceMeters
+		selectColumns := []string{"status", "status_source", "check_in_time", "pin_verified", "google_email", "google_id", "updated_at", "location_verified", "distance_meters"}
+		if lat != nil {
+			record.LocationLat = lat
+			record.LocationLng = lng
+			selectColumns = append(selectColumns, "location_lat", "location_lng")
+		}
+
 		updateResult := tx.Model(&models.AttendanceRecord{}).
 			Where("id = ? AND (check_in_time IS NULL OR status = 'absent')", record.ID).
-			Updates(updates)
+			Select(selectColumns).
+			Updates(record)
 		if updateResult.RowsAffected == 0 {
 			var latest models.AttendanceRecord
 			if err := tx.Where("id = ?", record.ID).First(&latest).Error; err != nil {
@@ -1518,6 +1659,7 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 					LocationVerified: latest.LocationVerified,
 					DistanceMeters:   latest.DistanceMeters,
 					IsDuplicate:      true,
+					Record:           &latest,
 				}
 				observability.RecordAttendanceCheckInDuplicate(time.Since(startedAt))
 				return nil
@@ -1529,7 +1671,7 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 		}
 		// ถ้าก่อนหน้านี้เป็น leave จากคำขอลา ให้ present ทับ (มาเรียนดีกว่า)
 		// และบันทึกว่า item ของคำขอนั้นถูกแทนที่แล้ว
-		if record.Status == "leave" && record.LeaveRequestID != nil {
+		if fromStatus == "leave" && fromLeaveRequestID != nil {
 			if err := SupersedeLeaveRequestItemForRecord(tx, record.ID); err != nil {
 				return err
 			}
@@ -1539,12 +1681,12 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 			RecordID:       record.ID,
 			SessionID:      session.ID,
 			StudentID:      studentID,
-			FromStatus:     record.Status,
+			FromStatus:     fromStatus,
 			ToStatus:       status,
 			Source:         AttendanceSourceCheckIn,
 			ActorType:      AttendanceActorStudent,
 			ActorID:        &actorStudent,
-			LeaveRequestID: record.LeaveRequestID,
+			LeaveRequestID: fromLeaveRequestID,
 		}); err != nil {
 			return err
 		}
@@ -1555,6 +1697,7 @@ func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, ln
 			LocationVerified: locationVerified,
 			DistanceMeters:   distanceMeters,
 			IsDuplicate:      false,
+			Record:           record,
 		}
 		return nil
 	})
@@ -1595,26 +1738,138 @@ func GetAttendanceSessionTypeCtx(ctx context.Context, sessionID uint) (string, e
 	return sessionType, nil
 }
 
+// attendanceSessionInfoGroup coalesces concurrent GetSessionInfo calls for
+// the same session into one DB/Redis round trip (plan.md ระยะ 1.1 — a burst
+// of students loading /check-in/:id at the same instant must not turn into
+// one query per student). singleflight.Group hands every waiter the SAME
+// *AttendanceSessionInfo value, so GetSessionInfo returns a shallow copy to
+// each caller: handlers mutate their copy in place (e.g. stripping PinCode
+// before the public response), and without a copy that mutation would race
+// with every other goroutine sharing the singleflight result.
+var attendanceSessionInfoGroup singleflight.Group
+
 func GetSessionInfo(sessionID uint) (*AttendanceSessionInfo, error) {
+	key := fmt.Sprintf("%d", sessionID)
+	shared, err, _ := attendanceSessionInfoGroup.Do(key, func() (interface{}, error) {
+		return getSessionInfoUncached(sessionID)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return shared.(*AttendanceSessionInfo).clone(), nil
+}
+
+// clone deep-copies every field a caller could plausibly mutate in place,
+// not just the top-level struct. GetSessionInfo hands every concurrent
+// singleflight waiter the SAME *AttendanceSessionInfo — a plain `info :=
+// *shared` shallow copy duplicates the struct but leaves Course, Section,
+// PinIssuedAt and PinRotatesAt pointing at the exact objects every other
+// waiter shares. GetSessionInfoHandler today only mutates the plain string
+// field PinCode, so that particular shallow-copy bug is latent, not active —
+// but the next handler change that touches info.Course.Name or
+// *info.PinIssuedAt would silently corrupt every other concurrent student's
+// response for that session (found in code review). If a new pointer/slice/
+// map field is ever added to AttendanceSessionInfo, it must be deep-copied
+// here too.
+func (info *AttendanceSessionInfo) clone() *AttendanceSessionInfo {
+	if info == nil {
+		return nil
+	}
+	cloned := *info
+	if info.PinIssuedAt != nil {
+		t := *info.PinIssuedAt
+		cloned.PinIssuedAt = &t
+	}
+	if info.PinRotatesAt != nil {
+		t := *info.PinRotatesAt
+		cloned.PinRotatesAt = &t
+	}
+	if info.Course != nil {
+		course := *info.Course
+		cloned.Course = &course
+	}
+	if info.Section != nil {
+		section := *info.Section
+		cloned.Section = &section
+	}
+	return &cloned
+}
+
+// attendanceCourseSectionBasicGroup coalesces concurrent cache-miss lookups
+// for attendanceCourseBasic/attendanceSectionBasic (one shared group, keyed
+// "course:<id>" / "section:<id>" so the two namespaces can't collide). Unlike
+// GetSessionInfo, this cache isn't scoped to one session, so several
+// concurrent sessions of the same course sharing a TTL expiry moment would
+// otherwise all stampede Postgres for the identical course row at once — a
+// smaller-scale repeat of exactly the problem singleflight already solves a
+// few functions above (found in code review). Both AttendanceCourseBasic and
+// AttendanceSectionBasic hold only plain value fields (no nested
+// pointers/slices), so — unlike AttendanceSessionInfo — a shallow copy of the
+// singleflight result is already a full, safe-to-mutate copy per caller.
+var attendanceCourseSectionBasicGroup singleflight.Group
+
+func attendanceCourseBasic(courseID string) *AttendanceCourseBasic {
+	courseID = strings.TrimSpace(courseID)
+	if courseID == "" {
+		return nil
+	}
+
+	var course AttendanceCourseBasic
+	if config.CacheGetJSON(attendanceCourseBasicCacheKey(courseID), &course) {
+		return &course
+	}
+
+	shared, err, _ := attendanceCourseSectionBasicGroup.Do("course:"+courseID, func() (interface{}, error) {
+		var fetched AttendanceCourseBasic
+		if err := config.DB.Raw(`SELECT id, code, name, year, semester FROM courses WHERE id = ?`, courseID).Scan(&fetched).Error; err != nil || fetched.ID == "" {
+			return nil, gorm.ErrRecordNotFound
+		}
+		config.CacheSetJSON(attendanceCourseBasicCacheKey(courseID), fetched, attendanceCourseSectionBasicTTL())
+		return &fetched, nil
+	})
+	if err != nil || shared == nil {
+		return nil
+	}
+	found := *shared.(*AttendanceCourseBasic)
+	return &found
+}
+
+func attendanceSectionBasic(sectionID uint) *AttendanceSectionBasic {
+	if sectionID == 0 {
+		return nil
+	}
+
+	var section AttendanceSectionBasic
+	if config.CacheGetJSON(attendanceSectionBasicCacheKey(sectionID), &section) {
+		return &section
+	}
+
+	shared, err, _ := attendanceCourseSectionBasicGroup.Do(fmt.Sprintf("section:%d", sectionID), func() (interface{}, error) {
+		var fetched AttendanceSectionBasic
+		if err := config.DB.Raw(`SELECT id, section_no FROM course_sections WHERE id = ?`, sectionID).Scan(&fetched).Error; err != nil || fetched.ID == 0 {
+			return nil, gorm.ErrRecordNotFound
+		}
+		config.CacheSetJSON(attendanceSectionBasicCacheKey(sectionID), fetched, attendanceCourseSectionBasicTTL())
+		return &fetched, nil
+	})
+	if err != nil || shared == nil {
+		return nil
+	}
+	found := *shared.(*AttendanceSectionBasic)
+	return &found
+}
+
+func getSessionInfoUncached(sessionID uint) (*AttendanceSessionInfo, error) {
 	session, _, err := ResolveAttendanceSessionPinState(context.Background(), sessionID, true)
 	if err != nil {
 		return nil, err
 	}
 
-	var course *AttendanceCourseBasic
-	if strings.TrimSpace(session.CourseID) != "" {
-		var courseRow AttendanceCourseBasic
-		if err := config.DB.Raw(`SELECT id, code, name, year, semester FROM courses WHERE id = ?`, session.CourseID).Scan(&courseRow).Error; err == nil && courseRow.ID != "" {
-			course = &courseRow
-		}
-	}
+	course := attendanceCourseBasic(session.CourseID)
 
 	var section *AttendanceSectionBasic
-	if session.CourseSectionID != nil && *session.CourseSectionID > 0 {
-		var sectionRow AttendanceSectionBasic
-		if err := config.DB.Raw(`SELECT id, section_no FROM course_sections WHERE id = ?`, *session.CourseSectionID).Scan(&sectionRow).Error; err == nil && sectionRow.ID != 0 {
-			section = &sectionRow
-		}
+	if session.CourseSectionID != nil {
+		section = attendanceSectionBasic(*session.CourseSectionID)
 	}
 
 	return &AttendanceSessionInfo{

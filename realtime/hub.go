@@ -1,9 +1,11 @@
 ﻿package realtime
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"itii-assist/config"
 	"log"
 	"strconv"
 	"strings"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/fasthttp/websocket"
 	"github.com/gofiber/fiber/v3"
+	"github.com/redis/go-redis/v9"
 	"github.com/valyala/fasthttp"
 )
 
@@ -357,7 +360,7 @@ func (c *client) handleMessage(message incomingMessage) {
 	case "course-change":
 		payload := rawMap(message.Data)
 		payload["timestamp"] = nowMillis()
-		c.hub.broadcast("global-courses", "course-updated", payload, c)
+		emitToRoomExcept("global-courses", "course-updated", payload, c)
 	case "join-classroom":
 		c.hub.join(c, "classroom-"+rawString(message.Data))
 	case "leave-classroom":
@@ -366,7 +369,7 @@ func (c *client) handleMessage(message incomingMessage) {
 		payload := rawMap(message.Data)
 		room := "classroom-" + fmt.Sprint(payload["classroomId"])
 		payload["timestamp"] = nowMillis()
-		c.hub.broadcast(room, "classroom-updated", payload, c)
+		emitToRoomExcept(room, "classroom-updated", payload, c)
 	case "join-global-updates":
 		c.hub.join(c, "global-updates")
 	case "leave-global-updates":
@@ -427,7 +430,7 @@ func (c *client) handleMessage(message incomingMessage) {
 		payload := rawMap(message.Data)
 		resource, _ := payload["resource"].(string)
 		update := fiber.Map{"resource": resource, "action": payload["action"], "id": payload["id"], "data": payload["data"], "timestamp": nowMillis()}
-		c.hub.broadcast("global-updates", "data-updated", update, c)
+		emitToRoomExcept("global-updates", "data-updated", update, c)
 		if resource == "course" {
 			actorID := interface{}(nil)
 			if dataPayload, ok := payload["data"].(map[string]interface{}); ok {
@@ -437,13 +440,33 @@ func (c *client) handleMessage(message incomingMessage) {
 					actorID = value
 				}
 			}
-			c.hub.broadcast("global-courses", "course-updated", fiber.Map{"action": payload["action"], "courseId": payload["id"], "actor_id": actorID, "timestamp": nowMillis()}, c)
+			emitToRoomExcept("global-courses", "course-updated", fiber.Map{"action": payload["action"], "courseId": payload["id"], "actor_id": actorID, "timestamp": nowMillis()}, c)
 		}
 	}
 }
 
+// emitToRoomExcept is EmitToRoom's counterpart for client-initiated relay
+// events inside handleMessage (course-change, classroom-change,
+// data-change) — the sending client is excluded from the LOCAL broadcast
+// (it already has the change applied on its own end) but that exclusion is
+// meaningless across the bus, since a different replica's clients could
+// never be the original sender anyway; every other replica locally
+// broadcasts the republished event to all of its room members.
+func emitToRoomExcept(room string, event string, data interface{}, except *client) {
+	defaultHub.broadcast(room, event, data, except)
+	publishRealtimeEvent(room, event, data)
+}
+
+// EmitToRoom is the one choke point every Emit* helper below goes through,
+// which is what makes multi-replica fan-out (plan.md ระยะ 4.1) a one-line
+// change here instead of touching every call site: broadcast still delivers
+// to this process's own local clients exactly as before, and
+// publishRealtimeEvent additionally fans the same event out to every other
+// replica's local clients via Redis. See redis_bus.go for why this is
+// transport-only, never a source of truth.
 func EmitToRoom(room string, event string, data interface{}) {
 	defaultHub.broadcast(room, event, data, nil)
+	publishRealtimeEvent(room, event, data)
 }
 
 func EmitToAttendance(sessionID interface{}, event string, data interface{}) {
@@ -505,6 +528,12 @@ func EmitToUser(userID interface{}, event string, data interface{}) {
 
 // IssueSocketTicket mints a short-lived, single-room ticket. Call it only from
 // a route that has already authorised the caller for that room.
+// socketTicketRedisKey namespaces ticket storage so it can never collide
+// with any other Redis key family in this application.
+func socketTicketRedisKey(ticket string) string {
+	return "realtime:ticket:" + ticket
+}
+
 func IssueSocketTicket(room string, ttl time.Duration) (string, time.Time, error) {
 	room = strings.TrimSpace(room)
 	if room == "" {
@@ -516,6 +545,26 @@ func IssueSocketTicket(room string, ttl time.Duration) (string, time.Time, error
 	}
 	ticket := fmt.Sprintf("%x", buffer)
 	expiresAt := time.Now().Add(ttl)
+
+	// Redis-backed so the ticket is valid regardless of which backend
+	// replica ends up handling the WebSocket upgrade (plan.md ระยะ 4.1) —
+	// with more than one instance behind nginx, the REST call that minted
+	// this ticket and the /ws connection that redeems it can land on
+	// different replicas; an in-memory-only ticket would then never
+	// validate no matter how correct the ticket itself is. Falls back to
+	// the in-memory map (correct for single-instance deployments, and for
+	// a single-instance run during a Redis outage) only when Redis itself
+	// is unavailable — see validateSocketTicket for the matching read side.
+	if config.Redis != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := config.Redis.Set(ctx, socketTicketRedisKey(ticket), room, ttl).Err(); err != nil {
+			log.Printf("realtime: socket ticket Redis write failed, falling back to in-memory (won't validate on a different replica): %v", err)
+		} else {
+			return ticket, expiresAt, nil
+		}
+	}
+
 	socketTickets.mu.Lock()
 	defer socketTickets.mu.Unlock()
 	cleanupExpiredTicketsLocked()
@@ -533,11 +582,37 @@ func IssueDisplaySocketTicket(room string, ttl time.Duration) (string, time.Time
 // caller must still check that room is the kind it expects — see the
 // prefix check in handleMessage — so a ticket for a display room can never be
 // used to walk into an instructor room.
+// validateSocketTicket reads (does NOT consume) the ticket — it must stay
+// reusable for the rest of its TTL, not just for one join. This diverges
+// from plan.md ระยะ 4.1's original "GETDEL" wording: that assumed every
+// caller mints a fresh ticket on each reconnect, but
+// TestTicketIsReusableWithinTTL documents a real, already-relied-on
+// contract the other way — a client that reconnects inside the TTL
+// re-sends the SAME ticket rather than fetching a new one, and must still
+// get in. A plain GET (matching the pre-existing in-memory behavior byte
+// for byte) is what actually keeps that working once the store is Redis.
 func validateSocketTicket(ticket string) (string, bool) {
 	ticket = strings.TrimSpace(ticket)
 	if ticket == "" {
 		return "", false
 	}
+
+	if config.Redis != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		room, err := config.Redis.Get(ctx, socketTicketRedisKey(ticket)).Result()
+		if err == nil {
+			return room, room != ""
+		}
+		if err != redis.Nil {
+			log.Printf("realtime: socket ticket Redis read failed, falling back to in-memory: %v", err)
+		}
+		// redis.Nil (key not found there) deliberately still falls through
+		// to the in-memory map below: a ticket minted while Redis was down
+		// landed there instead, and this replica might be the one that
+		// minted it.
+	}
+
 	socketTickets.mu.Lock()
 	defer socketTickets.mu.Unlock()
 	cleanupExpiredTicketsLocked()

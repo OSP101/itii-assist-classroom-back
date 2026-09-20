@@ -238,7 +238,14 @@ var settingsCache = struct {
 	values: map[string]settingsCacheEntry{},
 }
 
-const settingsCacheTTL = 30 * time.Second
+// settingsCacheTTL bounds how stale this in-memory, per-process cache can
+// get. It has its own explicit invalidation (invalidateCachedConfigValue)
+// for the process that made a change, but that invalidation is local —
+// another replica's cache (plan.md ระยะ 4.1) only ever finds out a setting
+// changed once its own TTL expires, so 15s (down from 30s) halves how long
+// a different replica can keep serving a stale value like a feature flag
+// or maintenance-mode toggle after it changes elsewhere.
+const settingsCacheTTL = 15 * time.Second
 
 func getCachedConfigValue(key string) (string, bool) {
 	settingsCache.RLock()

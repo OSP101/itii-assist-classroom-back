@@ -11,8 +11,10 @@ import (
 	"itii-assist/observability"
 	"itii-assist/utils"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -127,10 +129,45 @@ type auditPool struct {
 // dropped probe costs a hint, a dropped check-in record costs evidence. The
 // probe lane is also the smaller of the two so it can never dominate the
 // connection pool.
+//
+// auditWritePool/auditProbePool are built lazily via sync.OnceValue, NOT as
+// plain package-level vars. A plain `var auditWritePool = auditPool{sem:
+// make(chan struct{}, attendanceAuditLaneSize(...))}` would call os.Getenv
+// during package initialization, which Go runs before main() executes —
+// strictly before cmd/api/main.go's godotenv.Load(), the project's standard
+// way of setting these. That ordering bug shipped once already: it silently
+// discarded ATTENDANCE_AUDIT_WRITE_LANE_SIZE/ATTENDANCE_AUDIT_PROBE_LANE_SIZE
+// set via .env.backend, always falling back to 32/8 with no error. Deferring
+// pool construction to first use (well after main() has loaded .env) fixes
+// it; get the pool via getAuditWritePool()/getAuditProbePool(), never the
+// zero-value vars directly.
 var (
-	auditWritePool = auditPool{sem: make(chan struct{}, 32), name: "write"}
-	auditProbePool = auditPool{sem: make(chan struct{}, 8), name: "probe"}
+	getAuditWritePool = sync.OnceValue(func() auditPool {
+		return auditPool{sem: make(chan struct{}, attendanceAuditLaneSize("ATTENDANCE_AUDIT_WRITE_LANE_SIZE", 32)), name: "write"}
+	})
+	getAuditProbePool = sync.OnceValue(func() auditPool {
+		return auditPool{sem: make(chan struct{}, attendanceAuditLaneSize("ATTENDANCE_AUDIT_PROBE_LANE_SIZE", 8)), name: "probe"}
+	})
 )
+
+// attendanceAuditLaneSize makes the two lane caps above tunable without a
+// redeploy (plan.md ระยะ 1.5). Audit writes are explicitly best-effort — this
+// is not the durability guarantee attendance_records itself has — and they
+// share the same DB connection pool as the check-in transactions they log, so
+// the right cap is a live operational trade-off (evidence completeness vs.
+// connections taken from the hot path during a burst) rather than a constant
+// worth guessing correctly on the first try.
+func attendanceAuditLaneSize(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
 
 // ClientDeviceSignals are best-effort hints the check-in page collects about
 // the device it's running on. None of this gates check-in and none of it is
@@ -321,7 +358,7 @@ func LogAttendanceCheckIn(db *gorm.DB, ev AttendanceCheckInEvent) {
 	// class sees them without going through system_logs.
 	MirrorAttendanceCheckIn(db, ev)
 
-	writeAttendanceSystemLog(auditWritePool, db, "audit: failed to write attendance check-in log", []any{"result", ev.Result, "session_id", ev.SessionID}, func(ctx context.Context) (models.SystemLog, map[string]any, bool) {
+	writeAttendanceSystemLog(getAuditWritePool(), db, "audit: failed to write attendance check-in log", []any{"result", ev.Result, "session_id", ev.SessionID}, func(ctx context.Context) (models.SystemLog, map[string]any, bool) {
 		severity := "info"
 		switch ev.Result {
 		case AttendanceResultNetworkBlocked, AttendanceResultRateLimited, AttendanceResultFailed, AttendanceResultGuardUnavailable:
@@ -453,7 +490,7 @@ func CheckAndLogDeviceGuardFlip(db *gorm.DB, sessionID uint, ip string, studentI
 		return
 	}
 
-	writeAttendanceSystemLog(auditProbePool, db, "audit: failed to write device guard flip flag", []any{"session_id", sessionID}, func(ctx context.Context) (models.SystemLog, map[string]any, bool) {
+	writeAttendanceSystemLog(getAuditProbePool(), db, "audit: failed to write device guard flip flag", []any{"session_id", sessionID}, func(ctx context.Context) (models.SystemLog, map[string]any, bool) {
 		var prior models.SystemLog
 		// log_type and action are inlined as SQL literals here (see
 		// attendanceDeviceFlipIndexPredicate) rather than bound as parameters,

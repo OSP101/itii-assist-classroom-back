@@ -37,7 +37,7 @@ func SupportTicketGuard() fiber.Handler {
 			return c.Next()
 		}
 
-		retryAfter, allowed := publicSupportLimiter.Allow(supportClientKey(c), config)
+		retryAfter, allowed := allowSupportGuard(supportClientKey(c), config)
 		if allowed {
 			return c.Next()
 		}
@@ -51,6 +51,17 @@ func SupportTicketGuard() fiber.Handler {
 			"message": "ส่งคำขอถี่เกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง",
 		})
 	}
+}
+
+// allowSupportGuard tries the shared Redis-backed limiter first (plan.md
+// ระยะ 4.1) and only falls back to the in-memory map when Redis is
+// unavailable, matching attendance_guard_middleware.go's fail-to-memory
+// shape (never fail-closed).
+func allowSupportGuard(key string, cfg supportRateLimitConfig) (int, bool) {
+	if retryAfter, allowed, ok := redisIncrLimiter("attendance:ratelimit:support:", key, cfg.Limit, cfg.Window); ok {
+		return retryAfter, allowed
+	}
+	return publicSupportLimiter.Allow(key, cfg)
 }
 
 func (limiter *supportRateLimiter) Allow(key string, config supportRateLimitConfig) (int, bool) {
