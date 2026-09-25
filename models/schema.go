@@ -699,6 +699,10 @@ type QueueWorker struct {
 	AcceptGrading            bool       `gorm:"type:boolean;default:true" json:"accept_grading"`
 	AcceptHelp               bool       `gorm:"type:boolean;default:true" json:"accept_help"`
 	PushNotificationsEnabled bool       `gorm:"type:boolean;default:true" json:"push_notifications_enabled"`
+	// IsMirror marks a row copied into a partner session of a concurrent group
+	// for visibility, as opposed to the session the user actually joined. A
+	// "separated" group never dispatches to a mirror row.
+	IsMirror                 bool       `gorm:"type:boolean;not null;default:false" json:"is_mirror"`
 	Status                   string     `gorm:"type:varchar(20);default:'offline'" json:"status"` // online, busy, offline
 	CurrentBookingID         *uint      `gorm:"index" json:"current_booking_id,omitempty"`
 	OfferPausedUntil         *time.Time `gorm:"type:timestamptz" json:"offer_paused_until,omitempty"`

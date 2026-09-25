@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -987,7 +988,7 @@ func notifyLeaveRequestSubmitted(view *repositories.LeaveRequestView) {
 		if name == "" {
 			name = u.Username
 		}
-		if err := services.SendLeaveRequestSubmittedEmail(view.ID, u.Email, name, courseName, studentName, studentCode, view.LeaveType, view.Reason, items, len(view.EvidenceList), services.LeaveRequestReviewURL(view.CourseID)); err != nil {
+		if err := services.SendLeaveRequestSubmittedEmail(view.ID, u.Email, name, u.Role, courseName, studentName, studentCode, view.LeaveType, view.Reason, items, len(view.EvidenceList), services.LeaveRequestReviewURL(view.CourseID)); err != nil {
 			services.LogEmailDeliveryError("leave_request_submitted", err)
 		}
 	}
@@ -1065,7 +1066,24 @@ func RunLeaveRequestAutoExpire() {
 	}
 }
 
-// RunLeaveRequestPendingReminder ส่งเมลเตือนผู้สอนสำหรับคำขอที่ค้างเกิน olderThan (เรียกจาก ticker วันละครั้ง)
+// RunDailyLeaveRequestPendingReminder ถูกเรียกทุกนาที แต่ส่งเตือนแค่วันละครั้ง
+// ครั้งแรกที่เข้าช่วง 08:01-20:00 เวลาไทย เครื่องหมายว่าวันนี้ส่งแล้วเก็บใน Redis
+// เพื่อไม่ให้รีสตาร์ทหลัง 08:01 แล้วส่งซ้ำ
+func RunDailyLeaveRequestPendingReminder(now time.Time, olderThan time.Duration) {
+	if !services.InstructorEmailWindowOpen(now) || config.Redis == nil {
+		return
+	}
+	key := "leave-request-pending-reminder:sent:" + services.InThaiTime(now).Format("2006-01-02")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	claimed, err := config.Redis.SetNX(ctx, key, now.Unix(), 48*time.Hour).Result()
+	cancel()
+	if err != nil || !claimed {
+		return
+	}
+	RunLeaveRequestPendingReminder(olderThan)
+}
+
+// RunLeaveRequestPendingReminder ส่งเมลเตือนผู้สอนสำหรับคำขอที่ค้างเกิน olderThan
 func RunLeaveRequestPendingReminder(olderThan time.Duration) {
 	grouped, err := repositories.PendingLeaveRequestsOlderThan(time.Now().Add(-olderThan))
 	if err != nil || len(grouped) == 0 {
@@ -1092,7 +1110,7 @@ func RunLeaveRequestPendingReminder(olderThan time.Duration) {
 			if name == "" {
 				name = u.Username
 			}
-			if err := services.SendLeaveRequestPendingReminderEmail(u.Email, name, courseName, len(requests), oldestDays, services.LeaveRequestReviewURL(courseID)); err != nil {
+			if err := services.SendLeaveRequestPendingReminderEmail(u.Email, name, u.Role, courseName, len(requests), oldestDays, services.LeaveRequestReviewURL(courseID)); err != nil {
 				services.LogEmailDeliveryError("leave_request_pending_reminder", err)
 			}
 		}

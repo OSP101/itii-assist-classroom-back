@@ -10,7 +10,7 @@ import (
 // อีเมลแจ้งประกาศคะแนนสอบ
 // =============================================================================
 
-const examScoreEmailSection = "ระบบสอบ · ประกาศคะแนน"
+const examScoreEmailSection = "ประกาศคะแนนสอบ"
 
 func ExamTypeLabelTH(examType string) string {
 	switch examType {
@@ -53,13 +53,13 @@ func SendExamScorePublishedEmail(toEmail, toName, courseName, examType, componen
 	content := emailContent{
 		Section:  examScoreEmailSection,
 		Title:    "ประกาศคะแนน" + examLabel,
-		Subtitle: fmt.Sprintf("%s · %s", courseName, componentLabel),
-		BodyHTML: emailGreeting(toName) +
+		Subtitle: fmt.Sprintf("%s (%s)", courseName, componentLabel),
+		BodyHTML: emailGreeting(toName, emailRecipientStudent) +
 			emailParagraph(fmt.Sprintf(`ผู้สอนวิชา %s เปิดให้ดูคะแนน<strong>%s (%s)</strong> แล้ว เข้าไปตรวจสอบคะแนนของคุณได้ในระบบ`, html.EscapeString(courseName), html.EscapeString(examLabel), html.EscapeString(componentLabel))) +
 			emailButton("ดูคะแนนของฉัน", link),
 	}
-	plain := fmt.Sprintf("สวัสดีคุณ%s,\n\nผู้สอนวิชา %s เปิดให้ดูคะแนน%s (%s) แล้ว เข้าไปตรวจสอบคะแนนของคุณได้ในระบบ\n\nดูคะแนนของฉัน: %s",
-		toName, courseName, examLabel, componentLabel, link)
+	plain := fmt.Sprintf("%s\n\nผู้สอนวิชา %s เปิดให้ดูคะแนน%s (%s) แล้ว เข้าไปตรวจสอบคะแนนของคุณได้ในระบบ\n\nดูคะแนนของฉัน: %s",
+		emailGreetingPlain(toName, emailRecipientStudent), courseName, examLabel, componentLabel, link)
 
-	return sendEmail(emailMessage{To: strings.TrimSpace(toEmail), Subject: subject, HTML: renderEmailHTML(content), Plain: renderEmailPlain(content, plain)})
+	return sendNotificationEmail(emailMessage{To: strings.TrimSpace(toEmail), Subject: subject, HTML: renderEmailHTML(content), Plain: renderEmailPlain(content, plain)})
 }

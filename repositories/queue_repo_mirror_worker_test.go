@@ -60,7 +60,8 @@ func setupConcurrentGroupTestDB(t *testing.T) (func(), models.QueueSession, mode
 		t.Fatalf("open sqlite: %v", err)
 	}
 	migrateWithSQLiteTimestamps(t, db, &models.QueueSession{}, &models.QueueWorker{}, &models.QueueBooking{}, &models.QueueDeskStatus{},
-		&models.Course{}, &models.CourseMember{}, &models.CourseInstructor{}, &models.CourseTA{})
+		&models.Course{}, &models.CourseMember{}, &models.CourseInstructor{}, &models.CourseTA{},
+		&models.User{}, &models.AppConfig{})
 	// AutoMigrate does not create the partial/unique indexes that config.database
 	// installs in production; mirrorWorkerRowTx relies on this one for idempotency.
 	if err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_queue_workers_session_user ON queue_workers (queue_session_id, user_id)`).Error; err != nil {
@@ -101,6 +102,8 @@ func setupConcurrentGroupTestDB(t *testing.T) (func(), models.QueueSession, mode
 		db.Exec("DELETE FROM course_members")
 		db.Exec("DELETE FROM course_instructors")
 		db.Exec("DELETE FROM course_tas")
+		db.Exec("DELETE FROM users")
+		db.Exec("DELETE FROM app_configs")
 		config.DB = prevDB
 	}
 	return cleanup, sessionA, sessionB
@@ -180,6 +183,9 @@ func TestCompleteBookingWithScores_HealsMissingMirrorWorkerRow(t *testing.T) {
 	}
 	if !healed.AcceptGrading || !healed.AcceptHelp {
 		t.Fatalf("expected mirror to inherit origin preferences, got grading=%v help=%v", healed.AcceptGrading, healed.AcceptHelp)
+	}
+	if !healed.IsMirror {
+		t.Fatal("a row healed into the partner session must be labelled a mirror")
 	}
 }
 
@@ -294,6 +300,16 @@ func TestLinkConcurrentSessions_MirrorsPreexistingWorkers(t *testing.T) {
 	}
 	if mirrored.AcceptGrading != true || mirrored.AcceptHelp != false {
 		t.Fatalf("expected mirror to inherit preferences, got grading=%v help=%v", mirrored.AcceptGrading, mirrored.AcceptHelp)
+	}
+	if !mirrored.IsMirror {
+		t.Fatal("a row copied into the partner session at link time must be labelled a mirror")
+	}
+	var originAfter models.QueueWorker
+	if err := config.DB.Where("queue_session_id = ? AND user_id = ?", sessionA.ID, taUserID).First(&originAfter).Error; err != nil {
+		t.Fatalf("reload origin worker: %v", err)
+	}
+	if originAfter.IsMirror {
+		t.Fatal("mirroring must not relabel the row the worker actually joined")
 	}
 
 	// Re-running must stay idempotent — the unique index absorbs the duplicate.

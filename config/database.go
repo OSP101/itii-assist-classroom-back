@@ -854,6 +854,13 @@ func MigratePerformanceIndexes() {
 			sql: `CREATE INDEX IF NOT EXISTS idx_system_announcements_status_priority
 			      ON system_announcements (status, priority DESC, scheduled_at DESC)`,
 		},
+		{
+			// FlushDeferredEmails polls every minute for due, unsent rows only.
+			name: "deferred_emails_pending_send_after",
+			sql: `CREATE INDEX IF NOT EXISTS idx_deferred_emails_pending_send_after
+			      ON deferred_emails (send_after)
+			      WHERE sent_at IS NULL AND failed_at IS NULL`,
+		},
 	}
 
 	ensuredCount := 0

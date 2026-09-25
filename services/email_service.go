@@ -187,18 +187,18 @@ func SendScoreEditRequestSubmittedEmail(user *models.User, courseName, assignmen
 	subject := fmt.Sprintf("[%s] มีคำขอแก้ไขคะแนนใหม่: %s", cfg.AppName, assignmentName)
 
 	content := emailContent{
-		Section:  "คะแนน · คำขอแก้ไขคะแนน",
+		Section:  "คำขอแก้ไขคะแนน",
 		Title:    "คำขอแก้ไขคะแนนใหม่",
-		Subtitle: fmt.Sprintf("%s · %s", courseName, assignmentName),
-		BodyHTML: emailGreeting(displayName) +
+		Subtitle: fmt.Sprintf("%s ในวิชา %s", assignmentName, courseName),
+		BodyHTML: emailGreeting(displayName, user.Role) +
 			emailParagraph(fmt.Sprintf(`%s ส่งคำขอแก้ไขคะแนนของงาน "%s" ในวิชา %s กรุณาเข้าไปตรวจสอบและพิจารณาอนุมัติ`, html.EscapeString(requesterName), html.EscapeString(assignmentName), html.EscapeString(courseName))) +
 			emailQuoteBlock("เหตุผล", reason) +
 			emailButton("เปิดหน้ารายการอนุมัติ", link),
 	}
 	htmlBody := renderEmailHTML(content)
-	plainBody := renderEmailPlain(content, fmt.Sprintf("สวัสดีคุณ%s,\n\n%s ส่งคำขอแก้ไขคะแนนของงาน \"%s\" ในวิชา %s กรุณาเข้าไปตรวจสอบและพิจารณาอนุมัติ\nเหตุผล: %s\n\nเปิดหน้ารายการอนุมัติ: %s", displayName, requesterName, assignmentName, courseName, strings.TrimSpace(reason), link))
+	plainBody := renderEmailPlain(content, fmt.Sprintf("%s\n\n%s ส่งคำขอแก้ไขคะแนนของงาน \"%s\" ในวิชา %s กรุณาเข้าไปตรวจสอบและพิจารณาอนุมัติ\nเหตุผล: %s\n\nเปิดหน้ารายการอนุมัติ: %s", emailGreetingPlain(displayName, user.Role), requesterName, assignmentName, courseName, strings.TrimSpace(reason), link))
 
-	return sendEmail(emailMessage{
+	return sendNotificationEmail(emailMessage{
 		To:      strings.TrimSpace(user.Email),
 		Subject: subject,
 		HTML:    htmlBody,
@@ -229,19 +229,19 @@ func SendScoreEditRequestReviewedEmail(user *models.User, approved bool, assignm
 	subject := fmt.Sprintf("[%s] คำขอแก้ไขคะแนน%s: %s", cfg.AppName, resultText, assignmentName)
 
 	content := emailContent{
-		Section:  "คะแนน · คำขอแก้ไขคะแนน",
+		Section:  "คำขอแก้ไขคะแนน",
 		Title:    "คำขอแก้ไขคะแนน" + resultText,
 		Subtitle: assignmentName + countText,
 		Gradient: headerColor,
-		BodyHTML: emailGreeting(displayName) +
+		BodyHTML: emailGreeting(displayName, user.Role) +
 			emailParagraph(fmt.Sprintf(`คำขอแก้ไขคะแนนของงาน "%s" ที่คุณส่งมา%s%sแล้ว`, html.EscapeString(assignmentName), html.EscapeString(countText), html.EscapeString(resultText))) +
 			emailQuoteBlock("ความเห็นของผู้ตรวจสอบ", comment) +
 			emailButton("เปิดหน้ารายการอนุมัติ", link),
 	}
 	htmlBody := renderEmailHTML(content)
-	plainBody := renderEmailPlain(content, fmt.Sprintf("สวัสดีคุณ%s,\n\nคำขอแก้ไขคะแนนของงาน \"%s\" ที่คุณส่งมา%s%sแล้ว\nความเห็น: %s\n\nเปิดหน้ารายการอนุมัติ: %s", displayName, assignmentName, countText, resultText, strings.TrimSpace(comment), link))
+	plainBody := renderEmailPlain(content, fmt.Sprintf("%s\n\nคำขอแก้ไขคะแนนของงาน \"%s\" ที่คุณส่งมา%s%sแล้ว\nความเห็น: %s\n\nเปิดหน้ารายการอนุมัติ: %s", emailGreetingPlain(displayName, user.Role), assignmentName, countText, resultText, strings.TrimSpace(comment), link))
 
-	return sendEmail(emailMessage{
+	return sendNotificationEmail(emailMessage{
 		To:      strings.TrimSpace(user.Email),
 		Subject: subject,
 		HTML:    htmlBody,
@@ -290,14 +290,14 @@ func SendSystemAnnouncementEmail(user *models.User, announcement *models.SystemA
 		Section:   "ประกาศจากผู้ดูแลระบบ",
 		Title:     title,
 		Reference: emailReference("AN", announcement.ID),
-		BodyHTML: emailGreeting(displayName) +
+		BodyHTML: emailGreeting(displayName, user.Role) +
 			fmt.Sprintf(`<div style="margin: 0 0 20px; color: #475569; line-height: 1.7; white-space: pre-wrap;">%s</div>`, html.EscapeString(message)) +
 			actionBlock,
 	}
 	htmlBody := renderEmailHTML(content)
-	plainBody := renderEmailPlain(content, fmt.Sprintf("สวัสดีคุณ%s,\n\n%s\n%s", displayName, message, plainAction))
+	plainBody := renderEmailPlain(content, fmt.Sprintf("%s\n\n%s\n%s", emailGreetingPlain(displayName, user.Role), message, plainAction))
 
-	return sendEmail(emailMessage{
+	return sendNotificationEmail(emailMessage{
 		To:      strings.TrimSpace(user.Email),
 		Subject: subject,
 		HTML:    htmlBody,
@@ -316,9 +316,9 @@ func SendPasswordResetEmail(user *models.User, token string) error {
 	subject := fmt.Sprintf("[%s] รีเซ็ตรหัสผ่านของคุณ", cfg.AppName)
 
 	content := emailContent{
-		Section: "บัญชีผู้ใช้ · ความปลอดภัย",
+		Section: "ความปลอดภัยของบัญชีผู้ใช้",
 		Title:   "รีเซ็ตรหัสผ่าน",
-		BodyHTML: emailGreeting(displayName) +
+		BodyHTML: emailGreeting(displayName, user.Role) +
 			emailParagraph("มีการร้องขอให้รีเซ็ตรหัสผ่านสำหรับบัญชีของคุณ หากคุณเป็นผู้ดำเนินการเอง กรุณากดปุ่มด้านล่างภายใน 1 ชั่วโมง") +
 			emailButton("รีเซ็ตรหัสผ่าน", resetURL) +
 			`<p style="margin: 20px 0 8px; color: #64748b; line-height: 1.7;">หากปุ่มใช้งานไม่ได้ คุณสามารถเปิดลิงก์นี้ในเบราว์เซอร์:</p>` +
@@ -326,7 +326,7 @@ func SendPasswordResetEmail(user *models.User, token string) error {
 			emailMuted("หากคุณไม่ได้เป็นผู้ร้องขอ ไม่ต้องทำอะไร รหัสผ่านเดิมยังใช้ได้ตามปกติ"),
 	}
 	htmlBody := renderEmailHTML(content)
-	plainBody := renderEmailPlain(content, fmt.Sprintf("สวัสดีคุณ%s,\n\nมีการร้องขอให้รีเซ็ตรหัสผ่านสำหรับบัญชีของคุณ หากคุณเป็นผู้ดำเนินการเอง กรุณาเปิดลิงก์นี้ภายใน 1 ชั่วโมง:\n%s\n\nหากคุณไม่ได้เป็นผู้ร้องขอ ไม่ต้องทำอะไร", displayName, resetURL))
+	plainBody := renderEmailPlain(content, fmt.Sprintf("%s\n\nมีการร้องขอให้รีเซ็ตรหัสผ่านสำหรับบัญชีของคุณ หากคุณเป็นผู้ดำเนินการเอง กรุณาเปิดลิงก์นี้ภายใน 1 ชั่วโมง:\n%s\n\nหากคุณไม่ได้เป็นผู้ร้องขอ ไม่ต้องทำอะไร", emailGreetingPlain(displayName, user.Role), resetURL))
 
 	return sendEmail(emailMessage{
 		To:      strings.TrimSpace(user.Email),
@@ -353,12 +353,12 @@ func SendTwoFactorCodeEmail(user *models.User, code string, purpose string) erro
 
 	subject := fmt.Sprintf("[%s] รหัสยืนยัน %s", cfg.AppName, purposeText)
 	content := emailContent{
-		Section:  "บัญชีผู้ใช้ · ความปลอดภัย",
+		Section:  "ความปลอดภัยของบัญชีผู้ใช้",
 		Title:    "รหัสยืนยัน",
 		Subtitle: purposeText,
 		Gradient: emailGradientSuccess,
 		MaxWidth: 520,
-		BodyHTML: emailGreeting(displayName) +
+		BodyHTML: emailGreeting(displayName, user.Role) +
 			emailParagraph(fmt.Sprintf("ใช้รหัสนี้เพื่อ%s รหัสมีอายุ 5 นาที และใช้ได้เพียงครั้งเดียว", html.EscapeString(purposeText))) +
 			fmt.Sprintf(`<div style="margin: 0 0 24px; padding: 20px; border-radius: 16px; background: #dbeafe; border: 2px solid %s; text-align: center;">
         <div style="font-size: 12px; color: %s; letter-spacing: 2px; text-transform: uppercase; font-weight: 700;">Verification Code</div>
@@ -367,7 +367,7 @@ func SendTwoFactorCodeEmail(user *models.User, code string, purpose string) erro
 			emailMuted("หากคุณไม่ได้เป็นผู้ร้องขอ กรุณาเปลี่ยนรหัสผ่านและตรวจสอบความปลอดภัยของบัญชีทันที"),
 	}
 	htmlBody := renderEmailHTML(content)
-	plainBody := renderEmailPlain(content, fmt.Sprintf("สวัสดีคุณ%s,\n\nรหัสยืนยันสำหรับ%sของคุณคือ %s\nรหัสมีอายุ 5 นาที และใช้ได้เพียงครั้งเดียว", displayName, purposeText, code))
+	plainBody := renderEmailPlain(content, fmt.Sprintf("%s\n\nรหัสยืนยันสำหรับ%sของคุณคือ %s\nรหัสมีอายุ 5 นาที และใช้ได้เพียงครั้งเดียว", emailGreetingPlain(displayName, user.Role), purposeText, code))
 
 	return sendEmail(emailMessage{
 		To:      strings.TrimSpace(user.Email),
@@ -406,7 +406,7 @@ func SendSupportTicketAlert(feedback *models.Feedback) error {
 
 	subject := fmt.Sprintf("[%s] Support ticket #%d (%s)", cfg.AppName, feedback.ID, priorityLabel)
 	content := emailContent{
-		Section:   "แจ้งปัญหา · Support ticket",
+		Section:   "แจ้งปัญหา (Support ticket)",
 		Title:     feedback.Title,
 		Subtitle:  fmt.Sprintf("Priority %s · %s", priorityLabel, createdAt.Format("2006-01-02 15:04:05 MST")),
 		Reference: emailReference("TK", feedback.ID),

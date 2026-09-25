@@ -15,7 +15,7 @@ import (
 // =============================================================================
 
 type emailContent struct {
-	// Section คือชื่อส่วนของระบบที่ส่ง เช่น "ระบบเช็กชื่อ · คำขอลา"
+	// Section คือชื่อส่วนของระบบที่ส่ง เช่น "คำขอลาในระบบเช็กชื่อ"
 	Section string
 	// Title หัวเรื่องใหญ่ในแถบสี
 	Title string
@@ -179,8 +179,39 @@ func leaveEmailLocation() *time.Location {
 
 // ---- ชิ้นส่วนที่ใช้ซ้ำ ----
 
-func emailGreeting(name string) string {
-	return fmt.Sprintf(`<p style="margin: 0 0 16px; color: %s;">สวัสดีคุณ%s,</p>`, emailThemeText, html.EscapeString(name))
+const emailRecipientStudent = "student"
+
+// ตำแหน่งวิชาการที่อาจอยู่ในชื่ออาจารย์แล้ว ถ้ามีจะไม่เติม "อาจารย์" ซ้ำ
+var academicTitlePrefixes = []string{
+	"อาจารย์", "อ.", "ผู้ช่วยศาสตราจารย์", "ผศ.", "รองศาสตราจารย์", "รศ.", "ศาสตราจารย์", "ศ.", "ดร.",
+	"Dr.", "Asst.", "Assoc.", "Prof.",
+}
+
+// emailSalutation เรียกผู้รับตามบทบาท: อาจารย์และแอดมินใช้ "อาจารย์" ทีเอใช้ "คุณ"
+// นักศึกษามีคำนำหน้าในชื่ออยู่แล้ว (นาย/นางสาว) จึงไม่เติมอะไร
+func emailSalutation(name, role string) string {
+	name = strings.TrimSpace(name)
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case emailRecipientStudent:
+		return name
+	case "instructor", "admin":
+		for _, title := range academicTitlePrefixes {
+			if strings.HasPrefix(name, title) {
+				return name
+			}
+		}
+		return "อาจารย์" + name
+	default:
+		return "คุณ" + name
+	}
+}
+
+func emailGreetingPlain(name, role string) string {
+	return "สวัสดี " + emailSalutation(name, role) + ","
+}
+
+func emailGreeting(name, role string) string {
+	return fmt.Sprintf(`<p style="margin: 0 0 16px; color: %s;">%s</p>`, emailThemeText, html.EscapeString(emailGreetingPlain(name, role)))
 }
 
 func emailParagraph(text string) string {

@@ -1437,6 +1437,9 @@ func WorkerBookingActionHandler(c fiber.Ctx) error {
 	}
 
 	booking, err2 := repositories.WorkerUpdateBooking(uint(bookingID), workerID, input.Action, input.Score, input.WorkerNote)
+	if errors.Is(err2, repositories.ErrQueueBookingOtherCourse) {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "งานนี้เป็นของอีกวิชาในคิวที่แบ่งแยกงาน"})
+	}
 	if err2 != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update booking"})
 	}

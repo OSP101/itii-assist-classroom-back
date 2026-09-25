@@ -1,14 +1,11 @@
 package handlers
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"net/http"
 	"os"
-	"os/exec"
 	"runtime"
 	"sort"
 	"strconv"
@@ -156,16 +153,6 @@ func filterMonitoringTrendByRange(points []monitoringTrendPoint, rangeKey string
 		}
 	}
 	return filtered
-}
-
-type dockerContainerMetrics struct {
-	Name          string  `json:"name"`
-	CPUPercent    float64 `json:"cpuPercent"`
-	MemoryUsageMB float64 `json:"memoryUsageMB"`
-	MemoryLimitMB float64 `json:"memoryLimitMB"`
-	MemoryPercent float64 `json:"memoryPercent"`
-	Restarts      int     `json:"restarts"`
-	Status        string  `json:"status"`
 }
 
 func round2(value float64) float64 {
@@ -391,218 +378,6 @@ func GetSystemMetricsHandler(c fiber.Ctx) error {
 			"timestamp": time.Now().UTC().Format(time.RFC3339),
 		},
 	})
-}
-
-func parsePercentage(value string) float64 {
-	trimmed := strings.TrimSpace(strings.TrimSuffix(value, "%"))
-	if trimmed == "" {
-		return 0
-	}
-	parsed, err := strconv.ParseFloat(trimmed, 64)
-	if err != nil {
-		return 0
-	}
-	return round2(parsed)
-}
-
-func parseDockerSizeToMB(value string) float64 {
-	trimmed := strings.TrimSpace(strings.ToUpper(value))
-	if trimmed == "" {
-		return 0
-	}
-
-	idx := 0
-	for idx < len(trimmed) {
-		ch := trimmed[idx]
-		if (ch < '0' || ch > '9') && ch != '.' {
-			break
-		}
-		idx++
-	}
-
-	if idx == 0 {
-		return 0
-	}
-
-	numberPart := trimmed[:idx]
-	unitPart := strings.TrimSpace(trimmed[idx:])
-	parsed, err := strconv.ParseFloat(numberPart, 64)
-	if err != nil {
-		return 0
-	}
-
-	switch unitPart {
-	case "B":
-		return round2(parsed / (1024 * 1024))
-	case "KB", "KIB":
-		return round2(parsed / 1024)
-	case "MB", "MIB":
-		return round2(parsed)
-	case "GB", "GIB":
-		return round2(parsed * 1024)
-	case "TB", "TIB":
-		return round2(parsed * 1024 * 1024)
-	default:
-		return round2(parsed)
-	}
-}
-
-func parseDockerMemUsage(value string) (float64, float64) {
-	parts := strings.Split(value, "/")
-	if len(parts) == 0 {
-		return 0, 0
-	}
-
-	used := parseDockerSizeToMB(parts[0])
-	if len(parts) == 1 {
-		return used, 0
-	}
-	limit := parseDockerSizeToMB(parts[1])
-	return used, limit
-}
-
-func runDockerCommand(timeout time.Duration, args ...string) (string, error) {
-	if _, err := exec.LookPath("docker"); err != nil {
-		return "", err
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	output, err := cmd.CombinedOutput()
-	if ctx.Err() == context.DeadlineExceeded {
-		return "", ctx.Err()
-	}
-	if err != nil {
-		return "", errors.New(strings.TrimSpace(string(output)))
-	}
-
-	return string(output), nil
-}
-
-func collectContainerMetrics() ([]dockerContainerMetrics, string) {
-	psOutput, err := runDockerCommand(4*time.Second, "ps", "-a", "--format", "{{json .}}")
-	if err != nil {
-		return []dockerContainerMetrics{}, "docker_unavailable"
-	}
-
-	statsOutput, statsErr := runDockerCommand(4*time.Second, "stats", "--no-stream", "--format", "{{json .}}")
-	statsByName := map[string]dockerContainerMetrics{}
-	if statsErr == nil {
-		for _, line := range strings.Split(strings.TrimSpace(statsOutput), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-
-			var row map[string]string
-			if err := json.Unmarshal([]byte(line), &row); err != nil {
-				continue
-			}
-
-			name := strings.TrimSpace(row["Name"])
-			if name == "" {
-				continue
-			}
-
-			usedMB, limitMB := parseDockerMemUsage(row["MemUsage"])
-			memPercent := parsePercentage(row["MemPerc"])
-			statsByName[name] = dockerContainerMetrics{
-				Name:          name,
-				CPUPercent:    parsePercentage(row["CPUPerc"]),
-				MemoryUsageMB: usedMB,
-				MemoryLimitMB: limitMB,
-				MemoryPercent: memPercent,
-			}
-		}
-	}
-
-	inspectMap := map[string]dockerContainerMetrics{}
-	idOutput, idErr := runDockerCommand(4*time.Second, "ps", "-aq")
-	if idErr == nil {
-		ids := make([]string, 0)
-		for _, id := range strings.Split(strings.TrimSpace(idOutput), "\n") {
-			id = strings.TrimSpace(id)
-			if id != "" {
-				ids = append(ids, id)
-			}
-		}
-		if len(ids) > 0 {
-			args := []string{"inspect", "--format", "{{.Name}}|{{.RestartCount}}|{{.State.Status}}"}
-			args = append(args, ids...)
-			inspectOutput, inspectErr := runDockerCommand(6*time.Second, args...)
-			if inspectErr == nil {
-				for _, line := range strings.Split(strings.TrimSpace(inspectOutput), "\n") {
-					parts := strings.Split(line, "|")
-					if len(parts) < 3 {
-						continue
-					}
-					name := strings.TrimPrefix(strings.TrimSpace(parts[0]), "/")
-					restarts, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
-					status := strings.TrimSpace(parts[2])
-					if status == "" {
-						status = "stopped"
-					}
-					inspectMap[name] = dockerContainerMetrics{Name: name, Restarts: restarts, Status: status}
-				}
-			}
-		}
-	}
-
-	containers := make([]dockerContainerMetrics, 0)
-	for _, line := range strings.Split(strings.TrimSpace(psOutput), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		var row map[string]string
-		if err := json.Unmarshal([]byte(line), &row); err != nil {
-			continue
-		}
-
-		name := strings.TrimSpace(row["Names"])
-		if name == "" {
-			continue
-		}
-
-		metric := dockerContainerMetrics{Name: name, Status: strings.ToLower(strings.TrimSpace(row["State"]))}
-		if metric.Status == "" {
-			metric.Status = "stopped"
-		}
-
-		if stats, ok := statsByName[name]; ok {
-			metric.CPUPercent = stats.CPUPercent
-			metric.MemoryUsageMB = stats.MemoryUsageMB
-			metric.MemoryLimitMB = stats.MemoryLimitMB
-			metric.MemoryPercent = stats.MemoryPercent
-		}
-		if inspect, ok := inspectMap[name]; ok {
-			metric.Restarts = inspect.Restarts
-			if inspect.Status != "" {
-				metric.Status = strings.ToLower(inspect.Status)
-			}
-		}
-
-		switch metric.Status {
-		case "running", "restarting", "stopped":
-		default:
-			metric.Status = "stopped"
-		}
-
-		containers = append(containers, metric)
-	}
-
-	sort.Slice(containers, func(i, j int) bool {
-		return containers[i].Name < containers[j].Name
-	})
-
-	source := "docker_cli"
-	if statsErr != nil {
-		source = "docker_cli_partial"
-	}
-	return containers, source
 }
 
 func collectWebsiteProbes() []websiteProbeSample {

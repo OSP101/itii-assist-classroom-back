@@ -75,14 +75,13 @@ func RequireQueueWorkerOrCoursePermission(sessionParam string, permissionKey str
 			return c.Status(403).JSON(fiber.Map{"success": false, "message": "คุณไม่มีสิทธิ์ใช้งานฟังก์ชันนี้"})
 		}
 
-		// A "separated" group still mirrors worker rows for visibility, but that
-		// row must never grant *new* cross-course authorization - only a genuine
-		// course-role permission (already checked above) may open a booking a
-		// worker doesn't already hold. The one exception: AssignNextWaitingBookingToWorker
-		// guarantees a booking already assigned to this worker stays completable
-		// even after the group later switches to "separated" (see its comment) -
-		// so finishing a booking that is already theirs must still get through,
-		// or it would be stuck in_progress forever with nobody able to close it.
+		// Reached only when the URL names a session whose course the user has no
+		// permission on (the worker page normally sends the TA's own session, which
+		// passes the check above). In a "separated" group a mirror row alone must
+		// not open that session's bookings, except one already assigned to this
+		// worker - it has to stay completable after a switch to "separated". The
+		// real separation is enforced where bookings are assigned (is_mirror in
+		// queue_repo.go), not here.
 		groupMode, modeErr := repositories.GetConcurrentGroupMode(sessionID)
 		if modeErr != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to validate queue group mode"})

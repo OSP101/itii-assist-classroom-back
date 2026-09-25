@@ -134,6 +134,7 @@ func main() {
 		&models.SystemAnnouncement{},
 		&models.SystemAnnouncementAck{},
 		&models.SystemAnnouncementDismissal{},
+		&models.DeferredEmail{},
 		&models.DatabaseBackupRecord{},
 		// Feedback และ Log
 		&models.Feedback{},
@@ -171,6 +172,14 @@ func main() {
 		log.Printf("⚠️  Failed to deduplicate legacy attendance records: %v", err)
 	} else if cleaned > 0 {
 		log.Printf("🧹 Deduplicated attendance_records for %d session/student pair(s)", cleaned)
+	}
+
+	// One-time labelling of queue_workers mirror rows that predate is_mirror,
+	// so "separated" queue groups stop dispatching to them.
+	if labelled, err := repositories.BackfillQueueWorkerMirrorFlagWithDB(config.DB); err != nil {
+		log.Printf("⚠️  Failed to backfill queue_workers.is_mirror (will retry next boot): %v", err)
+	} else if labelled > 0 {
+		log.Printf("🪞 Labelled %d legacy queue worker row(s) as mirrors", labelled)
 	}
 
 	// Last step of the DB setup: every migration above has run its DDL as a
@@ -314,13 +323,13 @@ func main() {
 			}
 		}
 	}()
-	// Background job: เตือนผู้สอนวันละครั้งเมื่อมีคำขอลาค้างเกิน 3 วัน
+	// Background job: ส่งอีเมลถึงอาจารย์ที่ถูกเลื่อนไว้เพราะเกิดนอกช่วง 08:01-20:00
 	shutdownWG.Add(1)
 	go func() {
 		defer shutdownWG.Done()
-		leader := config.StartLeaderElection("leave-request-pending-reminder", leaderTTL)
+		leader := config.StartLeaderElection("deferred-email-flush", leaderTTL)
 		defer leader.Stop()
-		ticker := time.NewTicker(24 * time.Hour)
+		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		for {
 			select {
@@ -330,7 +339,27 @@ func main() {
 				if !leader.IsLeader() {
 					continue
 				}
-				handlers.RunLeaveRequestPendingReminder(72 * time.Hour)
+				services.FlushDeferredEmails(50)
+			}
+		}
+	}()
+	// Background job: เตือนผู้สอนวันละครั้งตอน 08:01 เวลาไทย เมื่อมีคำขอลาค้างเกิน 3 วัน
+	shutdownWG.Add(1)
+	go func() {
+		defer shutdownWG.Done()
+		leader := config.StartLeaderElection("leave-request-pending-reminder", leaderTTL)
+		defer leader.Stop()
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-shutdownCtx.Done():
+				return
+			case now := <-ticker.C:
+				if !leader.IsLeader() {
+					continue
+				}
+				handlers.RunDailyLeaveRequestPendingReminder(now, 72*time.Hour)
 			}
 		}
 	}()

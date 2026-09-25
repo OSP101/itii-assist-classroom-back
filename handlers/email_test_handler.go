@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"net/mail"
 	"strings"
 	"sync"
@@ -108,6 +109,22 @@ func SendTestEmailHandler(c fiber.Ctx) error {
 		"template":   template,
 		"provider":   summary.Provider,
 		"elapsed_ms": elapsed.Milliseconds(),
+	}
+	if errors.Is(err, services.ErrEmailDeferred) {
+		detail["deferred"] = err.Error()
+		logPrivilegedAdminAction(c, userID, "email_test_deferred", "info", "system_settings", "email", detail)
+		return c.JSON(fiber.Map{
+			"success": true,
+			"message": "ผู้รับเป็นอาจารย์และอยู่นอกช่วงเวลาส่ง 08:01 ถึง 20:00 น. ระบบจึงเลื่อนอีเมลไปส่งในช่วงเวลาที่อนุญาต หากต้องการทดสอบการเชื่อมต่อทันที กรุณาใช้แม่แบบอีเมลทดสอบธรรมดา",
+			"data": fiber.Map{
+				"to":         to,
+				"template":   template,
+				"provider":   summary.Provider,
+				"deferred":   err.Error(),
+				"elapsed_ms": elapsed.Milliseconds(),
+				"remaining":  remaining,
+			},
+		})
 	}
 	if err != nil {
 		detail["error"] = err.Error()

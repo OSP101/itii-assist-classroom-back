@@ -139,7 +139,7 @@ func DiagnoseEmailTransport() EmailDiagnosticReport {
 			rawConn.Close()
 			addStep("tls_implicit", "fail", err.Error(), smtpTLSHint(err), started)
 			report.Overall = "fail"
-			report.Advice = append(report.Advice, "ลองสลับโหมด: ถ้าเซิร์ฟเวอร์ใช้ STARTTLS ให้ตั้ง SMTP_PORT=587 (SMTP_SECURE=true)")
+			report.Advice = append(report.Advice, "ลองสลับโหมด: หากเซิร์ฟเวอร์ใช้ STARTTLS ให้ตั้ง SMTP_PORT=587 (SMTP_SECURE=true)")
 			return report
 		}
 		tlsConn.SetDeadline(time.Time{})
@@ -159,7 +159,7 @@ func DiagnoseEmailTransport() EmailDiagnosticReport {
 		client, err = smtp.NewClient(rawConn, cfg.SMTPHost)
 		if err != nil {
 			rawConn.Close()
-			addStep("greeting", "fail", err.Error(), "เซิร์ฟเวอร์ไม่ตอบ 220 แบบ plaintext: ถ้าพอร์ตนี้เป็น implicit TLS (465) ให้ตั้ง SMTP_PORT=465 และ SMTP_SECURE=true", started)
+			addStep("greeting", "fail", err.Error(), "เซิร์ฟเวอร์ไม่ตอบ 220 แบบ plaintext: หากพอร์ตนี้เป็น implicit TLS (465) ให้ตั้ง SMTP_PORT=465 และ SMTP_SECURE=true", started)
 			report.Overall = "fail"
 			return report
 		}
@@ -189,7 +189,7 @@ func DiagnoseEmailTransport() EmailDiagnosticReport {
 	if report.Mode == "starttls" {
 		started = time.Now()
 		if ok, _ := client.Extension("STARTTLS"); !ok {
-			addStep("starttls", "fail", "server does not advertise STARTTLS", "ตั้ง SMTP_SECURE=false ถ้าเป็น relay ภายในแบบไม่เข้ารหัส หรือใช้พอร์ต 465 ถ้าเป็น implicit TLS", started)
+			addStep("starttls", "fail", "server does not advertise STARTTLS", "ตั้ง SMTP_SECURE=false หากเป็น relay ภายในแบบไม่เข้ารหัส หรือใช้พอร์ต 465 หากเป็น implicit TLS", started)
 			report.Overall = "fail"
 			return report
 		}
@@ -213,8 +213,8 @@ func DiagnoseEmailTransport() EmailDiagnosticReport {
 			if isTLSHandshakeFailure(err) {
 				report.Advice = append(report.Advice,
 					"ลอง SMTP_TLS_MIN_VERSION=1.0 (relay เก่า)",
-					"ถ้าเป็น relay ภายในที่ใช้ self-signed ลอง SMTP_TLS_SKIP_VERIFY=true",
-					"ถ้า relay ต้องการ client certificate ให้ติดต่อผู้ดูแลเมลเซิร์ฟเวอร์")
+					"หากเป็น relay ภายในที่ใช้ self-signed ลอง SMTP_TLS_SKIP_VERIFY=true",
+					"หาก relay ต้องการ client certificate ให้ติดต่อผู้ดูแลเมลเซิร์ฟเวอร์")
 			}
 			return report
 		}
@@ -236,7 +236,7 @@ func DiagnoseEmailTransport() EmailDiagnosticReport {
 		addStep("auth", "skip", "no SMTP_USER, relying on IP allowlist", "", started)
 	} else {
 		if ok, mechs := client.Extension("AUTH"); !ok {
-			addStep("auth", "fail", "server does not advertise AUTH", "ถ้า relay ใช้ IP allowlist ให้ลบ SMTP_USER/SMTP_PASS ออก", started)
+			addStep("auth", "fail", "server does not advertise AUTH", "หาก relay ใช้ IP allowlist ให้ลบ SMTP_USER/SMTP_PASS ออก", started)
 			report.Overall = "fail"
 			return report
 		} else if err := client.Auth(smtp.PlainAuth("", cfg.SMTPUser, cfg.SMTPPass, cfg.SMTPHost)); err != nil {

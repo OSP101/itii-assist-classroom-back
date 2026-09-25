@@ -104,14 +104,14 @@ func SendTestEmail(templateKey string, to string, requestedBy string) (time.Dura
 	case "plain":
 		err = sendPlainTestEmail(to, requestedBy)
 	case "leave_submitted":
-		err = SendLeaveRequestSubmittedEmail(1234, to, "ผู้ทดสอบระบบ", "CP421024 การเขียนโปรแกรมเชิงวัตถุ", "นางสาวทดสอบ ระบบ", "650001", "sick", "ป่วยเป็นไข้หวัด มีใบรับรองแพทย์แนบ (ข้อความทดสอบ)", sampleItems, 1, LeaveRequestReviewURL("test-course"))
+		err = SendLeaveRequestSubmittedEmail(1234, to, "ทดสอบระบบ", "instructor", "CP421024 การเขียนโปรแกรมเชิงวัตถุ", "นางสาวทดสอบ ระบบ", "650001", "sick", "ป่วยเป็นไข้หวัด มีใบรับรองแพทย์แนบ (ข้อความทดสอบ)", sampleItems, 1, LeaveRequestReviewURL("test-course"))
 	case "leave_reviewed_approved":
-		err = SendLeaveRequestReviewedEmail(1234, to, "ผู้ทดสอบระบบ", "CP421024 การเขียนโปรแกรมเชิงวัตถุ", "sick", "approved", "หายไว ๆ นะ (ข้อความทดสอบ)", sampleItems, StudentLeaveRequestURL("test-course"))
+		err = SendLeaveRequestReviewedEmail(1234, to, "นางสาวทดสอบ ระบบ", "CP421024 การเขียนโปรแกรมเชิงวัตถุ", "sick", "approved", "หายไว ๆ นะ (ข้อความทดสอบ)", sampleItems, StudentLeaveRequestURL("test-course"))
 	case "leave_reviewed_rejected":
 		rejected := []LeaveEmailItem{{DateText: "จันทร์ 15 ก.ย. 2569", SessionText: "Lecture 09:00 ถึง 12:00", Result: "rejected"}}
-		err = SendLeaveRequestReviewedEmail(1234, to, "ผู้ทดสอบระบบ", "CP421024 การเขียนโปรแกรมเชิงวัตถุ", "personal", "rejected", "หลักฐานไม่ครบ (ข้อความทดสอบ)", rejected, StudentLeaveRequestURL("test-course"))
+		err = SendLeaveRequestReviewedEmail(1234, to, "นางสาวทดสอบ ระบบ", "CP421024 การเขียนโปรแกรมเชิงวัตถุ", "personal", "rejected", "หลักฐานไม่ครบ (ข้อความทดสอบ)", rejected, StudentLeaveRequestURL("test-course"))
 	case "leave_pending_reminder":
-		err = SendLeaveRequestPendingReminderEmail(to, "ผู้ทดสอบระบบ", "CP421024 การเขียนโปรแกรมเชิงวัตถุ", 3, 4, LeaveRequestReviewURL("test-course"))
+		err = SendLeaveRequestPendingReminderEmail(to, "ทดสอบระบบ", "instructor", "CP421024 การเขียนโปรแกรมเชิงวัตถุ", 3, 4, LeaveRequestReviewURL("test-course"))
 	case "score_edit_submitted":
 		err = SendScoreEditRequestSubmittedEmail(recipient, "CP421024 การเขียนโปรแกรมเชิงวัตถุ", "Lab 3", "ผู้ช่วยสอนทดสอบ", "กรอกคะแนนผิด (ข้อความทดสอบ)", CourseApprovalURL("test-course"))
 	case "score_edit_reviewed":
@@ -131,12 +131,12 @@ func sendPlainTestEmail(to string, requestedBy string) error {
 	now := time.Now().Format("2 Jan 2006 15:04:05 MST")
 	subject := fmt.Sprintf("[%s] ทดสอบการส่งอีเมล %s", cfg.AppName, now)
 	content := emailContent{
-		Section:   "ผู้ดูแลระบบ · ทดสอบอีเมล",
+		Section:   "ทดสอบอีเมลสำหรับผู้ดูแลระบบ",
 		Title:     "ทดสอบการส่งอีเมลสำเร็จ",
 		Subtitle:  "ส่งผ่าน " + cfg.Provider,
 		Gradient:  emailGradientSuccess,
 		Reference: "TEST-" + time.Now().Format("150405"),
-		BodyHTML: emailParagraph(fmt.Sprintf("ถ้าคุณได้รับข้อความนี้ แสดงว่าระบบส่งอีเมลผ่าน <b>%s</b> ทำงานได้ปกติ", html.EscapeString(cfg.Provider))) +
+		BodyHTML: emailParagraph(fmt.Sprintf("หากคุณได้รับข้อความนี้ แสดงว่าระบบส่งอีเมลผ่าน <b>%s</b> ทำงานได้ปกติ", html.EscapeString(cfg.Provider))) +
 			fmt.Sprintf(`<table style="font-size: 13px; color: #475569;">
         <tr><td style="padding: 3px 12px 3px 0;">ผู้ส่ง</td><td>%s</td></tr>
         <tr><td style="padding: 3px 12px 3px 0;">ขอทดสอบโดย</td><td>%s</td></tr>

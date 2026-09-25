@@ -10,7 +10,7 @@ import (
 // อีเมลคำขอลา
 // =============================================================================
 
-const leaveEmailSection = "ระบบเช็กชื่อ · คำขอลา"
+const leaveEmailSection = "คำขอลาในระบบเช็กชื่อ"
 
 // LeaveEmailItem รายการวันลา 1 แถวในอีเมล
 type LeaveEmailItem struct {
@@ -107,7 +107,7 @@ func StudentLeaveRequestURL(courseID string) string {
 }
 
 // SendLeaveRequestSubmittedEmail แจ้งผู้สอน/TA ว่ามีคำขอลาใหม่
-func SendLeaveRequestSubmittedEmail(requestID uint, toEmail, toName, courseName, studentName, studentCode, leaveType, reason string, items []LeaveEmailItem, evidenceCount int, link string) error {
+func SendLeaveRequestSubmittedEmail(requestID uint, toEmail, toName, toRole, courseName, studentName, studentCode, leaveType, reason string, items []LeaveEmailItem, evidenceCount int, link string) error {
 	if strings.TrimSpace(toEmail) == "" {
 		return fmt.Errorf("leave request email requires a recipient")
 	}
@@ -124,19 +124,19 @@ func SendLeaveRequestSubmittedEmail(requestID uint, toEmail, toName, courseName,
 	content := emailContent{
 		Section:   leaveEmailSection,
 		Title:     "คำขอลาใหม่รอพิจารณา",
-		Subtitle:  fmt.Sprintf("%s · %s", courseName, typeLabel),
+		Subtitle:  fmt.Sprintf("%s (%s)", courseName, typeLabel),
 		Reference: ref,
-		BodyHTML: emailGreeting(toName) +
+		BodyHTML: emailGreeting(toName, toRole) +
 			emailParagraph(fmt.Sprintf(`%s (%s) ส่งคำขอ<strong>%s</strong>ในวิชา %s จำนวน %d วัน กรุณาเข้าไปพิจารณา`, html.EscapeString(studentName), html.EscapeString(studentCode), html.EscapeString(typeLabel), html.EscapeString(courseName), len(items))) +
 			leaveItemsTableHTML(items, false) +
 			emailQuoteBlock("เหตุผล", reason) +
 			emailMuted(html.EscapeString(evidenceText)) +
 			emailButton("เปิดหน้าคำขอลา", link),
 	}
-	plain := fmt.Sprintf("สวัสดีคุณ%s,\n\n%s (%s) ส่งคำขอ%sในวิชา %s จำนวน %d วัน กรุณาเข้าไปพิจารณา\n\nวันที่ขอลา:\n%s\nเหตุผล: %s\n%s\n\nเปิดหน้าคำขอลา: %s",
-		toName, studentName, studentCode, typeLabel, courseName, len(items), leaveItemsPlain(items, false), strings.TrimSpace(reason), evidenceText, link)
+	plain := fmt.Sprintf("%s\n\n%s (%s) ส่งคำขอ%sในวิชา %s จำนวน %d วัน กรุณาเข้าไปพิจารณา\n\nวันที่ขอลา:\n%s\nเหตุผล: %s\n%s\n\nเปิดหน้าคำขอลา: %s",
+		emailGreetingPlain(toName, toRole), studentName, studentCode, typeLabel, courseName, len(items), leaveItemsPlain(items, false), strings.TrimSpace(reason), evidenceText, link)
 
-	return sendEmail(emailMessage{To: strings.TrimSpace(toEmail), Subject: subject, HTML: renderEmailHTML(content), Plain: renderEmailPlain(content, plain)})
+	return sendNotificationEmail(emailMessage{To: strings.TrimSpace(toEmail), Subject: subject, HTML: renderEmailHTML(content), Plain: renderEmailPlain(content, plain)})
 }
 
 // SendLeaveRequestReviewedEmail แจ้งผลให้นักศึกษา (อนุมัติ/บางส่วน/ไม่อนุมัติ/ถอนอนุมัติ)
@@ -170,9 +170,9 @@ func SendLeaveRequestReviewedEmail(requestID uint, toEmail, toName, courseName, 
 
 	note := ""
 	if status == "approved" || status == "partially_approved" {
-		note = emailMuted(`วันที่อนุมัติแล้ว ระบบบันทึกสถานะเช็กชื่อเป็น "ลา" ให้อัตโนมัติ ถ้าคาบเรียนของวันนั้นยังไม่ถูกสร้าง ระบบจะบันทึกให้เมื่อผู้สอนสร้างคาบ`)
+		note = emailMuted(`วันที่อนุมัติแล้ว ระบบบันทึกสถานะเช็กชื่อเป็น "ลา" ให้อัตโนมัติ หากคาบเรียนของวันนั้นยังไม่ถูกสร้าง ระบบจะบันทึกให้เมื่อผู้สอนสร้างคาบ`)
 	} else if status == "expired" {
-		note = emailMuted(`คำขอนี้ไม่มีการพิจารณาภายในเวลาที่รายวิชากำหนด ระบบจึงปิดคำขออัตโนมัติ หากยังต้องการลา กรุณาติดต่อผู้สอนโดยตรงหรือส่งคำขอใหม่ (ถ้ายังอยู่ในช่วงเวลาที่ขอลาได้)`)
+		note = emailMuted(`คำขอนี้ไม่มีการพิจารณาภายในเวลาที่รายวิชากำหนด ระบบจึงปิดคำขออัตโนมัติ หากยังต้องการลา กรุณาติดต่อผู้สอนโดยตรงหรือส่งคำขอใหม่ (หากยังอยู่ในช่วงเวลาที่ขอลาได้)`)
 	}
 
 	content := emailContent{
@@ -181,21 +181,21 @@ func SendLeaveRequestReviewedEmail(requestID uint, toEmail, toName, courseName, 
 		Subtitle:  courseName,
 		Gradient:  gradient,
 		Reference: ref,
-		BodyHTML: emailGreeting(toName) +
+		BodyHTML: emailGreeting(toName, emailRecipientStudent) +
 			emailParagraph(fmt.Sprintf(`คำขอ%sของคุณในวิชา %s %sแล้ว รายละเอียดรายวัน:`, html.EscapeString(typeLabel), html.EscapeString(courseName), html.EscapeString(resultText))) +
 			leaveItemsTableHTML(items, true) +
 			emailQuoteBlock(commentLabel, comment) +
 			note +
 			emailButton("ดูคำขอลาของฉัน", link),
 	}
-	plain := fmt.Sprintf("สวัสดีคุณ%s,\n\nคำขอ%sของคุณในวิชา %s %sแล้ว\n\n%s\nความเห็นของผู้สอน: %s\n\nดูคำขอลาของฉัน: %s",
-		toName, typeLabel, courseName, resultText, leaveItemsPlain(items, true), strings.TrimSpace(comment), link)
+	plain := fmt.Sprintf("%s\n\nคำขอ%sของคุณในวิชา %s %sแล้ว\n\n%s\nความเห็นของผู้สอน: %s\n\nดูคำขอลาของฉัน: %s",
+		emailGreetingPlain(toName, emailRecipientStudent), typeLabel, courseName, resultText, leaveItemsPlain(items, true), strings.TrimSpace(comment), link)
 
-	return sendEmail(emailMessage{To: strings.TrimSpace(toEmail), Subject: subject, HTML: renderEmailHTML(content), Plain: renderEmailPlain(content, plain)})
+	return sendNotificationEmail(emailMessage{To: strings.TrimSpace(toEmail), Subject: subject, HTML: renderEmailHTML(content), Plain: renderEmailPlain(content, plain)})
 }
 
 // SendLeaveRequestPendingReminderEmail เตือนผู้สอนว่ามีคำขอค้างนาน
-func SendLeaveRequestPendingReminderEmail(toEmail, toName, courseName string, pendingCount int, oldestDays int, link string) error {
+func SendLeaveRequestPendingReminderEmail(toEmail, toName, toRole, courseName string, pendingCount int, oldestDays int, link string) error {
 	if strings.TrimSpace(toEmail) == "" {
 		return fmt.Errorf("leave reminder email requires a recipient")
 	}
@@ -206,11 +206,11 @@ func SendLeaveRequestPendingReminderEmail(toEmail, toName, courseName string, pe
 		Title:    "คำขอลาค้างพิจารณา",
 		Subtitle: courseName,
 		Gradient: emailGradientWarning,
-		BodyHTML: emailGreeting(toName) +
+		BodyHTML: emailGreeting(toName, toRole) +
 			emailParagraph(fmt.Sprintf(`วิชา %s มีคำขอลาที่ยังไม่ได้พิจารณา <strong>%d รายการ</strong> รายการที่เก่าที่สุดค้างมา %d วันแล้ว`, html.EscapeString(courseName), pendingCount, oldestDays)) +
-			emailMuted("ระบบส่งเตือนวันละครั้งจนกว่าคำขอจะถูกพิจารณา") +
+			emailMuted("ระบบส่งเตือนวันละครั้งเวลา 08:01 น. จนกว่าคำขอจะถูกพิจารณา") +
 			emailButton("เปิดหน้าคำขอลา", link),
 	}
-	plain := fmt.Sprintf("สวัสดีคุณ%s,\n\nวิชา %s มีคำขอลาที่ยังไม่ได้พิจารณา %d รายการ รายการที่เก่าที่สุดค้างมา %d วันแล้ว\n\nเปิดหน้าคำขอลา: %s", toName, courseName, pendingCount, oldestDays, link)
-	return sendEmail(emailMessage{To: strings.TrimSpace(toEmail), Subject: subject, HTML: renderEmailHTML(content), Plain: renderEmailPlain(content, plain)})
+	plain := fmt.Sprintf("%s\n\nวิชา %s มีคำขอลาที่ยังไม่ได้พิจารณา %d รายการ รายการที่เก่าที่สุดค้างมา %d วันแล้ว\n\nเปิดหน้าคำขอลา: %s", emailGreetingPlain(toName, toRole), courseName, pendingCount, oldestDays, link)
+	return sendNotificationEmail(emailMessage{To: strings.TrimSpace(toEmail), Subject: subject, HTML: renderEmailHTML(content), Plain: renderEmailPlain(content, plain)})
 }

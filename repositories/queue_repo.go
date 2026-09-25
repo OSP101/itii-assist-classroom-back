@@ -278,7 +278,7 @@ func mirrorWorkersBetweenSessionsTx(tx *gorm.DB, sessionID1, sessionID2 string) 
 			return err
 		}
 		for _, w := range workers {
-			if err := insertWorkerRowTx(tx, target, w); err != nil {
+			if err := insertWorkerRowTx(tx, target, w, true); err != nil {
 				return err
 			}
 		}
@@ -1072,9 +1072,15 @@ func resetDeskStatus(bookingType string) string {
 	return "none"
 }
 
-func countEligibleOnlineWorkers(tx *gorm.DB, sessionID, bookingType string, now time.Time) (int64, error) {
+// excludeMirrors drops mirror rows from the pool, for a "separated" group where
+// they can never be handed the session's bookings and so must not count as
+// available.
+func countEligibleOnlineWorkers(tx *gorm.DB, sessionID, bookingType string, now time.Time, excludeMirrors bool) (int64, error) {
 	query := tx.Model(&models.QueueWorker{}).
 		Where("queue_session_id = ? AND status = ? AND current_booking_id IS NULL AND (offer_paused_until IS NULL OR offer_paused_until <= ?)", sessionID, "online", now)
+	if excludeMirrors {
+		query = query.Where("is_mirror = ?", false)
+	}
 
 	if bookingType == "grading" {
 		query = query.Where("accept_grading = ?", true)
@@ -1092,9 +1098,12 @@ func countEligibleOnlineWorkers(tx *gorm.DB, sessionID, bookingType string, now 
 // minLoadAmongEligibleWorkers returns the lowest completed-task count among workers
 // currently free and eligible for the given booking type. Used only as a fairness
 // signal in AssignNextWaitingBookingToWorker - never to pick who gets assigned.
-func minLoadAmongEligibleWorkers(tx *gorm.DB, sessionID, bookingType string, now time.Time) (int64, error) {
+func minLoadAmongEligibleWorkers(tx *gorm.DB, sessionID, bookingType string, now time.Time, excludeMirrors bool) (int64, error) {
 	query := tx.Model(&models.QueueWorker{}).
 		Where("queue_session_id = ? AND status = ? AND current_booking_id IS NULL AND (offer_paused_until IS NULL OR offer_paused_until <= ?)", sessionID, "online", now)
+	if excludeMirrors {
+		query = query.Where("is_mirror = ?", false)
+	}
 
 	if bookingType == "grading" {
 		query = query.Where("accept_grading = ?", true)
@@ -1124,14 +1133,25 @@ func WorkerJoin(sessionID string, userID uint, acceptGrading, acceptHelp bool) (
 			AcceptHelp:               acceptHelp,
 			PushNotificationsEnabled: true,
 			Status:                   "online",
-		}); createErr != nil {
+		}, false); createErr != nil {
 			return nil, createErr
 		}
 		if loadErr := config.DB.Where("queue_session_id = ? AND user_id = ?", sessionID, userID).First(&w).Error; loadErr != nil {
 			return nil, loadErr
 		}
+		// DoNothing may have kept a mirror row a concurrent group mirror
+		// inserted first; this user is joining this session directly.
+		if w.IsMirror {
+			if promoteErr := config.DB.Model(&models.QueueWorker{}).Where("id = ?", w.ID).Update("is_mirror", false).Error; promoteErr != nil {
+				return nil, promoteErr
+			}
+			w.IsMirror = false
+		}
 		return &w, nil
 	}
+	// Joining a session directly promotes a mirror row created earlier (e.g. a TA
+	// who belongs to both linked courses and joined the partner session first).
+	w.IsMirror = false
 	w.Status = "online"
 	w.AcceptGrading = acceptGrading
 	w.AcceptHelp = acceptHelp
@@ -1179,7 +1199,7 @@ func WorkerJoinMirrorGroup(sessionID string, userID uint, acceptGrading, acceptH
 				PushNotificationsEnabled: true,
 				Status:                   "online",
 			}
-			if createErr := insertWorkerRowTx(config.DB, gid, source); createErr != nil {
+			if createErr := insertWorkerRowTx(config.DB, gid, source, true); createErr != nil {
 				return createErr
 			}
 		} else {
@@ -1200,6 +1220,12 @@ func WorkerJoinMirrorGroup(sessionID string, userID uint, acceptGrading, acceptH
 // errWorkerNotRegistered is returned when a user holds no QueueWorker row for a
 // booking's own session and none can be mirrored from its concurrent group.
 var errWorkerNotRegistered = errors.New("worker not registered for this queue session")
+
+// ErrQueueBookingOtherCourse is returned when a worker tries to accept an offer
+// through a mirror row in a "separated" group - a booking of the partner
+// course that should never have reached them (e.g. an offer made before the
+// group was switched to separated).
+var ErrQueueBookingOtherCourse = errors.New("booking belongs to the other course of a separated queue group")
 
 // concurrentSessionIDsTx is the transaction-scoped twin of GetConcurrentSessionIDs.
 // It must read through tx so callers holding row locks see a consistent group.
@@ -1223,25 +1249,35 @@ func concurrentSessionIDsTx(tx *gorm.DB, sessionID string) ([]string, error) {
 // dispatchGroupContextTx loads everything AssignNextWaitingBookingToWorker
 // needs about sessionID's concurrent group in one row read (plus one Pluck
 // when actually grouped): every session id sharing its group (or just
-// [sessionID] if ungrouped), its own link_mode, and its own course_id. It
+// [sessionID] if ungrouped) and its own link_mode. It
 // reads through tx so a caller holding row locks sees a consistent group -
 // see concurrentSessionIDsTx, whose group-expansion logic this mirrors.
-func dispatchGroupContextTx(tx *gorm.DB, sessionID string) (groupSessionIDs []string, linkMode string, courseID string, err error) {
+func dispatchGroupContextTx(tx *gorm.DB, sessionID string) (groupSessionIDs []string, linkMode string, err error) {
 	var s models.QueueSession
-	if err = tx.Select("concurrent_group_id", "link_mode", "course_id").Where("id = ?", sessionID).First(&s).Error; err != nil {
-		return nil, "", "", err
+	if err = tx.Select("concurrent_group_id", "link_mode").Where("id = ?", sessionID).First(&s).Error; err != nil {
+		return nil, "", err
 	}
 	linkMode = s.LinkMode
-	courseID = s.CourseID
 	if s.ConcurrentGroupID == nil || *s.ConcurrentGroupID == "" {
-		return []string{sessionID}, linkMode, courseID, nil
+		return []string{sessionID}, linkMode, nil
 	}
 	if err = tx.Model(&models.QueueSession{}).
 		Where("concurrent_group_id = ?", *s.ConcurrentGroupID).
 		Pluck("id", &groupSessionIDs).Error; err != nil {
-		return nil, "", "", err
+		return nil, "", err
 	}
-	return groupSessionIDs, linkMode, courseID, nil
+	return groupSessionIDs, linkMode, nil
+}
+
+// sessionIsSeparatedTx reports whether sessionID sits in a concurrent group
+// whose link_mode is "separated" - i.e. whether mirror rows in it must be kept
+// out of dispatch.
+func sessionIsSeparatedTx(tx *gorm.DB, sessionID string) (bool, error) {
+	var s models.QueueSession
+	if err := tx.Select("concurrent_group_id", "link_mode").Where("id = ?", sessionID).First(&s).Error; err != nil {
+		return false, err
+	}
+	return s.ConcurrentGroupID != nil && *s.ConcurrentGroupID != "" && s.LinkMode == QueueLinkModeSeparated, nil
 }
 
 // insertWorkerRowTx inserts a worker row for targetSessionID, doing nothing if one
@@ -1254,7 +1290,7 @@ func dispatchGroupContextTx(tx *gorm.DB, sessionID string) (groupSessionIDs []st
 // help would be written as accepting it, and since assignment filters purely on
 // these columns, they would keep being offered work they declined. Map values are
 // written verbatim. Columns left out (the counters) still take their defaults.
-func insertWorkerRowTx(tx *gorm.DB, targetSessionID string, source models.QueueWorker) error {
+func insertWorkerRowTx(tx *gorm.DB, targetSessionID string, source models.QueueWorker, isMirror bool) error {
 	now := time.Now()
 	return tx.Model(&models.QueueWorker{}).
 		Clauses(clause.OnConflict{DoNothing: true}).
@@ -1265,6 +1301,7 @@ func insertWorkerRowTx(tx *gorm.DB, targetSessionID string, source models.QueueW
 			"accept_help":                source.AcceptHelp,
 			"push_notifications_enabled": source.PushNotificationsEnabled,
 			"status":                     source.Status,
+			"is_mirror":                  isMirror,
 			"last_active_at":             &now,
 			"created_at":                 now,
 			"updated_at":                 now,
@@ -1314,7 +1351,7 @@ func lockWorkerRowForBookingSession(tx *gorm.DB, sessionID string, userID uint) 
 		return nil, err
 	}
 
-	if err := insertWorkerRowTx(tx, sessionID, origin); err != nil {
+	if err := insertWorkerRowTx(tx, sessionID, origin, true); err != nil {
 		return nil, err
 	}
 
@@ -1554,8 +1591,18 @@ func assignTimedOutBookingToOtherWorker(tx *gorm.DB, booking *models.QueueBookin
 		return 0, nil
 	}
 
+	separated, err := sessionIsSeparatedTx(tx, booking.QueueSessionID)
+	if err != nil {
+		return 0, err
+	}
+
 	query := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
 		Where("queue_session_id = ? AND user_id <> ? AND status = ? AND current_booking_id IS NULL AND (offer_paused_until IS NULL OR offer_paused_until <= ?)", booking.QueueSessionID, excludeWorkerID, "online", now)
+	if separated {
+		// A mirror row belongs to the partner course's TA; in a separated
+		// group the re-offer must stay with this session's own workers.
+		query = query.Where("is_mirror = ?", false)
+	}
 	if booking.BookingType == "grading" {
 		query = query.Where("accept_grading = ?", true)
 	} else {
@@ -1739,7 +1786,7 @@ func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.
 
 		// Collect all session IDs in the concurrent group (may be just [sessionID])
 		// along with this session's own link_mode/course_id in the same row read.
-		groupSessionIDs, groupLinkMode, groupCourseID, err := dispatchGroupContextTx(tx, sessionID)
+		groupSessionIDs, groupLinkMode, err := dispatchGroupContextTx(tx, sessionID)
 		if err != nil {
 			return err
 		}
@@ -1785,22 +1832,17 @@ func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.
 		// cross-course assignment (from before a switch to "separated") is always
 		// found and returned regardless of this gate. Read fresh every call (no
 		// caching) so a mode change takes effect on the very next dispatch.
+		separated := len(groupSessionIDs) > 1 && groupLinkMode == QueueLinkModeSeparated
 		dispatchSessionIDs := groupSessionIDs
-		if len(groupSessionIDs) > 1 && groupLinkMode == QueueLinkModeSeparated {
-			// This function is also the target of the background push sweep
-			// (dispatchWaitingBookingsToAvailableWorkers), which calls it for
-			// every QueueWorker row physically sitting in sessionID - including
-			// a mirrored row that exists purely for cross-group visibility.
-			// Narrowing the *booking pool* to sessionID alone is not enough by
-			// itself: a mirrored-only worker's row lives right there in
-			// sessionID's own worker table, so without this membership check
-			// they would still be handed sessionID's own bookings. Only a
-			// genuine member of this session's course may receive them.
-			hasRealAccess, accessErr := UserHasCourseAccess(groupCourseID, workerID, "instructor", "ta")
-			if accessErr != nil {
-				return accessErr
-			}
-			if !hasRealAccess {
+		if separated {
+			// The push sweep (dispatchWaitingBookingsToAvailableWorkers) calls
+			// this for every row sitting in sessionID, mirrors included, so
+			// narrowing the booking pool alone would still hand this session's
+			// own bookings to the partner course's TA. Only the session the
+			// worker actually joined may feed them work. Keyed on the joined
+			// session rather than course membership so staff who belong to both
+			// linked courses (always the instructor) are separated too.
+			if worker.IsMirror {
 				return nil
 			}
 			dispatchSessionIDs = []string{sessionID}
@@ -1819,7 +1861,7 @@ func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.
 			return waitingErr
 		}
 
-		eligibleWorkers, err := countEligibleOnlineWorkers(tx, waiting.QueueSessionID, waiting.BookingType, now)
+		eligibleWorkers, err := countEligibleOnlineWorkers(tx, waiting.QueueSessionID, waiting.BookingType, now, separated)
 		if err != nil {
 			return err
 		}
@@ -1831,7 +1873,7 @@ func AssignNextWaitingBookingToWorker(sessionID string, workerID uint) (*models.
 		// can claim it on their own next poll. After the grace window elapses,
 		// whoever asks gets it, so a booking can never be stuck indefinitely.
 		if eligibleWorkers > 1 && now.Sub(waiting.CreatedAt) < queueFairnessGraceWindow {
-			minLoad, loadErr := minLoadAmongEligibleWorkers(tx, waiting.QueueSessionID, waiting.BookingType, now)
+			minLoad, loadErr := minLoadAmongEligibleWorkers(tx, waiting.QueueSessionID, waiting.BookingType, now, separated)
 			if loadErr != nil {
 				return loadErr
 			}
@@ -2108,6 +2150,19 @@ func WorkerUpdateBooking(bookingID uint, workerID uint, action string, score *fl
 			}
 			if b.OfferExpiresAt != nil && now.After(*b.OfferExpiresAt) {
 				return fmt.Errorf("offer expired")
+			}
+			// Work already started stays completable after a switch to
+			// "separated"; only accepting a fresh offer is refused. The offer
+			// then lapses and ProcessQueueOfferTimeouts re-offers it to one of
+			// this session's own workers.
+			if worker.IsMirror {
+				separated, sepErr := sessionIsSeparatedTx(tx, b.QueueSessionID)
+				if sepErr != nil {
+					return sepErr
+				}
+				if separated {
+					return ErrQueueBookingOtherCourse
+				}
 			}
 
 			updates := map[string]interface{}{
@@ -2439,4 +2494,76 @@ func GetDeskStatuses(sessionID string) ([]models.QueueDeskStatus, error) {
 	var statuses []models.QueueDeskStatus
 	err := config.DB.Where("queue_session_id = ?", sessionID).Find(&statuses).Error
 	return statuses, err
+}
+
+const queueWorkerMirrorBackfillDoneKey = "system.queue.worker_mirror_backfill_completed"
+
+// BackfillQueueWorkerMirrorFlagWithDB labels mirror rows that predate the
+// is_mirror column (all of which defaulted to false) so "separated" groups
+// stop dispatching to them. Runs once, gated by an AppConfig marker: the
+// second rule below is a created_at heuristic, and re-running it on later
+// boots would demote rows a TA has since joined directly.
+//
+// Only rows in sessions that are currently grouped are touched:
+//  1. a row whose user is not staff (instructor/TA) of that session's course
+//     can only have come from mirroring - joining requires course permission.
+//     Admins are skipped since they can join any session without membership.
+//  2. for a user holding rows in more than one session of the same group, the
+//     earliest-created row is the one they joined (mirrors are inserted right
+//     after the join or at link time), so the later ones are mirrors. If they
+//     really joined both, pressing "start" on that session's worker page calls
+//     WorkerJoin, which promotes the row back.
+func BackfillQueueWorkerMirrorFlagWithDB(db *gorm.DB) (int64, error) {
+	var marker models.AppConfig
+	if err := db.Where("key = ?", queueWorkerMirrorBackfillDoneKey).First(&marker).Error; err == nil && marker.Value == "true" {
+		return 0, nil
+	}
+
+	var updated int64
+	err := db.Transaction(func(tx *gorm.DB) error {
+		nonStaff := tx.Exec(`
+			UPDATE queue_workers SET is_mirror = true
+			WHERE is_mirror = false
+			  AND queue_session_id IN (SELECT id FROM queue_sessions WHERE concurrent_group_id IS NOT NULL)
+			  AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = queue_workers.user_id AND u.role = 'admin')
+			  AND NOT EXISTS (
+			    SELECT 1 FROM queue_sessions qs
+			    WHERE qs.id = queue_workers.queue_session_id AND (
+			      EXISTS (SELECT 1 FROM courses c WHERE c.id = qs.course_id AND c.instructor_id = queue_workers.user_id)
+			      OR EXISTS (SELECT 1 FROM course_instructors ci WHERE ci.course_id = qs.course_id AND ci.user_id = queue_workers.user_id)
+			      OR EXISTS (SELECT 1 FROM course_tas ct WHERE ct.course_id = qs.course_id AND ct.user_id = queue_workers.user_id)
+			      OR EXISTS (SELECT 1 FROM course_members cm WHERE cm.course_id = qs.course_id AND cm.user_id = queue_workers.user_id AND cm.role IN ('instructor', 'ta') AND cm.status = 'active')
+			    )
+			  )`)
+		if nonStaff.Error != nil {
+			return nonStaff.Error
+		}
+		laterDuplicates := tx.Exec(`
+			UPDATE queue_workers SET is_mirror = true
+			WHERE is_mirror = false
+			  AND EXISTS (
+			    SELECT 1
+			    FROM queue_sessions self
+			    JOIN queue_sessions os ON os.concurrent_group_id = self.concurrent_group_id
+			    JOIN queue_workers other ON other.queue_session_id = os.id
+			    WHERE self.id = queue_workers.queue_session_id
+			      AND self.concurrent_group_id IS NOT NULL
+			      AND other.user_id = queue_workers.user_id
+			      AND other.id <> queue_workers.id
+			      AND other.is_mirror = false
+			      AND (other.created_at < queue_workers.created_at
+			           OR (other.created_at = queue_workers.created_at AND other.id < queue_workers.id))
+			  )`)
+		if laterDuplicates.Error != nil {
+			return laterDuplicates.Error
+		}
+		updated = nonStaff.RowsAffected + laterDuplicates.RowsAffected
+		return tx.Where(models.AppConfig{Key: queueWorkerMirrorBackfillDoneKey}).
+			Assign(models.AppConfig{Value: "true"}).
+			FirstOrCreate(&models.AppConfig{}).Error
+	})
+	if err != nil {
+		return 0, err
+	}
+	return updated, nil
 }
