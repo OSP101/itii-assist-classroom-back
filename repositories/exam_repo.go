@@ -114,19 +114,41 @@ type ExamScoreViewEntry struct {
 	ExamSettingID uint       `json:"exam_setting_id,omitempty" gorm:"column:exam_setting_id"`
 	StudentID     uint       `json:"student_id" gorm:"column:student_id"`
 	Score         *float64   `json:"score" gorm:"column:score"`
+	IsAbsent      bool       `json:"is_absent" gorm:"column:is_absent"`
+	Comment       string     `json:"comment" gorm:"column:comment"`
 	GraderID      *uint      `json:"grader_id,omitempty" gorm:"column:grader_id"`
 	GraderName    *string    `json:"grader_name" gorm:"column:grader_name"`
 	GradedAt      *time.Time `json:"graded_at,omitempty" gorm:"column:graded_at"`
 }
 
+// ExamPublishMeta is the part of an exam setting the instructor page shows
+// on the lifecycle row: who published/hid/scheduled it and when, what
+// students see alongside their score, and how many have opened it.
+type ExamPublishMeta struct {
+	PublishedAt        *time.Time `json:"published_at"`
+	PublishedByName    *string    `json:"published_by_name"`
+	HiddenAt           *time.Time `json:"hidden_at"`
+	HiddenByName       *string    `json:"hidden_by_name"`
+	HideReason         string     `json:"hide_reason"`
+	ScheduledPublishAt *time.Time `json:"scheduled_publish_at"`
+	ScheduledByName    *string    `json:"scheduled_by_name"`
+	ShowAverage        bool       `json:"show_average"`
+	ShowComments       bool       `json:"show_comments"`
+	NotifyByEmail      bool       `json:"notify_by_email"`
+	ViewedCount        int64      `json:"viewed_count"`
+	LastGradedAt       *time.Time `json:"last_graded_at"`
+	LastGradedByName   *string    `json:"last_graded_by_name"`
+}
+
 type ExamSettingWithScores struct {
-	ID        uint                 `json:"id"`
-	ExamType  string               `json:"exam_type"`
-	Component string               `json:"component"`
-	MaxScore  float64              `json:"max_score"`
-	IsVisible bool                 `json:"is_visible"`
-	IsActive  bool                 `json:"is_active"`
-	Scores    []ExamScoreViewEntry `json:"scores"`
+	ID        uint    `json:"id"`
+	ExamType  string  `json:"exam_type"`
+	Component string  `json:"component"`
+	MaxScore  float64 `json:"max_score"`
+	IsVisible bool    `json:"is_visible"`
+	IsActive  bool    `json:"is_active"`
+	ExamPublishMeta
+	Scores []ExamScoreViewEntry `json:"scores"`
 }
 
 type ExamScoresView struct {
@@ -201,6 +223,8 @@ func GetExamScoresView(courseID string) (*ExamScoresView, error) {
 			esc.exam_setting_id,
 			esc.student_id,
 			esc.score,
+			esc.is_absent,
+			esc.comment,
 			esc.graded_by AS grader_id,
 			u.full_name AS grader_name,
 			esc.graded_at
@@ -218,20 +242,38 @@ func GetExamScoresView(courseID string) (*ExamScoresView, error) {
 		scoreMap[row.ExamSettingID] = append(scoreMap[row.ExamSettingID], row)
 	}
 
+	viewCounts, err := examSettingViewCounts(courseID)
+	if err != nil {
+		return nil, err
+	}
+
 	settingsView := make([]ExamSettingWithScores, len(settings))
 	for index, setting := range settings {
 		scores := scoreMap[setting.ID]
 		if scores == nil {
 			scores = []ExamScoreViewEntry{}
 		}
+		meta := buildExamPublishMeta(&setting)
+		meta.ViewedCount = viewCounts[setting.ID]
+		for _, score := range scores {
+			if score.GradedAt == nil {
+				continue
+			}
+			if meta.LastGradedAt == nil || score.GradedAt.After(*meta.LastGradedAt) {
+				graded := *score.GradedAt
+				meta.LastGradedAt = &graded
+				meta.LastGradedByName = score.GraderName
+			}
+		}
 		settingsView[index] = ExamSettingWithScores{
-			ID:        setting.ID,
-			ExamType:  setting.ExamType,
-			Component: setting.Component,
-			MaxScore:  setting.MaxScore,
-			IsVisible: setting.IsVisible,
-			IsActive:  setting.IsActive,
-			Scores:    scores,
+			ID:              setting.ID,
+			ExamType:        setting.ExamType,
+			Component:       setting.Component,
+			MaxScore:        setting.MaxScore,
+			IsVisible:       setting.IsVisible,
+			IsActive:        setting.IsActive,
+			ExamPublishMeta: meta,
+			Scores:          scores,
 		}
 	}
 
@@ -251,27 +293,42 @@ func GetExamSettingByCourse(courseID string, settingID uint) (*models.ExamSettin
 	return &setting, nil
 }
 
-func SaveExamScore(settingID uint, studentID uint, score *float64, comment string, gradedBy uint) (*ExamScoreViewEntry, error) {
-	entry, _, err := SaveExamScoreReturningPrevious(settingID, studentID, score, comment, gradedBy)
+func SaveExamScore(settingID uint, studentID uint, score *float64, isAbsent bool, comment string, gradedBy uint) (*ExamScoreViewEntry, error) {
+	entry, _, err := SaveExamScoreReturningPrevious(settingID, studentID, score, isAbsent, comment, gradedBy)
 	return entry, err
 }
 
 // SaveExamScoreReturningPrevious upserts an exam score and hands back the row as
 // it was before the write, or nil when this is the first entry for the pair.
-func SaveExamScoreReturningPrevious(settingID uint, studentID uint, score *float64, comment string, gradedBy uint) (*ExamScoreViewEntry, *models.ExamScore, error) {
+// An absent student is stored with IsAbsent=true and no score, whatever score
+// the caller passed, so "-" can never leak into an average.
+func SaveExamScoreReturningPrevious(settingID uint, studentID uint, score *float64, isAbsent bool, comment string, gradedBy uint) (*ExamScoreViewEntry, *models.ExamScore, error) {
 	var examScore models.ExamScore
 	var previous *models.ExamScore
 	now := time.Now()
+	if isAbsent {
+		score = nil
+	}
 
 	err := config.DB.Where("exam_setting_id = ? AND student_id = ?", settingID, studentID).First(&examScore).Error
 	if err == nil {
 		snapshot := examScore
 		previous = &snapshot
 		examScore.Score = score
+		examScore.IsAbsent = isAbsent
 		examScore.Comment = comment
 		examScore.GradedBy = &gradedBy
 		examScore.GradedAt = &now
-		if err := config.DB.Save(&examScore).Error; err != nil {
+		// Save() skips nil pointers, so a cleared score would survive; select the
+		// columns explicitly so clearing a score (or marking absent) sticks.
+		if err := config.DB.Model(&examScore).Select("Score", "IsAbsent", "Comment", "GradedBy", "GradedAt", "UpdatedAt").Updates(map[string]interface{}{
+			"score":      score,
+			"is_absent":  isAbsent,
+			"comment":    comment,
+			"graded_by":  gradedBy,
+			"graded_at":  now,
+			"updated_at": now,
+		}).Error; err != nil {
 			return nil, nil, err
 		}
 	} else if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -279,6 +336,7 @@ func SaveExamScoreReturningPrevious(settingID uint, studentID uint, score *float
 			ExamSettingID: settingID,
 			StudentID:     studentID,
 			Score:         score,
+			IsAbsent:      isAbsent,
 			Comment:       comment,
 			GradedBy:      &gradedBy,
 			GradedAt:      &now,
@@ -305,6 +363,8 @@ func SaveExamScoreReturningPrevious(settingID uint, studentID uint, score *float
 		ExamSettingID: examScore.ExamSettingID,
 		StudentID:     examScore.StudentID,
 		Score:         examScore.Score,
+		IsAbsent:      examScore.IsAbsent,
+		Comment:       examScore.Comment,
 		GraderID:      examScore.GradedBy,
 		GraderName:    graderName,
 		GradedAt:      examScore.GradedAt,
@@ -362,7 +422,7 @@ func GetExamScoreStats(courseID string) ([]ExamScoreStatsItem, error) {
 			COALESCE(MAX(esc.score), 0) AS max,
 			COALESCE(MIN(esc.score), 0) AS min
 		FROM exam_settings es
-		LEFT JOIN exam_scores esc ON esc.exam_setting_id = es.id AND esc.score IS NOT NULL
+		LEFT JOIN exam_scores esc ON esc.exam_setting_id = es.id AND esc.score IS NOT NULL AND esc.is_absent = false
 		WHERE es.course_id = ? AND es.is_active = true
 		GROUP BY es.id, es.exam_type, es.component, es.max_score
 		ORDER BY es.exam_type ASC, es.component ASC
@@ -401,39 +461,4 @@ func DeleteExamScoreByCourse(scoreID uint, courseID string) error {
 	}
 
 	return config.DB.Delete(&models.ExamScore{}, scoreID).Error
-}
-
-func UpsertExamScore(settingID uint, studentID uint, score float64, comment string, gradedBy uint) error {
-	db := config.DB
-	var existing models.ExamScore
-	now := time.Now()
-	if err := db.Where("exam_setting_id = ? AND student_id = ?", settingID, studentID).First(&existing).Error; err == nil {
-		existing.Score = &score
-		existing.Comment = comment
-		existing.GradedBy = &gradedBy
-		existing.GradedAt = &now
-		return db.Save(&existing).Error
-	}
-	return db.Create(&models.ExamScore{
-		ExamSettingID: settingID,
-		StudentID:     studentID,
-		Score:         &score,
-		Comment:       comment,
-		GradedBy:      &gradedBy,
-		GradedAt:      &now,
-		CreatedAt:     now,
-	}).Error
-}
-
-func BulkUpsertExamScores(entries []struct {
-	SettingID uint
-	StudentID uint
-	Score     float64
-	Comment   string
-	GradedBy  uint
-}) error {
-	for _, e := range entries {
-		UpsertExamScore(e.SettingID, e.StudentID, e.Score, e.Comment, e.GradedBy)
-	}
-	return nil
 }

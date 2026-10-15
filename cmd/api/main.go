@@ -106,6 +106,8 @@ func main() {
 		// การสอบ
 		&models.ExamSetting{},
 		&models.ExamScore{},
+		&models.ExamScoreView{},
+		&models.ExamScoreNotification{},
 		&models.ExamSession{},
 		&models.ExamSessionRoom{},
 		&models.ExamSeat{},
@@ -340,6 +342,26 @@ func main() {
 					continue
 				}
 				services.FlushDeferredEmails(50)
+			}
+		}
+	}()
+	// Background job: ประกาศคะแนนสอบที่อาจารย์ตั้งเวลาไว้ เมื่อถึงเวลา
+	shutdownWG.Add(1)
+	go func() {
+		defer shutdownWG.Done()
+		leader := config.StartLeaderElection("exam-scores-scheduled-publish", leaderTTL)
+		defer leader.Stop()
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-shutdownCtx.Done():
+				return
+			case <-ticker.C:
+				if !leader.IsLeader() {
+					continue
+				}
+				handlers.PublishDueExamSettings()
 			}
 		}
 	}()

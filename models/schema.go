@@ -355,28 +355,82 @@ type BonusScore struct {
 // 6. ระบบสอบ
 // =============================================================================
 
+// ExamSetting is one gradable exam component of a course (midterm/final ×
+// lecture/lab). Scores stay a private draft until an instructor publishes
+// them; IsVisible is the single source of truth for "students can see this",
+// and the Published*/Hidden*/Scheduled* fields record how it got there.
 type ExamSetting struct {
-	ID        uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	CourseID  string    `gorm:"type:varchar(21);not null;index" json:"course_id"`
-	ExamType  string    `gorm:"type:varchar(20);not null" json:"exam_type"` // midterm, final
-	Component string    `gorm:"type:varchar(20);not null" json:"component"` // lab, lecture
-	MaxScore  float64   `gorm:"type:decimal(5,2);not null;default:0" json:"max_score"`
-	IsVisible bool      `gorm:"type:boolean;default:false" json:"is_visible"`
-	IsActive  bool      `gorm:"type:boolean;default:false" json:"is_active"`
+	ID        uint    `gorm:"primaryKey;autoIncrement" json:"id"`
+	CourseID  string  `gorm:"type:varchar(21);not null;index" json:"course_id"`
+	ExamType  string  `gorm:"type:varchar(20);not null" json:"exam_type"` // midterm, final
+	Component string  `gorm:"type:varchar(20);not null" json:"component"` // lab, lecture
+	MaxScore  float64 `gorm:"type:decimal(5,2);not null;default:0" json:"max_score"`
+	IsVisible bool    `gorm:"type:boolean;default:false" json:"is_visible"`
+	IsActive  bool    `gorm:"type:boolean;default:false" json:"is_active"`
+
+	// Publish lifecycle (แบบ B: ร่าง → ตรวจทาน → ประกาศแล้ว)
+	PublishedAt        *time.Time `gorm:"type:timestamptz" json:"published_at,omitempty"`
+	PublishedBy        *uint      `json:"published_by,omitempty"`
+	HiddenAt           *time.Time `gorm:"type:timestamptz" json:"hidden_at,omitempty"`
+	HiddenBy           *uint      `json:"hidden_by,omitempty"`
+	HideReason         string     `gorm:"type:varchar(255)" json:"hide_reason,omitempty"`
+	ScheduledPublishAt *time.Time `gorm:"type:timestamptz" json:"scheduled_publish_at,omitempty"`
+	ScheduledBy        *uint      `json:"scheduled_by,omitempty"`
+	// What students see alongside their own score once published. Both
+	// default to true so existing published settings keep today's behaviour.
+	// Rows are created through GetOrCreateExamSettings with an explicit
+	// column list, so the DB defaults apply (see the GORM default:true trap).
+	ShowAverage  bool `gorm:"type:boolean;not null;default:true" json:"show_average"`
+	ShowComments bool `gorm:"type:boolean;not null;default:true" json:"show_comments"`
+	// NotifyByEmail is remembered for a scheduled publish so the worker knows
+	// whether the instructor wanted the announcement email sent.
+	NotifyByEmail bool `gorm:"type:boolean;not null;default:true" json:"notify_by_email"`
+
 	CreatedAt time.Time `gorm:"type:timestamptz" json:"created_at"`
 	UpdatedAt time.Time `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
 }
 
+// ExamScore is one student's result for one exam component. An absent student
+// is a row with IsAbsent=true and no Score: it counts as "has a result" for
+// publishing, but never enters averages or the attended count.
 type ExamScore struct {
 	ID            uint       `gorm:"primaryKey;autoIncrement" json:"id"`
 	ExamSettingID uint       `gorm:"not null;index" json:"exam_setting_id"`
 	StudentID     uint       `gorm:"not null;index" json:"student_id"`
 	Score         *float64   `gorm:"type:decimal(5,2)" json:"score,omitempty"`
+	IsAbsent      bool       `gorm:"type:boolean;not null;default:false" json:"is_absent"`
 	Comment       string     `gorm:"type:text" json:"comment"`
 	GradedBy      *uint      `gorm:"index" json:"graded_by,omitempty"`
 	GradedAt      *time.Time `gorm:"type:timestamptz" json:"graded_at,omitempty"`
 	CreatedAt     time.Time  `gorm:"type:timestamptz" json:"created_at"`
 	UpdatedAt     time.Time  `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+}
+
+// ExamScoreView records that a student opened their published exam score.
+// One row per (setting, student); counted when the student's course page
+// shows the exam scores, not when an email is opened. Hiding and
+// re-publishing clears the rows so the "who has seen it" count starts over.
+type ExamScoreView struct {
+	ID            uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	ExamSettingID uint      `gorm:"not null;index" json:"exam_setting_id"`
+	StudentID     uint      `gorm:"not null;index" json:"student_id"`
+	FirstViewedAt time.Time `gorm:"type:timestamptz;not null" json:"first_viewed_at"`
+	LastViewedAt  time.Time `gorm:"type:timestamptz;not null" json:"last_viewed_at"`
+	ViewCount     int       `gorm:"not null;default:1" json:"view_count"`
+}
+
+// ExamScoreNotification is one email the system tried to send a student about
+// an exam component (publish announcement, reminder, hidden notice), kept so
+// the instructor can see per-student delivery status in the viewers panel.
+type ExamScoreNotification struct {
+	ID            uint       `gorm:"primaryKey;autoIncrement" json:"id"`
+	ExamSettingID uint       `gorm:"not null;index" json:"exam_setting_id"`
+	StudentID     uint       `gorm:"not null;index" json:"student_id"`
+	Kind          string     `gorm:"type:varchar(20);not null" json:"kind"` // published, reminder, hidden
+	ToEmail       string     `gorm:"type:varchar(255)" json:"to_email"`
+	SentAt        *time.Time `gorm:"type:timestamptz" json:"sent_at,omitempty"`
+	Error         string     `gorm:"type:text" json:"error,omitempty"`
+	CreatedAt     time.Time  `gorm:"type:timestamptz" json:"created_at"`
 }
 
 // =============================================================================

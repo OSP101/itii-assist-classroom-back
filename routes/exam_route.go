@@ -20,12 +20,57 @@ func SetupExamRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 		middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("courseId"), repositories.PermissionViewExamScores, "instructor", "ta"),
 		handlers.GetExamSettingsHandler,
 	)
+	// Publish history for the whole course; registered before "/:id/..." so
+	// the literal segment is not swallowed by the id parameter.
+	app.Get(coursePrefix+"/exam-settings/history",
+		middlewares.Protected(),
+		middlewares.RequireRole("admin", "instructor", "ta"),
+		middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"),
+		middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("courseId"), repositories.PermissionViewExamScores, "instructor", "ta"),
+		handlers.GetExamPublishHistoryHandler,
+	)
 	app.Put(coursePrefix+"/exam-settings/:id",
 		middlewares.Protected(),
 		middlewares.RequireRole("admin", "instructor", "ta"),
 		middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"),
 		middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("courseId"), repositories.PermissionUpdateExamSettings, "instructor", "ta"),
 		handlers.UpdateExamSettingHandler,
+	)
+	// Publish lifecycle (แบบ B): review → publish/schedule → viewers/remind → hide
+	app.Get(coursePrefix+"/exam-settings/:id/review",
+		middlewares.Protected(),
+		middlewares.RequireRole("admin", "instructor", "ta"),
+		middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"),
+		middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("courseId"), repositories.PermissionViewExamScores, "instructor", "ta"),
+		handlers.GetExamSettingReviewHandler,
+	)
+	app.Post(coursePrefix+"/exam-settings/:id/publish",
+		middlewares.Protected(),
+		middlewares.RequireRole("admin", "instructor", "ta"),
+		middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"),
+		middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("courseId"), repositories.PermissionUpdateExamSettings, "instructor", "ta"),
+		handlers.PublishExamSettingHandler,
+	)
+	app.Post(coursePrefix+"/exam-settings/:id/hide",
+		middlewares.Protected(),
+		middlewares.RequireRole("admin", "instructor", "ta"),
+		middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"),
+		middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("courseId"), repositories.PermissionUpdateExamSettings, "instructor", "ta"),
+		handlers.HideExamSettingHandler,
+	)
+	app.Get(coursePrefix+"/exam-settings/:id/viewers",
+		middlewares.Protected(),
+		middlewares.RequireRole("admin", "instructor", "ta"),
+		middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"),
+		middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("courseId"), repositories.PermissionViewExamScores, "instructor", "ta"),
+		handlers.GetExamSettingViewersHandler,
+	)
+	app.Post(coursePrefix+"/exam-settings/:id/remind",
+		middlewares.Protected(),
+		middlewares.RequireRole("admin", "instructor", "ta"),
+		middlewares.RequireCourseAccess(middlewares.CourseIDFromParam("courseId"), "instructor", "ta"),
+		middlewares.RequireCoursePermission(middlewares.CourseIDFromParam("courseId"), repositories.PermissionUpdateExamSettings, "instructor", "ta"),
+		handlers.RemindExamSettingViewersHandler,
 	)
 	app.Get(coursePrefix+"/exam-scores",
 		middlewares.Protected(),

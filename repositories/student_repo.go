@@ -242,10 +242,15 @@ type LookupStudentExamScore struct {
 	ExamType  string     `json:"exam_type"`
 	Component string     `json:"component"`
 	Score     *float64   `json:"score"`
+	IsAbsent  bool       `json:"is_absent"`
 	MaxScore  float64    `json:"max_score"`
 	Grader    *string    `json:"grader"`
 	GradedAt  *time.Time `json:"graded_at"`
 	Comment   *string    `json:"comment"`
+	// ClassAverage is the section-wide mean over students who sat the exam
+	// (absent students excluded); nil when the instructor chose not to show it.
+	ClassAverage *float64   `json:"class_average"`
+	PublishedAt  *time.Time `json:"published_at"`
 }
 
 type LookupStudentCourseOverview struct {
@@ -331,15 +336,21 @@ type studentLookupAttendanceRow struct {
 }
 
 type studentLookupExamRow struct {
-	CourseID   string     `gorm:"column:course_id"`
-	ID         uint       `gorm:"column:id"`
-	ExamType   string     `gorm:"column:exam_type"`
-	Component  string     `gorm:"column:component"`
-	Score      *float64   `gorm:"column:score"`
-	MaxScore   float64    `gorm:"column:max_score"`
-	GraderName string     `gorm:"column:grader_name"`
-	GradedAt   *time.Time `gorm:"column:graded_at"`
-	Comment    string     `gorm:"column:comment"`
+	CourseID      string     `gorm:"column:course_id"`
+	ID            uint       `gorm:"column:id"`
+	ExamSettingID uint       `gorm:"column:exam_setting_id"`
+	ExamType      string     `gorm:"column:exam_type"`
+	Component     string     `gorm:"column:component"`
+	Score         *float64   `gorm:"column:score"`
+	IsAbsent      bool       `gorm:"column:is_absent"`
+	MaxScore      float64    `gorm:"column:max_score"`
+	GraderName    string     `gorm:"column:grader_name"`
+	GradedAt      *time.Time `gorm:"column:graded_at"`
+	Comment       string     `gorm:"column:comment"`
+	ShowAverage   bool       `gorm:"column:show_average"`
+	ShowComments  bool       `gorm:"column:show_comments"`
+	PublishedAt   *time.Time `gorm:"column:published_at"`
+	ClassAverage  *float64   `gorm:"column:class_average"`
 }
 
 type lookupStudentScoreSnapshot struct {
@@ -808,14 +819,37 @@ func lookupStudentScores(studentID string, courseID string) (*LookupStudentResul
 		}
 	}
 
+	// Only published (is_visible) components reach the student. The class
+	// average is computed over students who sat the exam: absent rows and
+	// students with no score yet are excluded so a "-" can never skew it.
 	var examRows []studentLookupExamRow
-	if err := config.DB.Table("exam_scores AS es").
-		Joins("JOIN exam_settings AS ex ON ex.id = es.exam_setting_id").
-		Joins("LEFT JOIN users AS u ON u.id = es.graded_by").
-		Where("es.student_id = ? AND ex.course_id IN ? AND ex.is_active = ? AND ex.is_visible = ?", student.ID, courseIDs, true, true).
-		Select("ex.course_id, es.id, ex.exam_type, ex.component, ex.max_score, es.score, es.graded_at, es.comment, u.full_name AS grader_name").
-		Order("es.id ASC").
-		Scan(&examRows).Error; err != nil {
+	if err := config.DB.Raw(`
+		SELECT
+			ex.course_id,
+			es.id,
+			ex.id AS exam_setting_id,
+			ex.exam_type,
+			ex.component,
+			ex.max_score,
+			es.score,
+			es.is_absent,
+			es.graded_at,
+			es.comment,
+			u.full_name AS grader_name,
+			ex.show_average,
+			ex.show_comments,
+			ex.published_at,
+			(
+				SELECT ROUND(AVG(o.score)::numeric, 2)
+				FROM exam_scores o
+				WHERE o.exam_setting_id = ex.id AND o.score IS NOT NULL AND o.is_absent = false
+			) AS class_average
+		FROM exam_scores es
+		JOIN exam_settings ex ON ex.id = es.exam_setting_id
+		LEFT JOIN users u ON u.id = es.graded_by
+		WHERE es.student_id = ? AND ex.course_id IN ? AND ex.is_active = true AND ex.is_visible = true
+		ORDER BY es.id ASC
+	`, student.ID, courseIDs).Scan(&examRows).Error; err != nil {
 		return nil, err
 	}
 	for _, row := range examRows {
@@ -823,16 +857,24 @@ func lookupStudentScores(studentID string, courseID string) (*LookupStudentResul
 		if courseEntry == nil {
 			continue
 		}
-		courseEntry.ExamScores = append(courseEntry.ExamScores, LookupStudentExamScore{
-			ID:        row.ID,
-			ExamType:  row.ExamType,
-			Component: row.Component,
-			Score:     cloneFloatPointer(row.Score),
-			MaxScore:  row.MaxScore,
-			Grader:    nullableStringPointer(row.GraderName),
-			GradedAt:  cloneTimePointer(row.GradedAt),
-			Comment:   nullableStringPointer(row.Comment),
-		})
+		entry := LookupStudentExamScore{
+			ID:          row.ID,
+			ExamType:    row.ExamType,
+			Component:   row.Component,
+			Score:       cloneFloatPointer(row.Score),
+			IsAbsent:    row.IsAbsent,
+			MaxScore:    row.MaxScore,
+			Grader:      nullableStringPointer(row.GraderName),
+			GradedAt:    cloneTimePointer(row.GradedAt),
+			PublishedAt: cloneTimePointer(row.PublishedAt),
+		}
+		if row.ShowComments {
+			entry.Comment = nullableStringPointer(row.Comment)
+		}
+		if row.ShowAverage {
+			entry.ClassAverage = cloneFloatPointer(row.ClassAverage)
+		}
+		courseEntry.ExamScores = append(courseEntry.ExamScores, entry)
 	}
 
 	for _, courseID := range courseOrder {

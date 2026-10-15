@@ -11,6 +11,8 @@ func SetupStudentRoutes(app *fiber.App) {
 	self := app.Group("/api/students/me", middlewares.Protected(), middlewares.RequireRole("student"))
 	self.Get("/lookup", handlers.LookupMyStudentHandler)
 	self.Get("/courses/:courseId", handlers.GetMyStudentCourseHandler)
+	// นักศึกษาเปิดดูคะแนนสอบที่ประกาศแล้ว (นับ "ใครเปิดดูแล้ว" ฝั่งอาจารย์)
+	self.Post("/courses/:courseId/exam-scores/viewed", middlewares.NoStore(), handlers.RecordMyExamScoreViewsHandler)
 	// คำขอลา (นักศึกษา)
 	self.Get("/courses/:courseId/leave-requests/context", middlewares.NoStore(), handlers.GetStudentLeaveContextHandler)
 	self.Get("/courses/:courseId/leave-requests", middlewares.NoStore(), handlers.GetMyLeaveRequestsHandler)

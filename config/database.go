@@ -605,6 +605,23 @@ func MigratePerformanceIndexes() {
 			sql:  `CREATE UNIQUE INDEX IF NOT EXISTS uq_exam_seats_session_seat_number ON exam_seats (exam_session_id, seat_number) WHERE seat_number > 0`,
 		},
 		{
+			// RecordExamScoreViews upserts on this pair every time a student
+			// opens their scores; the unique index is what makes the
+			// ON CONFLICT upsert possible.
+			name: "exam_score_views_setting_student_unique",
+			sql:  `CREATE UNIQUE INDEX IF NOT EXISTS uq_exam_score_views_setting_student ON exam_score_views (exam_setting_id, student_id)`,
+		},
+		{
+			// The viewers panel reads the latest notification per student for
+			// one setting; the scheduled-publish worker scans by scheduled time.
+			name: "exam_score_notifications_setting_student_created",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_exam_score_notifications_setting_student_created ON exam_score_notifications (exam_setting_id, student_id, created_at DESC)`,
+		},
+		{
+			name: "exam_settings_scheduled_publish_at",
+			sql:  `CREATE INDEX IF NOT EXISTS idx_exam_settings_scheduled_publish_at ON exam_settings (scheduled_publish_at) WHERE scheduled_publish_at IS NOT NULL`,
+		},
+		{
 			name: "queue_bookings_session_status_assigned_worker",
 			sql:  `CREATE INDEX IF NOT EXISTS idx_queue_bookings_session_status_assigned_worker ON queue_bookings (queue_session_id, status, assigned_worker_id, queue_number)`,
 		},

@@ -6,7 +6,6 @@ import (
 	"itii-assist/models"
 	"itii-assist/repositories"
 	"itii-assist/services"
-	"log"
 	"strconv"
 	"strings"
 
@@ -55,73 +54,30 @@ func UpdateExamSettingHandler(c fiber.Ctx) error {
 	}
 	courseID := c.Params("courseId")
 
+	// Visibility is deliberately not accepted here any more: publishing and
+	// hiding are separate, confirmed actions (exam_publish_handler.go), so
+	// saving a max score can never accidentally reveal scores to students.
 	var input struct {
-		MaxScore  *float64 `json:"max_score"`
-		IsVisible *bool    `json:"is_visible"`
-		IsActive  *bool    `json:"is_active"`
+		MaxScore *float64 `json:"max_score"`
+		IsActive *bool    `json:"is_active"`
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
 	}
 
-	previousSetting, setting, err2 := repositories.UpdateExamSettingReturningPrevious(uint(settingID), courseID, input.MaxScore, input.IsVisible, input.IsActive)
+	previousSetting, setting, err2 := repositories.UpdateExamSettingReturningPrevious(uint(settingID), courseID, input.MaxScore, nil, input.IsActive)
 	if err2 != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update exam setting"})
 	}
 	actorID, _ := c.Locals("user_id").(uint)
 	settingDetail := withChanges(
-		fiber.Map{"max_score": input.MaxScore, "is_visible": input.IsVisible, "is_active": input.IsActive},
+		fiber.Map{"max_score": input.MaxScore, "is_active": input.IsActive},
 		examSettingChangeFields(previousSetting),
 		examSettingChangeFields(setting),
 	)
 	logCourseActivity(c, courseID, actorID, "update_exam_setting", "score", "exam_setting", settingID, "", settingDetail)
 
-	// Only the moment scores go from hidden to visible is worth an email —
-	// re-saving other fields on an already-visible setting must not re-notify
-	// everyone, and hiding scores again isn't an announcement either.
-	if previousSetting != nil && !previousSetting.IsVisible && setting.IsVisible {
-		notifyExamScorePublished(courseID, setting)
-	}
-
 	return c.JSON(fiber.Map{"success": true, "data": setting})
-}
-
-// notifyExamScorePublished emails every enrolled student that an exam score
-// just became visible. Runs in the background so the instructor's save
-// request doesn't wait on a course-wide round of SMTP deliveries.
-func notifyExamScorePublished(courseID string, setting *models.ExamSetting) {
-	if setting == nil {
-		return
-	}
-	go func() {
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				log.Printf("⚠️  exam score notification panicked for setting %d: %v", setting.ID, recovered)
-			}
-		}()
-
-		courseName, err := repositories.GetCourseNameByID(courseID)
-		if err != nil {
-			log.Printf("⚠️  failed to load course name for exam score notification: %v", err)
-			return
-		}
-
-		students, err := repositories.GetEnrolledStudents(courseID)
-		if err != nil {
-			log.Printf("⚠️  failed to load enrolled students for exam score notification: %v", err)
-			return
-		}
-
-		link := services.StudentExamScoreURL(courseID)
-		for _, student := range students {
-			if strings.TrimSpace(student.Email) == "" {
-				continue
-			}
-			if err := services.SendExamScorePublishedEmail(student.Email, student.FullName, courseName, setting.ExamType, setting.Component, link); err != nil {
-				services.LogEmailDeliveryError("exam_score_published", err)
-			}
-		}
-	}()
 }
 
 // GET /api/courses/:courseId/exam-scores
@@ -149,6 +105,7 @@ func (h *ExamHandler) UpsertExamScore(c fiber.Ctx) error {
 		ExamSettingID uint     `json:"exam_setting_id"`
 		StudentID     uint     `json:"student_id"`
 		Score         *float64 `json:"score"`
+		IsAbsent      bool     `json:"is_absent"`
 		Comment       string   `json:"comment"`
 	}
 	if err := c.Bind().JSON(&input); err != nil {
@@ -165,6 +122,9 @@ func (h *ExamHandler) UpsertExamScore(c fiber.Ctx) error {
 		}
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to get exam setting"})
 	}
+	if input.IsAbsent {
+		input.Score = nil
+	}
 	if input.Score != nil {
 		if *input.Score < 0 {
 			return c.Status(400).JSON(fiber.Map{"success": false, "message": "คะแนนต้องไม่ติดลบ"})
@@ -175,19 +135,26 @@ func (h *ExamHandler) UpsertExamScore(c fiber.Ctx) error {
 	}
 
 	gradedBy := c.Locals("user_id").(uint)
-	saved, previousExamScore, err := repositories.SaveExamScoreReturningPrevious(input.ExamSettingID, input.StudentID, input.Score, input.Comment, gradedBy)
+	saved, previousExamScore, err := repositories.SaveExamScoreReturningPrevious(input.ExamSettingID, input.StudentID, input.Score, input.IsAbsent, input.Comment, gradedBy)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to upsert exam score"})
 	}
 	courseID := c.Params("courseId")
-	examScoreDetail := fiber.Map{"exam_setting_id": input.ExamSettingID, "score": input.Score}
+	examScoreDetail := fiber.Map{"exam_setting_id": input.ExamSettingID, "score": input.Score, "is_absent": input.IsAbsent}
+	hadResult := false
 	if previousExamScore != nil {
+		hadResult = previousExamScore.Score != nil || previousExamScore.IsAbsent
 		examScoreDetail = withChanges(examScoreDetail,
-			map[string]interface{}{"score": previousExamScore.Score, "comment": previousExamScore.Comment},
-			map[string]interface{}{"score": input.Score, "comment": input.Comment},
+			map[string]interface{}{"score": previousExamScore.Score, "is_absent": previousExamScore.IsAbsent, "comment": previousExamScore.Comment},
+			map[string]interface{}{"score": input.Score, "is_absent": input.IsAbsent, "comment": input.Comment},
 		)
 	} else {
 		examScoreDetail["first_grade"] = true
+	}
+	// Scores already announced and this student just got their first result:
+	// tell only them, the way the publish email would have.
+	if !hadResult && (input.Score != nil || input.IsAbsent) {
+		notifyLateExamResult(courseID, setting, input.StudentID)
 	}
 	logCourseActivity(c, courseID, gradedBy, "submit_exam_score", "score", "student", input.StudentID, "", examScoreDetail)
 	reqID, _, ip := services.ExtractMeta(c)
@@ -210,12 +177,14 @@ func BulkUpsertExamScoresHandler(c fiber.Ctx) error {
 		Scores        []struct {
 			StudentCode string   `json:"student_id"`
 			Score       *float64 `json:"score"`
+			IsAbsent    bool     `json:"is_absent"`
 			Comment     string   `json:"comment"`
 		} `json:"scores"`
 		Entries []struct {
 			SettingID uint     `json:"setting_id"`
 			StudentID uint     `json:"student_id"`
 			Score     *float64 `json:"score"`
+			IsAbsent  bool     `json:"is_absent"`
 			Comment   string   `json:"comment"`
 		} `json:"entries"`
 	}
@@ -251,22 +220,31 @@ func BulkUpsertExamScoresHandler(c fiber.Ctx) error {
 				continue
 			}
 
-			if entry.Score != nil {
-				if *entry.Score < 0 {
+			score := entry.Score
+			if entry.IsAbsent {
+				score = nil
+			}
+			if score != nil {
+				if *score < 0 {
 					errorsList = append(errorsList, fiber.Map{"student_id": entry.StudentCode, "reason": "คะแนนต้องไม่ติดลบ"})
 					continue
 				}
-				if *entry.Score > setting.MaxScore {
+				if *score > setting.MaxScore {
 					errorsList = append(errorsList, fiber.Map{"student_id": entry.StudentCode, "reason": fmt.Sprintf("คะแนนเกินคะแนนเต็ม (%v)", setting.MaxScore)})
 					continue
 				}
 			}
 
-			if _, err := repositories.SaveExamScore(input.ExamSettingID, studentID, entry.Score, entry.Comment, gradedBy); err != nil {
+			_, previous, err := repositories.SaveExamScoreReturningPrevious(input.ExamSettingID, studentID, score, entry.IsAbsent, entry.Comment, gradedBy)
+			if err != nil {
 				errorsList = append(errorsList, fiber.Map{"student_id": entry.StudentCode, "reason": "บันทึกคะแนนไม่สำเร็จ"})
 				continue
 			}
-			savedEntries = append(savedEntries, fiber.Map{"student_id": studentID, "score": entry.Score, "exam_setting_id": input.ExamSettingID})
+			hadResult := previous != nil && (previous.Score != nil || previous.IsAbsent)
+			if !hadResult && (score != nil || entry.IsAbsent) {
+				notifyLateExamResult(courseID, setting, studentID)
+			}
+			savedEntries = append(savedEntries, fiber.Map{"student_id": studentID, "score": score, "is_absent": entry.IsAbsent, "exam_setting_id": input.ExamSettingID})
 			savedCount++
 		}
 	} else if len(input.Entries) > 0 {
@@ -277,22 +255,31 @@ func BulkUpsertExamScoresHandler(c fiber.Ctx) error {
 				continue
 			}
 
-			if entry.Score != nil {
-				if *entry.Score < 0 {
+			score := entry.Score
+			if entry.IsAbsent {
+				score = nil
+			}
+			if score != nil {
+				if *score < 0 {
 					errorsList = append(errorsList, fiber.Map{"student_id": entry.StudentID, "reason": "คะแนนต้องไม่ติดลบ"})
 					continue
 				}
-				if *entry.Score > setting.MaxScore {
+				if *score > setting.MaxScore {
 					errorsList = append(errorsList, fiber.Map{"student_id": entry.StudentID, "reason": fmt.Sprintf("คะแนนเกินคะแนนเต็ม (%v)", setting.MaxScore)})
 					continue
 				}
 			}
 
-			if _, err := repositories.SaveExamScore(entry.SettingID, entry.StudentID, entry.Score, entry.Comment, gradedBy); err != nil {
+			_, previous, err := repositories.SaveExamScoreReturningPrevious(entry.SettingID, entry.StudentID, score, entry.IsAbsent, entry.Comment, gradedBy)
+			if err != nil {
 				errorsList = append(errorsList, fiber.Map{"student_id": entry.StudentID, "reason": "บันทึกคะแนนไม่สำเร็จ"})
 				continue
 			}
-			savedEntries = append(savedEntries, fiber.Map{"student_id": entry.StudentID, "score": entry.Score, "exam_setting_id": entry.SettingID})
+			hadResult := previous != nil && (previous.Score != nil || previous.IsAbsent)
+			if !hadResult && (score != nil || entry.IsAbsent) {
+				notifyLateExamResult(courseID, setting, entry.StudentID)
+			}
+			savedEntries = append(savedEntries, fiber.Map{"student_id": entry.StudentID, "score": score, "is_absent": entry.IsAbsent, "exam_setting_id": entry.SettingID})
 			savedCount++
 		}
 	} else {
