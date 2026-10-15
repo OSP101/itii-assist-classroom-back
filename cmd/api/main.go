@@ -66,6 +66,10 @@ func main() {
 	config.ConnectRedis()
 	observability.InitPrometheusMetrics(config.DB)
 
+	// 2.4 ล็อกให้ replica เดียวรัน migration ตอน start ในแต่ละครั้ง ไม่งั้น
+	// deploy ที่มีตาราง/คอลัมน์ใหม่จะทำให้ตัวที่แพ้ race ตายด้วย "already exists"
+	releaseMigrationLock := config.AcquireStartupMigrationLock()
+
 	// 2.5 แก้ไข column types ที่เคยสร้างเป็น bigint แต่ต้องเป็น varchar(21) สำหรับ NanoID
 	// (GORM AutoMigrate ไม่เปลี่ยน type ของ column ที่มีอยู่แล้ว)
 	config.MigrateColumnTypes()
@@ -188,6 +192,7 @@ func main() {
 	// plain statement, so from here on the request path can use the prepared
 	// statement cache.
 	config.EnablePreparedStatements()
+	releaseMigrationLock()
 
 	// Cross-replica realtime fan-out (plan.md ระยะ 4.1) — a no-op single-
 	// instance-only log line if Redis isn't configured. Started before the

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"log"
@@ -112,6 +113,53 @@ func capMaxOpenConns(database *gorm.DB, requestedMaxOpenConns int) int {
 	}
 
 	return requestedMaxOpenConns
+}
+
+// AcquireStartupMigrationLock serialises the whole startup migration pass
+// across replicas with a session-level Postgres advisory lock.
+//
+// The compose file starts two backend replicas at once and both run
+// AutoMigrate + the index pass on boot. With nothing new to create that is
+// harmless, but the first deploy of a change that adds a table or a column
+// is a race: both replicas see the object missing, both issue the DDL, and
+// the loser gets "already exists" and log.Fatal()s, so one container comes up
+// unhealthy on every schema-changing deploy (seen with exam_score_views).
+//
+// The lock is held on its own dedicated connection, so it stays held no
+// matter which pooled connection each migration step happens to use. The
+// returned release func unlocks and hands the connection back; call it once
+// the migration pass is done, before the server starts serving.
+func AcquireStartupMigrationLock() (release func()) {
+	noop := func() {}
+	if DB == nil {
+		return noop
+	}
+	sqlDB, err := DB.DB()
+	if err != nil {
+		log.Printf("⚠️  Startup migration lock unavailable (no sql.DB): %v", err)
+		return noop
+	}
+	ctx := context.Background()
+	conn, err := sqlDB.Conn(ctx)
+	if err != nil {
+		log.Printf("⚠️  Startup migration lock unavailable (no connection): %v", err)
+		return noop
+	}
+	const lockKey = "itii:startup-migration"
+	log.Println("⏳ Waiting for the startup migration lock...")
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock(hashtext($1))`, lockKey); err != nil {
+		log.Printf("⚠️  Could not take the startup migration lock, continuing without it: %v", err)
+		_ = conn.Close()
+		return noop
+	}
+	log.Println("🔒 Startup migration lock acquired")
+	return func() {
+		if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_unlock(hashtext($1))`, lockKey); err != nil {
+			log.Printf("⚠️  Could not release the startup migration lock (connection close will drop it): %v", err)
+		}
+		_ = conn.Close()
+		log.Println("🔓 Startup migration lock released")
+	}
 }
 
 // MigrateColumnTypes แก้ไข column type ที่เคยถูกสร้างเป็น bigint แต่ต้องเป็น varchar(21) สำหรับ NanoID
