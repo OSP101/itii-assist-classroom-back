@@ -385,7 +385,9 @@ func UploadCourseCoverHandler(c fiber.Ctx) error {
 	if ext == "" {
 		ext = ".jpg"
 	}
-	if resized, ok := utils.ProcessUploadedImage(content, 1920, 960, 85); ok {
+	if resized, ok, processErr := utils.ProcessUploadedImage(content, 1920, 960, 85); processErr != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": processErr.Error()})
+	} else if ok {
 		content = resized
 		ext = ".jpg"
 	}

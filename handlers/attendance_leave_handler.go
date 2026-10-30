@@ -178,7 +178,10 @@ func saveLeaveEvidenceFiles(courseID string, files []*multipart.FileHeader) ([]s
 			return nil, fmt.Errorf("ไฟล์ %s ต้องเป็นรูปภาพ (JPG, PNG, GIF, WebP) หรือ PDF", fh.Filename)
 		}
 		if strings.HasPrefix(detected, "image/") && !strings.HasPrefix(detected, "image/gif") {
-			if resized, ok := utils.ProcessUploadedImage(content, 2000, 2000, 85); ok {
+			if resized, ok, processErr := utils.ProcessUploadedImage(content, 2000, 2000, 85); processErr != nil {
+				cleanup()
+				return nil, processErr
+			} else if ok {
 				content = resized
 				ext = ".jpg"
 			}

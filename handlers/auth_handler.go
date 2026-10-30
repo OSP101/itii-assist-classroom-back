@@ -951,7 +951,9 @@ func UploadAvatarHandler(c fiber.Ctx) error {
 	// Falls back to the original bytes for formats we can't decode (WebP,
 	// animated GIF) rather than failing the upload.
 	filename := fileHeader.Filename
-	if resized, ok := utils.ProcessUploadedImage(content, 512, 512, 85); ok {
+	if resized, ok, processErr := utils.ProcessUploadedImage(content, 512, 512, 85); processErr != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": processErr.Error()})
+	} else if ok {
 		content = resized
 		contentType = "image/jpeg"
 		filename = "avatar.jpg"
