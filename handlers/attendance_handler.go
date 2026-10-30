@@ -517,6 +517,8 @@ func attendanceSessionPayload(session models.AttendanceSession, sectionIDs []uin
 		"location_lat":           nullableAttendanceFloatString(session.LocationLat),
 		"location_lng":           nullableAttendanceFloatString(session.LocationLng),
 		"radius_meters":          session.RadiusMeters,
+		"require_mobile":         session.MobileRequired(),
+		"require_campus_network": session.CampusNetworkRequired(),
 		"start_time":             session.StartTime,
 		"end_time":               session.EndTime,
 		"late_threshold_minutes": session.LateThresholdMinutes,
@@ -556,6 +558,7 @@ func GetSessionInfoHandler(c fiber.Ctx) error {
 		c.IP(),
 		info.SessionType,
 		utils.ParseDeviceHints(c.Get(utils.DeviceHintsHeader)),
+		utils.CampusGuardPolicy{AllowDesktop: info.AllowDesktop, AllowAnyNetwork: info.AllowAnyNetwork},
 	)
 	return c.JSON(fiber.Map{
 		"success": true,
@@ -851,6 +854,8 @@ func (h *AttendanceHandler) CreateAttendanceSession(c fiber.Ctx) error {
 		EndTime              time.Time `json:"end_time"`
 		LateThresholdMinutes int       `json:"late_threshold_minutes"`
 		LateThresholdTime    string    `json:"late_threshold_time"`
+		RequireMobile        *bool     `json:"require_mobile"`
+		RequireCampusNetwork *bool     `json:"require_campus_network"`
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
@@ -894,6 +899,29 @@ func (h *AttendanceHandler) CreateAttendanceSession(c fiber.Ctx) error {
 		legacySectionID = &sectionIDs[0]
 	}
 
+	// An older client that sends neither switch keeps today's behaviour: both
+	// checks on, except for online sessions, which the guard never checked.
+	online := strings.EqualFold(sessionType, "online")
+	requireMobile := boolValue(input.RequireMobile, !online)
+	requireCampusNetwork := boolValue(input.RequireCampusNetwork, !online)
+	settings := attendanceSessionSettings{
+		SessionType:          sessionType,
+		Start:                input.StartTime,
+		End:                  input.EndTime,
+		Late:                 input.StartTime.Add(time.Duration(input.LateThresholdMinutes) * time.Minute),
+		CheckLocation:        input.CheckLocation,
+		LocationLat:          input.LocationLat,
+		LocationLng:          input.LocationLng,
+		RadiusMeters:         radius,
+		RequireCampusNetwork: requireCampusNetwork,
+	}
+	if problems := append(validateNewAttendanceTimes(settings, time.Now()), validateAttendanceSecurity(settings)...); len(problems) > 0 {
+		return c.Status(400).JSON(attendanceSettingsResponse(problems))
+	}
+	if !input.CheckLocation {
+		input.LocationLat, input.LocationLng = nil, nil
+	}
+
 	autoRotatePin := input.AutoRotatePin == nil || *input.AutoRotatePin
 	session := models.AttendanceSession{
 		CourseID:             input.CourseID,
@@ -907,6 +935,8 @@ func (h *AttendanceHandler) CreateAttendanceSession(c fiber.Ctx) error {
 		LocationLat:          input.LocationLat,
 		LocationLng:          input.LocationLng,
 		RadiusMeters:         radius,
+		RequireMobile:        &requireMobile,
+		RequireCampusNetwork: &requireCampusNetwork,
 		StartTime:            input.StartTime,
 		EndTime:              input.EndTime,
 		LateThresholdMinutes: lateThreshold,
@@ -929,6 +959,8 @@ func (h *AttendanceHandler) CreateAttendanceSession(c fiber.Ctx) error {
 		"start_time":         session.StartTime,
 		"end_time":           session.EndTime,
 		"check_location":     session.CheckLocation,
+		"require_mobile":     requireMobile,
+		"require_network":    requireCampusNetwork,
 	})
 	go createNotificationsForCourseMembers(
 		input.CourseID, userID,
@@ -976,6 +1008,8 @@ func UpdateAttendanceSessionHandler(c fiber.Ctx) error {
 		CourseSectionIDs     *[]uint    `json:"course_section_ids"`
 		SectionIDs           *[]uint    `json:"section_ids"`
 		RegeneratePin        bool       `json:"regenerate_pin"`
+		RequireMobile        *bool      `json:"require_mobile"`
+		RequireCampusNetwork *bool      `json:"require_campus_network"`
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
@@ -987,6 +1021,7 @@ func UpdateAttendanceSessionHandler(c fiber.Ctx) error {
 	}
 
 	session := detail.AttendanceSession
+	securityBefore := attendanceSecurityOf(session)
 	sectionIDs := detail.CourseSectionIDs
 	sectionsProvided := false
 	if input.CourseSectionIDs != nil {
@@ -1069,6 +1104,30 @@ func UpdateAttendanceSessionHandler(c fiber.Ctx) error {
 			session.CourseSectionID = nil
 		}
 	}
+	if input.RequireMobile != nil {
+		v := *input.RequireMobile
+		session.RequireMobile = &v
+	}
+	if input.RequireCampusNetwork != nil {
+		v := *input.RequireCampusNetwork
+		session.RequireCampusNetwork = &v
+	}
+	// Turning a session online drops the network requirement unless the
+	// caller set it explicitly; the guard never checked online sessions.
+	if input.SessionType != nil && strings.EqualFold(session.SessionType, "online") && input.RequireCampusNetwork == nil {
+		off := false
+		session.RequireCampusNetwork = &off
+	}
+	// Only re-judge the security settings when this request changes them, so
+	// renaming an old session saved before these rules existed still works
+	// even though the edit form resends every field.
+	securityAfter := attendanceSecurityOf(session)
+	if !sameAttendanceSecurity(securityBefore, securityAfter) {
+		problems := validateAttendanceSecurity(securityAfter)
+		if len(problems) > 0 {
+			return c.Status(400).JSON(attendanceSettingsResponse(problems))
+		}
+	}
 
 	if err := repositories.UpdateAttendanceSession(&session); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update session"})
@@ -1107,6 +1166,8 @@ func UpdateAttendanceSessionHandler(c fiber.Ctx) error {
 		"late_threshold_minutes": session.LateThresholdMinutes,
 		"late_threshold_time":    session.LateThresholdTime,
 		"check_location":         session.CheckLocation,
+		"require_mobile":         session.MobileRequired(),
+		"require_network":        session.CampusNetworkRequired(),
 	})
 	return c.JSON(fiber.Map{"success": true, "data": attendanceSessionPayload(session, sectionIDs)})
 }

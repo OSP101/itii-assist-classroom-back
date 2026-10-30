@@ -103,32 +103,33 @@ func GetQueueSessionsHandler(c fiber.Ctx) error {
 	payload := make([]fiber.Map, len(result))
 	for i, item := range result {
 		payload[i] = fiber.Map{
-			"id":                           item.QueueSession.ID,
-			"course_id":                    item.QueueSession.CourseID,
-			"classroom_id":                 item.QueueSession.ClassroomID,
-			"title":                        item.QueueSession.Title,
-			"description":                  item.QueueSession.Description,
-			"pin_code":                     item.QueueSession.PinCode,
-			"linked_assignment_id":         item.QueueSession.LinkedAssignmentID,
-			"require_attendance":           item.QueueSession.RequireAttendance,
-			"linked_attendance_session_id": item.QueueSession.LinkedAttendanceSessionID,
-			"is_cutoff_enabled":            item.QueueSession.IsCutoffEnabled,
-			"cutoff_at":                    item.QueueSession.CutoffAt,
-			"cutoff_note":                  item.QueueSession.CutoffNote,
-			"status":                       item.QueueSession.Status,
-			"start_time":                   item.QueueSession.StartTime,
-			"end_time":                     item.QueueSession.EndTime,
-			"created_by":                   item.QueueSession.CreatedBy,
-			"created_at":                   item.QueueSession.CreatedAt,
-			"updated_at":                   item.QueueSession.UpdatedAt,
-			"concurrent_group_id":          item.QueueSession.ConcurrentGroupID,
-			"group_pin_code":               item.QueueSession.GroupPinCode,
-			"link_mode":                    item.QueueSession.LinkMode,
-			"concurrent_partner":           item.ConcurrentPartner,
-			"classroom":                    item.Classroom,
-			"linkedAssignment":             item.LinkedAssignment,
-			"linkedAttendanceSession":      item.LinkedAttendanceSession,
-			"creator":                      item.Creator,
+			"id":                            item.QueueSession.ID,
+			"course_id":                     item.QueueSession.CourseID,
+			"classroom_id":                  item.QueueSession.ClassroomID,
+			"title":                         item.QueueSession.Title,
+			"description":                   item.QueueSession.Description,
+			"pin_code":                      item.QueueSession.PinCode,
+			"linked_assignment_id":          item.QueueSession.LinkedAssignmentID,
+			"require_attendance":            item.QueueSession.RequireAttendance,
+			"linked_attendance_session_id":  item.QueueSession.LinkedAttendanceSessionID,
+			"linked_attendance_session_ids": item.LinkedAttendanceSessionIDs,
+			"is_cutoff_enabled":             item.QueueSession.IsCutoffEnabled,
+			"cutoff_at":                     item.QueueSession.CutoffAt,
+			"cutoff_note":                   item.QueueSession.CutoffNote,
+			"status":                        item.QueueSession.Status,
+			"start_time":                    item.QueueSession.StartTime,
+			"end_time":                      item.QueueSession.EndTime,
+			"created_by":                    item.QueueSession.CreatedBy,
+			"created_at":                    item.QueueSession.CreatedAt,
+			"updated_at":                    item.QueueSession.UpdatedAt,
+			"concurrent_group_id":           item.QueueSession.ConcurrentGroupID,
+			"group_pin_code":                item.QueueSession.GroupPinCode,
+			"link_mode":                     item.QueueSession.LinkMode,
+			"concurrent_partner":            item.ConcurrentPartner,
+			"classroom":                     item.Classroom,
+			"linkedAssignment":              item.LinkedAssignment,
+			"linkedAttendanceSession":       item.LinkedAttendanceSession,
+			"creator":                       item.Creator,
 			"stats": fiber.Map{
 				"total":       item.Stats.Total,
 				"waiting":     item.Stats.Waiting,
@@ -148,21 +149,39 @@ func CreateQueueSessionHandler(c fiber.Ctx) error {
 	}
 
 	var input struct {
-		ClassroomID               string     `json:"classroom_id"`
-		Title                     string     `json:"title"`
-		Description               string     `json:"description"`
-		LinkedAssignmentID        *uint      `json:"linked_assignment_id"`
-		RequireAttendance         bool       `json:"require_attendance"`
-		LinkedAttendanceSessionID *uint      `json:"linked_attendance_session_id"`
-		IsCutoffEnabled           bool       `json:"is_cutoff_enabled"`
-		CutoffAt                  *time.Time `json:"cutoff_at"`
-		CutoffNote                string     `json:"cutoff_note"`
+		ClassroomID               string `json:"classroom_id"`
+		Title                     string `json:"title"`
+		Description               string `json:"description"`
+		LinkedAssignmentID        *uint  `json:"linked_assignment_id"`
+		RequireAttendance         bool   `json:"require_attendance"`
+		LinkedAttendanceSessionID *uint  `json:"linked_attendance_session_id"`
+		// Several sessions: a student present or late in any of them can book.
+		LinkedAttendanceSessionIDs []uint     `json:"linked_attendance_session_ids"`
+		IsCutoffEnabled            bool       `json:"is_cutoff_enabled"`
+		CutoffAt                   *time.Time `json:"cutoff_at"`
+		CutoffNote                 string     `json:"cutoff_note"`
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
 	}
-	if input.ClassroomID == "" || input.Title == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "classroom_id and title are required"})
+	input.Title = strings.TrimSpace(input.Title)
+	input.ClassroomID = strings.TrimSpace(input.ClassroomID)
+	attendanceIDs := normalizeQueueAttendanceIDs(input.LinkedAttendanceSessionIDs)
+	if len(attendanceIDs) == 0 && input.LinkedAttendanceSessionID != nil {
+		attendanceIDs = normalizeQueueAttendanceIDs([]uint{*input.LinkedAttendanceSessionID})
+	}
+	// A link without "require" (or the reverse) never restricted anyone; store them together.
+	if len(attendanceIDs) == 0 || !input.RequireAttendance {
+		input.RequireAttendance = false
+		attendanceIDs = nil
+	}
+	input.LinkedAttendanceSessionID = firstUint(attendanceIDs)
+	if problems := validateQueueSession(queueSessionSettings{
+		CourseID: courseID, Title: input.Title, Description: input.Description, ClassroomID: input.ClassroomID,
+		AssignmentID: input.LinkedAssignmentID, AttendanceSessionIDs: attendanceIDs,
+		CheckTitle: true, CheckDescription: true, CheckClassroom: true, CheckAssignment: true, CheckAttendance: true,
+	}, dbQueueLinkLookup); len(problems) > 0 {
+		return c.Status(400).JSON(queueSettingsResponse(problems))
 	}
 	if input.IsCutoffEnabled && input.CutoffAt == nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "cutoff_at is required when is_cutoff_enabled=true"})
@@ -185,9 +204,25 @@ func CreateQueueSessionHandler(c fiber.Ctx) error {
 	if err := repositories.CreateQueueSession(&session); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to create queue session"})
 	}
-	logCourseActivity(c, courseID, userID, "create_queue_session", "queue", "queue_session", session.ID, session.Title, fiber.Map{"classroom_id": session.ClassroomID, "linked_assignment_id": session.LinkedAssignmentID, "require_attendance": session.RequireAttendance})
+	if err := repositories.SetQueueAttendanceLinks(session.ID, attendanceIDs); err != nil {
+		log.Printf("event=queue_attendance_links_failed queue_session_id=%s err=%v", session.ID, err)
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to link attendance sessions"})
+	}
+	logCourseActivity(c, courseID, userID, "create_queue_session", "queue", "queue_session", session.ID, session.Title, fiber.Map{"classroom_id": session.ClassroomID, "linked_assignment_id": session.LinkedAssignmentID, "require_attendance": session.RequireAttendance, "linked_attendance_session_ids": attendanceIDs})
 	go createNotificationsForCourseMembers(courseID, userID, "queue_created", "สร้างคิว: "+session.Title, "มีการสร้างคิวใหม่ในวิชา", "/classroom/"+courseID+"/queue", buildNotifData(courseID, session.ID, "queue_session", ""))
-	return c.Status(201).JSON(fiber.Map{"success": true, "data": session})
+	return c.Status(201).JSON(fiber.Map{"success": true, "data": queueSessionWithLinks(session, attendanceIDs)})
+}
+
+// queueSessionWithLinks is the session as JSON plus its attendance link list.
+func queueSessionWithLinks(session models.QueueSession, attendanceIDs []uint) fiber.Map {
+	raw, _ := json.Marshal(session)
+	out := fiber.Map{}
+	_ = json.Unmarshal(raw, &out)
+	if attendanceIDs == nil {
+		attendanceIDs = []uint{}
+	}
+	out["linked_attendance_session_ids"] = attendanceIDs
+	return out
 }
 
 // GET /api/courses/:courseId/queue/sessions/:sessionId
@@ -234,15 +269,33 @@ func GetQueueSessionHandler(c fiber.Ctx) error {
 		}
 	}
 
-	if session.LinkedAttendanceSessionID != nil {
-		var attendanceSession struct {
+	attendanceIDs, err := repositories.QueueAttendanceIDs(session)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load attendance links"})
+	}
+	if attendanceIDs == nil {
+		attendanceIDs = []uint{}
+	}
+	payload["linked_attendance_session_ids"] = attendanceIDs
+	if len(attendanceIDs) > 0 {
+		var rows []struct {
 			ID    uint   `gorm:"column:id"`
 			Title string `gorm:"column:title"`
 		}
-		if err := config.DB.Table("attendance_sessions").Select("id", "title").Where("id = ?", *session.LinkedAttendanceSessionID).Take(&attendanceSession).Error; err == nil {
-			payload["linkedAttendanceSession"] = fiber.Map{
-				"id":    attendanceSession.ID,
-				"title": attendanceSession.Title,
+		if err := config.DB.Table("attendance_sessions").Select("id", "title").Where("id IN ?", attendanceIDs).Find(&rows).Error; err == nil {
+			titles := make(map[uint]string, len(rows))
+			for _, r := range rows {
+				titles[r.ID] = r.Title
+			}
+			linked := make([]fiber.Map, 0, len(attendanceIDs))
+			for _, id := range attendanceIDs {
+				if title, ok := titles[id]; ok {
+					linked = append(linked, fiber.Map{"id": id, "title": title})
+				}
+			}
+			payload["linkedAttendanceSessions"] = linked
+			if len(linked) > 0 {
+				payload["linkedAttendanceSession"] = linked[0]
 			}
 		}
 	}
@@ -263,21 +316,31 @@ func UpdateQueueSessionHandler(c fiber.Ctx) error {
 	actorID := c.Locals("user_id").(uint)
 
 	var input struct {
-		ClassroomID               *string    `json:"classroom_id"`
-		Title                     *string    `json:"title"`
-		Description               *string    `json:"description"`
-		LinkedAssignmentID        *uint      `json:"linked_assignment_id"`
-		RequireAttendance         *bool      `json:"require_attendance"`
-		LinkedAttendanceSessionID *uint      `json:"linked_attendance_session_id"`
-		IsCutoffEnabled           *bool      `json:"is_cutoff_enabled"`
-		CutoffAt                  *time.Time `json:"cutoff_at"`
-		CutoffNote                *string    `json:"cutoff_note"`
+		ClassroomID                *string    `json:"classroom_id"`
+		Title                      *string    `json:"title"`
+		Description                *string    `json:"description"`
+		LinkedAssignmentID         *uint      `json:"linked_assignment_id"`
+		RequireAttendance          *bool      `json:"require_attendance"`
+		LinkedAttendanceSessionID  *uint      `json:"linked_attendance_session_id"`
+		LinkedAttendanceSessionIDs *[]uint    `json:"linked_attendance_session_ids"`
+		IsCutoffEnabled            *bool      `json:"is_cutoff_enabled"`
+		CutoffAt                   *time.Time `json:"cutoff_at"`
+		CutoffNote                 *string    `json:"cutoff_note"`
 	}
 	if err := c.Bind().JSON(&input); err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid input"})
 	}
+	origClassroomID := session.ClassroomID
+	origAssignmentID := session.LinkedAssignmentID
+	origAttendanceIDs, err := repositories.QueueAttendanceIDs(session)
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load attendance links"})
+	}
 	if input.Title != nil {
 		session.Title = strings.TrimSpace(*input.Title)
+		if problems := validateQueueSession(queueSessionSettings{Title: session.Title, CheckTitle: true}, dbQueueLinkLookup); len(problems) > 0 {
+			return c.Status(400).JSON(queueSettingsResponse(problems))
+		}
 	}
 	if session.Status == "closed" {
 		if err := repositories.UpdateQueueSession(session); err != nil {
@@ -298,13 +361,28 @@ func UpdateQueueSessionHandler(c fiber.Ctx) error {
 		session.ClassroomID = classroomID
 	}
 	session.LinkedAssignmentID = input.LinkedAssignmentID
+	attendanceIDs := origAttendanceIDs
+	switch {
+	case input.LinkedAttendanceSessionIDs != nil:
+		attendanceIDs = normalizeQueueAttendanceIDs(*input.LinkedAttendanceSessionIDs)
+	case input.LinkedAttendanceSessionID != nil:
+		// Older clients send one session; it replaces the whole list.
+		attendanceIDs = []uint{*input.LinkedAttendanceSessionID}
+	case input.RequireAttendance != nil:
+		// Older clients also send require_attendance without a session to unlink.
+		attendanceIDs = nil
+	}
 	if input.RequireAttendance != nil {
 		session.RequireAttendance = *input.RequireAttendance
+	} else if input.LinkedAttendanceSessionIDs != nil {
+		session.RequireAttendance = len(attendanceIDs) > 0
 	}
-	session.LinkedAttendanceSessionID = input.LinkedAttendanceSessionID
-	if !session.RequireAttendance {
-		session.LinkedAttendanceSessionID = nil
+	if !session.RequireAttendance || len(attendanceIDs) == 0 {
+		session.RequireAttendance = false
+		attendanceIDs = nil
 	}
+	session.LinkedAttendanceSessionID = firstUint(attendanceIDs)
+	attendanceChanged := !sameUintSet(attendanceIDs, origAttendanceIDs)
 	if input.IsCutoffEnabled != nil {
 		session.IsCutoffEnabled = *input.IsCutoffEnabled
 		if !*input.IsCutoffEnabled {
@@ -321,10 +399,28 @@ func UpdateQueueSessionHandler(c fiber.Ctx) error {
 	if session.IsCutoffEnabled && session.CutoffAt == nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "cutoff_at is required when is_cutoff_enabled=true"})
 	}
+	// Only links this request changes are re-checked, so queues saved before
+	// these rules (e.g. linked from another course) still save other edits.
+	if problems := validateQueueSession(queueSessionSettings{
+		CourseID: session.CourseID, Description: session.Description, ClassroomID: session.ClassroomID,
+		AssignmentID: session.LinkedAssignmentID, AttendanceSessionIDs: attendanceIDs,
+		CheckDescription: input.Description != nil,
+		CheckClassroom:   session.ClassroomID != origClassroomID,
+		CheckAssignment:  !sameUintPtr(session.LinkedAssignmentID, origAssignmentID),
+		CheckAttendance:  attendanceChanged,
+	}, dbQueueLinkLookup); len(problems) > 0 {
+		return c.Status(400).JSON(queueSettingsResponse(problems))
+	}
 	if err := repositories.UpdateQueueSession(session); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update session"})
 	}
-	logCourseActivity(c, session.CourseID, actorID, "update_queue_session", "queue", "queue_session", session.ID, session.Title, fiber.Map{"description": session.Description, "classroom_id": session.ClassroomID, "linked_assignment_id": session.LinkedAssignmentID, "require_attendance": session.RequireAttendance, "linked_attendance_session_id": session.LinkedAttendanceSessionID})
+	if attendanceChanged {
+		if err := repositories.SetQueueAttendanceLinks(session.ID, attendanceIDs); err != nil {
+			log.Printf("event=queue_attendance_links_failed queue_session_id=%s err=%v", session.ID, err)
+			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to link attendance sessions"})
+		}
+	}
+	logCourseActivity(c, session.CourseID, actorID, "update_queue_session", "queue", "queue_session", session.ID, session.Title, fiber.Map{"description": session.Description, "classroom_id": session.ClassroomID, "linked_assignment_id": session.LinkedAssignmentID, "require_attendance": session.RequireAttendance, "linked_attendance_session_id": session.LinkedAttendanceSessionID, "linked_attendance_session_ids": attendanceIDs})
 	go createNotificationsForCourseMembers(session.CourseID, actorID, "queue_updated", "แก้ไขคิว: "+session.Title, "มีการแก้ไขคิวในวิชา", "/classroom/"+session.CourseID+"/queue", buildNotifData(session.CourseID, session.ID, "queue_session", ""))
 	return c.JSON(fiber.Map{"success": true, "data": session})
 }
@@ -1817,14 +1913,23 @@ func isStudentEnrolledInCourse(courseID string, studentID uint) (bool, error) {
 	return count > 0, err
 }
 
+// hasQueueAttendanceEligibility: a student can book when present or late in
+// any one of the queue's linked attendance sessions.
 func hasQueueAttendanceEligibility(session *models.QueueSession, studentID uint) (bool, error) {
-	if !session.RequireAttendance || session.LinkedAttendanceSessionID == nil {
+	if !session.RequireAttendance {
+		return true, nil
+	}
+	attendanceIDs, err := repositories.QueueAttendanceIDs(session)
+	if err != nil {
+		return false, err
+	}
+	if len(attendanceIDs) == 0 {
 		return true, nil
 	}
 
 	var count int64
-	err := config.DB.Model(&models.AttendanceRecord{}).
-		Where("attendance_session_id = ? AND student_id = ? AND status IN ?", *session.LinkedAttendanceSessionID, studentID, []string{"present", "late"}).
+	err = config.DB.Model(&models.AttendanceRecord{}).
+		Where("attendance_session_id IN ? AND student_id = ? AND status IN ?", attendanceIDs, studentID, []string{"present", "late"}).
 		Count(&count).Error
 	return count > 0, err
 }

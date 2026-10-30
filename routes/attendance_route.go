@@ -38,7 +38,11 @@ func SetupAttendanceRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	display.Post("/grants/:id/revoke", handlers.RevokeAttendanceDisplayGrantHandler)
 
 	// Protected endpoints
-	api := app.Group("/api/attendance", middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"))
+	// NoStore: these responses (the session list above all) change the moment
+	// a session is created, so no browser or proxy may answer from a copy. A
+	// cached list was why a new session only appeared in the assignment modal
+	// after a page reload.
+	api := app.Group("/api/attendance", middlewares.NoStore(), middlewares.Protected(), middlewares.RequireRole("admin", "instructor", "ta"))
 	api.Use(middlewares.RequireAdminFeature("menu.attendance"))
 	// คำขอลา (ผู้สอน/TA) ต้องประกาศก่อน /:id ไม่งั้น "leave-requests" จะถูกจับเป็น session id
 	leaveReq := middlewares.CourseIDFromLeaveRequestParam("id")

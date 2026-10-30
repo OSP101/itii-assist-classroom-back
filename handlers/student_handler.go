@@ -166,20 +166,22 @@ func GetMyStudentCourseHandler(c fiber.Ctx) error {
 		}
 
 		queuePayload = append(queuePayload, fiber.Map{
-			"id":                           session.QueueSession.ID,
-			"title":                        session.QueueSession.Title,
-			"description":                  session.QueueSession.Description,
-			"status":                       session.QueueSession.Status,
-			"require_attendance":           session.QueueSession.RequireAttendance,
-			"linked_assignment_id":         session.QueueSession.LinkedAssignmentID,
-			"linked_attendance_session_id": session.QueueSession.LinkedAttendanceSessionID,
-			"cutoff_at":                    session.QueueSession.CutoffAt,
-			"cutoff_note":                  session.QueueSession.CutoffNote,
-			"classroom":                    session.Classroom,
-			"linkedAssignment":             session.LinkedAssignment,
-			"linkedAttendanceSession":      session.LinkedAttendanceSession,
-			"stats":                        session.Stats,
-			"my_booking":                   myBooking,
+			"id":                            session.QueueSession.ID,
+			"title":                         session.QueueSession.Title,
+			"description":                   session.QueueSession.Description,
+			"status":                        session.QueueSession.Status,
+			"require_attendance":            session.QueueSession.RequireAttendance,
+			"linked_assignment_id":          session.QueueSession.LinkedAssignmentID,
+			"linked_attendance_session_id":  session.QueueSession.LinkedAttendanceSessionID,
+			"linked_attendance_session_ids": session.LinkedAttendanceSessionIDs,
+			"linkedAttendanceSessions":      session.LinkedAttendanceSessions,
+			"cutoff_at":                     session.QueueSession.CutoffAt,
+			"cutoff_note":                   session.QueueSession.CutoffNote,
+			"classroom":                     session.Classroom,
+			"linkedAssignment":              session.LinkedAssignment,
+			"linkedAttendanceSession":       session.LinkedAttendanceSession,
+			"stats":                         session.Stats,
+			"my_booking":                    myBooking,
 		})
 	}
 

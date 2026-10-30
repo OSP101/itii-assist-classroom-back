@@ -484,22 +484,29 @@ type ExamSeat struct {
 // =============================================================================
 
 type AttendanceSession struct {
-	ID                   uint       `gorm:"primaryKey;autoIncrement" json:"id"`
-	CourseID             string     `gorm:"type:varchar(21);not null;index" json:"course_id"`
-	CourseSectionID      *uint      `gorm:"index" json:"course_section_id,omitempty"`
-	Title                string     `gorm:"type:varchar(255);default:'Attendance'" json:"title"`
-	AutoRotatePin        *bool      `gorm:"type:boolean;default:true" json:"auto_rotate_pin"`
-	PinMode              string     `gorm:"type:varchar(20);default:'rotating'" json:"pin_mode"`
-	PinCode              string     `gorm:"type:varchar(50)" json:"pin_code"`
-	PreviousPinCode      string     `gorm:"type:varchar(50)" json:"previous_pin_code"`
-	PinHash              string     `gorm:"type:char(64)" json:"-"`
-	CurrentPinHash       string     `gorm:"type:char(64)" json:"-"`
-	PreviousPinHash      string     `gorm:"type:char(64)" json:"-"`
-	SessionType          string     `gorm:"type:varchar(20);default:'lecture'" json:"session_type"` // lecture, lab, online
-	CheckLocation        bool       `gorm:"type:boolean;default:false" json:"check_location"`
-	LocationLat          *float64   `gorm:"type:decimal(10,7)" json:"location_lat,omitempty"`
-	LocationLng          *float64   `gorm:"type:decimal(10,7)" json:"location_lng,omitempty"`
-	RadiusMeters         int        `gorm:"default:50" json:"radius_meters"`
+	ID              uint     `gorm:"primaryKey;autoIncrement" json:"id"`
+	CourseID        string   `gorm:"type:varchar(21);not null;index" json:"course_id"`
+	CourseSectionID *uint    `gorm:"index" json:"course_section_id,omitempty"`
+	Title           string   `gorm:"type:varchar(255);default:'Attendance'" json:"title"`
+	AutoRotatePin   *bool    `gorm:"type:boolean;default:true" json:"auto_rotate_pin"`
+	PinMode         string   `gorm:"type:varchar(20);default:'rotating'" json:"pin_mode"`
+	PinCode         string   `gorm:"type:varchar(50)" json:"pin_code"`
+	PreviousPinCode string   `gorm:"type:varchar(50)" json:"previous_pin_code"`
+	PinHash         string   `gorm:"type:char(64)" json:"-"`
+	CurrentPinHash  string   `gorm:"type:char(64)" json:"-"`
+	PreviousPinHash string   `gorm:"type:char(64)" json:"-"`
+	SessionType     string   `gorm:"type:varchar(20);default:'lecture'" json:"session_type"` // lecture, lab, online
+	CheckLocation   bool     `gorm:"type:boolean;default:false" json:"check_location"`
+	LocationLat     *float64 `gorm:"type:decimal(10,7)" json:"location_lat,omitempty"`
+	LocationLng     *float64 `gorm:"type:decimal(10,7)" json:"location_lng,omitempty"`
+	RadiusMeters    int      `gorm:"default:50" json:"radius_meters"`
+	// RequireMobile / RequireCampusNetwork are per-session switches for the
+	// check-in guard. Pointers so an explicit false is written (a plain bool
+	// with default:true would be overwritten by the default on create), and
+	// nil (a row or cache entry from before the columns existed) reads as
+	// "required", so nothing loosens by accident. Use the helpers below.
+	RequireMobile        *bool      `gorm:"type:boolean;default:true" json:"require_mobile"`
+	RequireCampusNetwork *bool      `gorm:"type:boolean;default:true" json:"require_campus_network"`
 	StartTime            time.Time  `gorm:"type:timestamptz;not null" json:"start_time"`
 	EndTime              time.Time  `gorm:"type:timestamptz;not null" json:"end_time"`
 	StartedAt            *time.Time `gorm:"type:timestamptz" json:"started_at,omitempty"`
@@ -699,9 +706,20 @@ type QueueSession struct {
 	// LinkMode governs cross-course booking dispatch within a concurrent group:
 	// "joint" (default) lets mirrored TAs receive bookings from either course;
 	// "separated" still mirrors worker visibility but dispatch never crosses courses.
-	LinkMode                  string     `gorm:"type:varchar(20);not null;default:'joint'" json:"link_mode"`
-	CreatedAt                 time.Time  `gorm:"type:timestamptz" json:"created_at"`
-	UpdatedAt                 time.Time  `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+	LinkMode  string    `gorm:"type:varchar(20);not null;default:'joint'" json:"link_mode"`
+	CreatedAt time.Time `gorm:"type:timestamptz" json:"created_at"`
+	UpdatedAt time.Time `gorm:"autoUpdateTime;type:timestamptz" json:"updated_at"`
+}
+
+// QueueSessionAttendanceLink lets a queue require attendance in any of several
+// sessions (e.g. one per section): a student who was present or late in at
+// least one of them can book. QueueSession.LinkedAttendanceSessionID still
+// holds the first link so older readers keep working.
+type QueueSessionAttendanceLink struct {
+	ID                  uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	QueueSessionID      string    `gorm:"type:varchar(21);not null" json:"queue_session_id"`
+	AttendanceSessionID uint      `gorm:"not null" json:"attendance_session_id"`
+	CreatedAt           time.Time `gorm:"type:timestamptz" json:"created_at"`
 }
 
 type QueueBooking struct {
@@ -747,12 +765,12 @@ type QueueDeskStatus struct {
 }
 
 type QueueWorker struct {
-	ID                       uint       `gorm:"primaryKey;autoIncrement" json:"id"`
-	QueueSessionID           string     `gorm:"type:varchar(21);not null;index" json:"queue_session_id"`
-	UserID                   uint       `gorm:"not null;index" json:"user_id"`
-	AcceptGrading            bool       `gorm:"type:boolean;default:true" json:"accept_grading"`
-	AcceptHelp               bool       `gorm:"type:boolean;default:true" json:"accept_help"`
-	PushNotificationsEnabled bool       `gorm:"type:boolean;default:true" json:"push_notifications_enabled"`
+	ID                       uint   `gorm:"primaryKey;autoIncrement" json:"id"`
+	QueueSessionID           string `gorm:"type:varchar(21);not null;index" json:"queue_session_id"`
+	UserID                   uint   `gorm:"not null;index" json:"user_id"`
+	AcceptGrading            bool   `gorm:"type:boolean;default:true" json:"accept_grading"`
+	AcceptHelp               bool   `gorm:"type:boolean;default:true" json:"accept_help"`
+	PushNotificationsEnabled bool   `gorm:"type:boolean;default:true" json:"push_notifications_enabled"`
 	// IsMirror marks a row copied into a partner session of a concurrent group
 	// for visibility, as opposed to the session the user actually joined. A
 	// "separated" group never dispatches to a mirror row.

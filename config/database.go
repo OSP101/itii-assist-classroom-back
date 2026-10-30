@@ -570,6 +570,10 @@ func MigratePerformanceIndexes() {
 			sql:  `CREATE UNIQUE INDEX IF NOT EXISTS uq_queue_bookings_session_student_active ON queue_bookings (queue_session_id, student_id) WHERE status IN ('waiting','in_progress')`,
 		},
 		{
+			name: "queue_session_attendance_links_unique",
+			sql:  `CREATE UNIQUE INDEX IF NOT EXISTS uq_queue_session_attendance_links ON queue_session_attendance_links (queue_session_id, attendance_session_id)`,
+		},
+		{
 			name: "queue_bookings_session_queue_number",
 			sql:  `CREATE INDEX IF NOT EXISTS idx_queue_bookings_session_queue_number ON queue_bookings (queue_session_id, queue_number DESC)`,
 		},

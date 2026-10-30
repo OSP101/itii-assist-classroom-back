@@ -94,7 +94,7 @@ func AttendanceNetworkGuard() fiber.Handler {
 			return c.Next()
 		}
 
-		sessionType, sessionID, found, err := resolveAttendanceSessionType(c)
+		guard, sessionID, found, err := resolveAttendanceSessionGuard(c)
 		if err != nil {
 			// Only refuse while the guard is actually enforcing: with the guard
 			// switched off there is no verdict to be missing, and online
@@ -130,8 +130,9 @@ func AttendanceNetworkGuard() fiber.Handler {
 			c.Get(fiber.HeaderHost),
 			c.Get(fiber.HeaderUserAgent),
 			c.IP(),
-			sessionType,
+			guard.SessionType,
 			utils.ParseDeviceHints(c.Get(utils.DeviceHintsHeader)),
+			guard.Policy,
 		)
 		if result.Allowed || result.Exempt {
 			nextErr := c.Next()
@@ -165,7 +166,7 @@ func AttendanceNetworkGuard() fiber.Handler {
 	}
 }
 
-// resolveAttendanceSessionType also returns the resolved session ID so
+// resolveAttendanceSessionGuard also returns the resolved session ID so
 // callers (the guard above) don't need a second, independent PIN lookup just
 // to get the same session ID for logging.
 //
@@ -176,23 +177,23 @@ func AttendanceNetworkGuard() fiber.Handler {
 // must not quietly skip the guard on the strength of that. Every lookup shares
 // one deadline so a saturated database becomes a fast, retryable failure
 // instead of a hung request.
-func resolveAttendanceSessionType(c fiber.Ctx) (sessionType string, sessionID uint, found bool, err error) {
+func resolveAttendanceSessionGuard(c fiber.Ctx) (guard repositories.AttendanceSessionGuard, sessionID uint, found bool, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	if idStr := c.Params("sessionId"); idStr != "" {
 		id, parseErr := strconv.ParseUint(idStr, 10, 64)
 		if parseErr != nil {
-			return "", 0, false, nil
+			return guard, 0, false, nil
 		}
-		sessionType, err = repositories.GetAttendanceSessionTypeCtx(ctx, uint(id))
+		guard, err = repositories.GetAttendanceSessionGuardCtx(ctx, uint(id))
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return "", 0, false, nil
+				return guard, 0, false, nil
 			}
-			return "", 0, false, err
+			return guard, 0, false, err
 		}
-		return sessionType, uint(id), true, nil
+		return guard, uint(id), true, nil
 	}
 
 	type pinBody struct {
@@ -204,7 +205,7 @@ func resolveAttendanceSessionType(c fiber.Ctx) (sessionType string, sessionID ui
 	}
 	pin := strings.TrimSpace(body.PinCode)
 	if pin == "" {
-		return "", 0, false, nil
+		return guard, 0, false, nil
 	}
 
 	sessionID, err = repositories.LookupAttendanceSessionIDByPIN(ctx, pin)
@@ -212,17 +213,17 @@ func resolveAttendanceSessionType(c fiber.Ctx) (sessionType string, sessionID ui
 		// A PIN matching no active session is an ordinary wrong-PIN attempt;
 		// anything else is an infrastructure failure.
 		if errors.Is(err, repositories.ErrAttendanceInvalidPIN) {
-			return "", 0, false, nil
+			return guard, 0, false, nil
 		}
-		return "", 0, false, err
+		return guard, 0, false, err
 	}
 
-	sessionType, err = repositories.GetAttendanceSessionTypeCtx(ctx, sessionID)
+	guard, err = repositories.GetAttendanceSessionGuardCtx(ctx, sessionID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return "", 0, false, nil
+			return guard, 0, false, nil
 		}
-		return "", 0, false, err
+		return guard, 0, false, err
 	}
-	return sessionType, sessionID, true, nil
+	return guard, sessionID, true, nil
 }

@@ -8,6 +8,7 @@ import (
 	"itii-assist/config"
 	"itii-assist/models"
 	"itii-assist/observability"
+	"itii-assist/utils"
 	"log"
 	"math"
 	"strings"
@@ -189,6 +190,11 @@ type AttendanceSessionInfo struct {
 	Title                string                  `json:"title"`
 	SessionType          string                  `json:"session_type"`
 	CheckLocation        bool                    `json:"check_location"`
+	// AllowDesktop / AllowAnyNetwork are the session's relaxations of the
+	// check-in guard. Named so the zero value is the strict one: an info
+	// value built or cached before these existed keeps every check on.
+	AllowDesktop         bool                    `json:"allow_desktop"`
+	AllowAnyNetwork      bool                    `json:"allow_any_network"`
 	AutoRotatePin        bool                    `json:"auto_rotate_pin"`
 	PinMode              string                  `json:"pin_mode"`
 	// PinCode is for privileged consumers only — the instructor live view and
@@ -1738,6 +1744,39 @@ func GetAttendanceSessionTypeCtx(ctx context.Context, sessionID uint) (string, e
 	return sessionType, nil
 }
 
+// AttendanceSessionGuard is what the check-in guard needs to know about one
+// session: its type (online is exempt) and which checks it asks for.
+type AttendanceSessionGuard struct {
+	SessionType string
+	Policy      utils.CampusGuardPolicy
+}
+
+// GetAttendanceSessionGuardCtx loads the guard settings for one session in a
+// single narrow query. A NULL switch (a row from before the columns existed)
+// keeps the check on.
+func GetAttendanceSessionGuardCtx(ctx context.Context, sessionID uint) (AttendanceSessionGuard, error) {
+	var row models.AttendanceSession
+	err := config.DB.WithContext(ctx).Model(&models.AttendanceSession{}).
+		Select("session_type", "require_mobile", "require_campus_network").
+		Where("id = ?", sessionID).
+		Take(&row).Error
+	if err != nil {
+		return AttendanceSessionGuard{}, err
+	}
+	return AttendanceSessionGuard{
+		SessionType: row.SessionType,
+		Policy:      CampusGuardPolicyFor(row),
+	}, nil
+}
+
+// CampusGuardPolicyFor turns a session's switches into the guard's policy.
+func CampusGuardPolicyFor(s models.AttendanceSession) utils.CampusGuardPolicy {
+	return utils.CampusGuardPolicy{
+		AllowDesktop:    !s.MobileRequired(),
+		AllowAnyNetwork: !s.CampusNetworkRequired(),
+	}
+}
+
 // attendanceSessionInfoGroup coalesces concurrent GetSessionInfo calls for
 // the same session into one DB/Redis round trip (plan.md ระยะ 1.1 — a burst
 // of students loading /check-in/:id at the same instant must not turn into
@@ -1877,6 +1916,8 @@ func getSessionInfoUncached(sessionID uint) (*AttendanceSessionInfo, error) {
 		Title:                session.Title,
 		SessionType:          session.SessionType,
 		CheckLocation:        session.CheckLocation,
+		AllowDesktop:         !session.MobileRequired(),
+		AllowAnyNetwork:      !session.CampusNetworkRequired(),
 		AutoRotatePin:        session.AutoRotatePin != nil && *session.AutoRotatePin,
 		PinMode:              session.PinMode,
 		PinCode:              session.PinCode,

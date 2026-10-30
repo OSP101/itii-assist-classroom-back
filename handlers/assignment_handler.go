@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"log"
 	"strconv"
 	"time"
 
@@ -227,7 +228,7 @@ func UpdateAssignmentHandler(c fiber.Ctx) error {
 
 	var input struct {
 		Name                       string                           `json:"name"`
-		Description                string                           `json:"description"`
+		Description                *string                          `json:"description"`
 		AssignmentType             string                           `json:"assignment_type"`
 		WeekNumber                 *int                             `json:"week_number"`
 		LinkedAttendanceSessionID  *uint                            `json:"linked_attendance_session_id"`
@@ -256,8 +257,10 @@ func UpdateAssignmentHandler(c fiber.Ctx) error {
 	if input.Name != "" {
 		a.Name = input.Name
 	}
-	if input.Description != "" {
-		a.Description = input.Description
+	// A pointer so an instructor can clear the description: absent leaves it
+	// alone, an empty string empties it.
+	if input.Description != nil {
+		a.Description = *input.Description
 	}
 	if input.AssignmentType != "" {
 		a.AssignmentType = input.AssignmentType
@@ -363,6 +366,41 @@ func UpdateAssignmentHandler(c fiber.Ctx) error {
 		)
 	}
 	return c.JSON(fiber.Map{"success": true, "data": updatedAssignment})
+}
+
+// PublishDueScheduledAssignments runs from the minute ticker in main. A draft
+// whose scheduled time has come is published with the same activity entry,
+// realtime event and notification a manual publish produces. No user is behind
+// the flip, so the realtime event carries no actor_id (every client refreshes)
+// and the activity entry is attributed to the assignment's creator.
+func PublishDueScheduledAssignments() {
+	published, err := repositories.PublishDueScheduledAssignments(time.Now())
+	if err != nil {
+		log.Printf("⚠️  scheduled assignment publish: %v", err)
+	}
+	for _, a := range published {
+		before := a
+		before.IsDraft = true
+		detail := withChanges(fiber.Map{
+			"assignment_type":   a.AssignmentType,
+			"scheduled_publish": true,
+			"scheduled_at":      a.PublishAt,
+		}, assignmentChangeFields(before), assignmentChangeFields(a))
+		writeCourseActivityLog(a.CourseID, a.CreatedBy, "update_assignment", "assignment", "assignment", a.ID, a.Name, detail)
+		realtime.EmitDataUpdate("assignment", "update", a.ID, fiber.Map{
+			"courseId":     a.CourseID,
+			"assignmentId": a.ID,
+			"name":         a.Name,
+		})
+		createNotificationsForCourseMembers(
+			a.CourseID, a.CreatedBy,
+			"assignment_created",
+			"งานใหม่: "+a.Name,
+			"มีการเผยแพร่งานใหม่ในวิชา",
+			"/classroom/"+a.CourseID+"/assignments",
+			buildNotifData(a.CourseID, strconv.FormatUint(uint64(a.ID), 10), "assignment", ""),
+		)
+	}
 }
 
 // DELETE /api/assignments/:id

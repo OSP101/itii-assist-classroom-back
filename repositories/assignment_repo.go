@@ -313,6 +313,44 @@ func SoftDeleteAssignment(id uint) error {
 	return nil
 }
 
+// PublishDueScheduledAssignments publishes drafts whose publish_at has come and
+// returns the rows it published. Each row is flipped with its own guarded
+// update, so a draft the instructor published by hand in the same minute is not
+// reported (and announced) twice. Closed courses are skipped: closing a course
+// freezes its assignments, scheduled ones included. The returned rows keep
+// PublishAt as the time they were scheduled for; the stored column is cleared.
+func PublishDueScheduledAssignments(now time.Time) ([]models.Assignment, error) {
+	activeCourses := config.DB.Model(&models.Course{}).Select("id").Where("is_active = ?", true)
+
+	var due []models.Assignment
+	err := config.DB.
+		Where("is_draft = ? AND is_active = ? AND publish_at IS NOT NULL AND publish_at <= ?", true, true, now).
+		Where("course_id IN (?)", activeCourses).
+		Order("publish_at ASC").
+		Limit(50).
+		Find(&due).Error
+	if err != nil {
+		return nil, err
+	}
+
+	published := make([]models.Assignment, 0, len(due))
+	for _, a := range due {
+		res := config.DB.Model(&models.Assignment{}).
+			Where("id = ? AND is_draft = ?", a.ID, true).
+			Updates(map[string]interface{}{"is_draft": false, "publish_at": nil})
+		if res.Error != nil {
+			return published, res.Error
+		}
+		if res.RowsAffected != 1 {
+			continue
+		}
+		a.IsDraft = false
+		InvalidateCourseOverviewCache(a.CourseID)
+		published = append(published, a)
+	}
+	return published, nil
+}
+
 func ReorderAssignments(courseID string, orderedIDs []uint) error {
 	db := config.DB
 	for i, id := range orderedIDs {

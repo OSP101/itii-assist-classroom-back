@@ -7,6 +7,7 @@ import (
 	"itii-assist/config"
 	"itii-assist/models"
 	"itii-assist/utils"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -453,13 +454,16 @@ type QueueSessionConcurrentPartner struct {
 }
 
 type QueueSessionListItem struct {
-	QueueSession            models.QueueSession            `json:"-"`
-	Classroom               *QueueSessionClassroomBasic    `json:"classroom"`
-	LinkedAssignment        *QueueSessionAssignmentBasic   `json:"linkedAssignment"`
-	LinkedAttendanceSession *QueueSessionAttendanceBasic   `json:"linkedAttendanceSession"`
-	Creator                 *QueueSessionCreatorBasic      `json:"creator"`
-	Stats                   QueueSessionStats              `json:"stats"`
-	ConcurrentPartner       *QueueSessionConcurrentPartner `json:"concurrent_partner,omitempty"`
+	QueueSession            models.QueueSession          `json:"-"`
+	Classroom               *QueueSessionClassroomBasic  `json:"classroom"`
+	LinkedAssignment        *QueueSessionAssignmentBasic `json:"linkedAssignment"`
+	LinkedAttendanceSession *QueueSessionAttendanceBasic `json:"linkedAttendanceSession"`
+	// Every attendance session the queue accepts, in link order.
+	LinkedAttendanceSessionIDs []uint                         `json:"linked_attendance_session_ids"`
+	LinkedAttendanceSessions   []QueueSessionAttendanceBasic  `json:"linkedAttendanceSessions"`
+	Creator                    *QueueSessionCreatorBasic      `json:"creator"`
+	Stats                      QueueSessionStats              `json:"stats"`
+	ConcurrentPartner          *QueueSessionConcurrentPartner `json:"concurrent_partner,omitempty"`
 }
 
 type QueueBookingSubItemScoreInput struct {
@@ -491,9 +495,6 @@ func GetQueueSessions(courseID string, status string) ([]QueueSessionListItem, e
 		if session.LinkedAssignmentID != nil {
 			assignmentIDsMap[*session.LinkedAssignmentID] = struct{}{}
 		}
-		if session.LinkedAttendanceSessionID != nil {
-			attendanceIDsMap[*session.LinkedAttendanceSessionID] = struct{}{}
-		}
 		if session.CreatedBy != nil {
 			creatorIDsMap[*session.CreatedBy] = struct{}{}
 		}
@@ -506,6 +507,15 @@ func GetQueueSessions(courseID string, status string) ([]QueueSessionListItem, e
 	assignmentIDs := make([]uint, 0, len(assignmentIDsMap))
 	for assignmentID := range assignmentIDsMap {
 		assignmentIDs = append(assignmentIDs, assignmentID)
+	}
+	queueAttendanceIDs, err := LoadQueueAttendanceIDs(sessions)
+	if err != nil {
+		return nil, err
+	}
+	for _, ids := range queueAttendanceIDs {
+		for _, id := range ids {
+			attendanceIDsMap[id] = struct{}{}
+		}
 	}
 	attendanceIDs := make([]uint, 0, len(attendanceIDsMap))
 	for attendanceID := range attendanceIDsMap {
@@ -658,8 +668,18 @@ func GetQueueSessions(courseID string, status string) ([]QueueSessionListItem, e
 			linkedAssignment = assignmentMap[*session.LinkedAssignmentID]
 		}
 		var linkedAttendance *QueueSessionAttendanceBasic
-		if session.LinkedAttendanceSessionID != nil {
-			linkedAttendance = attendanceMap[*session.LinkedAttendanceSessionID]
+		linkedIDs := queueAttendanceIDs[session.ID]
+		linkedSessions := make([]QueueSessionAttendanceBasic, 0, len(linkedIDs))
+		for _, id := range linkedIDs {
+			if entry := attendanceMap[id]; entry != nil {
+				linkedSessions = append(linkedSessions, *entry)
+				if linkedAttendance == nil {
+					linkedAttendance = entry
+				}
+			}
+		}
+		if linkedIDs == nil {
+			linkedIDs = []uint{}
 		}
 		var creator *QueueSessionCreatorBasic
 		if session.CreatedBy != nil {
@@ -670,17 +690,77 @@ func GetQueueSessions(courseID string, status string) ([]QueueSessionListItem, e
 			concurrentPartner = concurrentPartnerMap[*session.ConcurrentGroupID]
 		}
 		result[i] = QueueSessionListItem{
-			QueueSession:            session,
-			Classroom:               classroomMap[session.ClassroomID],
-			LinkedAssignment:        linkedAssignment,
-			LinkedAttendanceSession: linkedAttendance,
-			Creator:                 creator,
-			Stats:                   statsMap[session.ID],
-			ConcurrentPartner:       concurrentPartner,
+			QueueSession:               session,
+			Classroom:                  classroomMap[session.ClassroomID],
+			LinkedAssignment:           linkedAssignment,
+			LinkedAttendanceSession:    linkedAttendance,
+			LinkedAttendanceSessionIDs: linkedIDs,
+			LinkedAttendanceSessions:   linkedSessions,
+			Creator:                    creator,
+			Stats:                      statsMap[session.ID],
+			ConcurrentPartner:          concurrentPartner,
 		}
 	}
 
 	return result, nil
+}
+
+// LoadQueueAttendanceIDs returns the attendance sessions each queue accepts,
+// merging the link table with the legacy single column (queues saved before
+// the link table existed only have the column).
+func LoadQueueAttendanceIDs(sessions []models.QueueSession) (map[string][]uint, error) {
+	result := make(map[string][]uint, len(sessions))
+	if len(sessions) == 0 {
+		return result, nil
+	}
+	ids := make([]string, len(sessions))
+	for i, s := range sessions {
+		ids[i] = s.ID
+	}
+	var links []models.QueueSessionAttendanceLink
+	if err := config.DB.Where("queue_session_id IN ?", ids).Order("id ASC").Find(&links).Error; err != nil {
+		return nil, err
+	}
+	for _, link := range links {
+		result[link.QueueSessionID] = append(result[link.QueueSessionID], link.AttendanceSessionID)
+	}
+	for _, s := range sessions {
+		if !s.RequireAttendance {
+			delete(result, s.ID)
+			continue
+		}
+		if s.LinkedAttendanceSessionID != nil && !slices.Contains(result[s.ID], *s.LinkedAttendanceSessionID) {
+			result[s.ID] = append([]uint{*s.LinkedAttendanceSessionID}, result[s.ID]...)
+		}
+	}
+	return result, nil
+}
+
+// QueueAttendanceIDs is LoadQueueAttendanceIDs for one queue.
+func QueueAttendanceIDs(s *models.QueueSession) ([]uint, error) {
+	m, err := LoadQueueAttendanceIDs([]models.QueueSession{*s})
+	if err != nil {
+		return nil, err
+	}
+	return m[s.ID], nil
+}
+
+// SetQueueAttendanceLinks replaces a queue's attendance links.
+func SetQueueAttendanceLinks(queueSessionID string, attendanceIDs []uint) error {
+	return config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("queue_session_id = ?", queueSessionID).Delete(&models.QueueSessionAttendanceLink{}).Error; err != nil {
+			return err
+		}
+		if len(attendanceIDs) == 0 {
+			return nil
+		}
+		now := time.Now()
+		links := make([]models.QueueSessionAttendanceLink, len(attendanceIDs))
+		for i, id := range attendanceIDs {
+			links[i] = models.QueueSessionAttendanceLink{QueueSessionID: queueSessionID, AttendanceSessionID: id, CreatedAt: now}
+		}
+		return tx.Create(&links).Error
+	})
 }
 
 func GetQueueSessionByID(id string) (*models.QueueSession, error) {
@@ -712,7 +792,10 @@ func UpdateQueueSession(s *models.QueueSession) error {
 }
 
 func DeleteQueueSession(id string) error {
-	return config.DB.Delete(&models.QueueSession{}, "id = ?", id).Error
+	if err := config.DB.Delete(&models.QueueSession{}, "id = ?", id).Error; err != nil {
+		return err
+	}
+	return config.DB.Where("queue_session_id = ?", id).Delete(&models.QueueSessionAttendanceLink{}).Error
 }
 
 func StartQueueSession(id string, classroomID string) error {

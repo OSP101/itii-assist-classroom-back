@@ -88,11 +88,24 @@ func isTouchMac(deviceType, osName string, hints DeviceHints) bool {
 		hints.MaxTouchPoints > 0
 }
 
+// CampusGuardPolicy is what one session asks of the guard. The zero value is
+// the strictest policy (device and network both enforced), so a caller that
+// forgets to fill it in, or reads a session cached before these switches
+// existed, never loosens the check.
+type CampusGuardPolicy struct {
+	AllowDesktop    bool // skip the phone/tablet check
+	AllowAnyNetwork bool // skip the campus network and canonical-domain checks
+}
+
 // EvaluateCampusCheckIn decides whether a physical attendance check-in
 // request may proceed, based on the request's Host header, User-Agent,
-// resolved client IP, the session's type, and the client's device hints.
-// Online sessions are exempt from every check.
-func EvaluateCampusCheckIn(host, userAgent, clientIP, sessionType string, hints DeviceHints) CampusGuardResult {
+// resolved client IP, the session's type, the client's device hints, and the
+// session's own policy. Online sessions are exempt from every check.
+//
+// The domain check travels with the network check: the canonical domain is the
+// route through the university proxy, which is what makes the client IP a
+// campus address in the first place.
+func EvaluateCampusCheckIn(host, userAgent, clientIP, sessionType string, hints DeviceHints, policy CampusGuardPolicy) CampusGuardResult {
 	if strings.EqualFold(strings.TrimSpace(sessionType), "online") {
 		return CampusGuardResult{Allowed: true, Exempt: true}
 	}
@@ -107,14 +120,16 @@ func EvaluateCampusCheckIn(host, userAgent, clientIP, sessionType string, hints 
 	}
 
 	failed := []string{}
-	if deviceType != "mobile" && deviceType != "tablet" {
+	if !policy.AllowDesktop && deviceType != "mobile" && deviceType != "tablet" {
 		failed = append(failed, "device")
 	}
-	if !isAllowedCampusHost(host) {
-		failed = append(failed, "domain")
-	}
-	if !isCampusWifiIP(clientIP) {
-		failed = append(failed, "network")
+	if !policy.AllowAnyNetwork {
+		if !isAllowedCampusHost(host) {
+			failed = append(failed, "domain")
+		}
+		if !isCampusWifiIP(clientIP) {
+			failed = append(failed, "network")
+		}
 	}
 
 	return CampusGuardResult{

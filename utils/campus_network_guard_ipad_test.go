@@ -27,7 +27,7 @@ func deviceFailed(result CampusGuardResult) bool {
 }
 
 func TestIPadInDesktopModeIsAllowed(t *testing.T) {
-	result := EvaluateCampusCheckIn(campusHost, uaIPadDesktopMode, campusIP, "lecture", iPadHints)
+	result := EvaluateCampusCheckIn(campusHost, uaIPadDesktopMode, campusIP, "lecture", iPadHints, CampusGuardPolicy{})
 
 	if deviceFailed(result) {
 		t.Fatalf("an iPad on campus was rejected as a desktop: failed=%v", result.FailedChecks)
@@ -43,7 +43,7 @@ func TestIPadInDesktopModeIsAllowed(t *testing.T) {
 // Without hints the guard must behave exactly as before — an older client that
 // does not send the header is not silently let through on the UA alone.
 func TestIPadUserAgentWithoutHintsStillFailsDeviceCheck(t *testing.T) {
-	result := EvaluateCampusCheckIn(campusHost, uaIPadDesktopMode, campusIP, "lecture", DeviceHints{})
+	result := EvaluateCampusCheckIn(campusHost, uaIPadDesktopMode, campusIP, "lecture", DeviceHints{}, CampusGuardPolicy{})
 
 	if !deviceFailed(result) {
 		t.Fatal("a macOS User-Agent with no touch hints was accepted — the device check is no longer doing anything")
@@ -58,7 +58,7 @@ func TestTouchHintsDoNotLetANonMacDesktopThrough(t *testing.T) {
 		"macbook running chrome":     uaMacBookChrome,
 	} {
 		t.Run(name, func(t *testing.T) {
-			result := EvaluateCampusCheckIn(campusHost, ua, campusIP, "lecture", iPadHints)
+			result := EvaluateCampusCheckIn(campusHost, ua, campusIP, "lecture", iPadHints, CampusGuardPolicy{})
 			if name == "macbook running chrome" {
 				// Chrome on a Mac still parses as macOS, so this one is only held
 				// back by the hints being a lie — which is the accepted trade-off,
@@ -86,7 +86,7 @@ func TestPartialHintsDoNotUpgradeAMac(t *testing.T) {
 	}
 	for name, hints := range cases {
 		t.Run(name, func(t *testing.T) {
-			if !deviceFailed(EvaluateCampusCheckIn(campusHost, uaIPadDesktopMode, campusIP, "lecture", hints)) {
+			if !deviceFailed(EvaluateCampusCheckIn(campusHost, uaIPadDesktopMode, campusIP, "lecture", hints, CampusGuardPolicy{})) {
 				t.Errorf("hints %+v upgraded a macOS User-Agent on their own", hints)
 			}
 		})
@@ -97,7 +97,7 @@ func TestPartialHintsDoNotUpgradeAMac(t *testing.T) {
 func TestAndroidPhoneUnaffectedByHints(t *testing.T) {
 	for name, hints := range map[string]DeviceHints{"none": {}, "full": iPadHints} {
 		t.Run(name, func(t *testing.T) {
-			if !EvaluateCampusCheckIn(campusHost, uaAndroidPhone, campusIP, "lecture", hints).Allowed {
+			if !EvaluateCampusCheckIn(campusHost, uaAndroidPhone, campusIP, "lecture", hints, CampusGuardPolicy{}).Allowed {
 				t.Error("an Android phone on campus Wi-Fi stopped being allowed")
 			}
 		})
@@ -107,7 +107,7 @@ func TestAndroidPhoneUnaffectedByHints(t *testing.T) {
 // The other two checks must keep failing for an iPad that is off-campus or on
 // the wrong domain — the exception relaxes the device check only.
 func TestIPadStillSubjectToNetworkAndDomainChecks(t *testing.T) {
-	offCampus := EvaluateCampusCheckIn(campusHost, uaIPadDesktopMode, "203.0.113.9", "lecture", iPadHints)
+	offCampus := EvaluateCampusCheckIn(campusHost, uaIPadDesktopMode, "203.0.113.9", "lecture", iPadHints, CampusGuardPolicy{})
 	if !slices.Contains(offCampus.FailedChecks, "network") {
 		t.Errorf("an iPad off campus skipped the network check: failed=%v", offCampus.FailedChecks)
 	}
@@ -115,7 +115,7 @@ func TestIPadStillSubjectToNetworkAndDomainChecks(t *testing.T) {
 		t.Errorf("device check should have passed, failed=%v", offCampus.FailedChecks)
 	}
 
-	wrongHost := EvaluateCampusCheckIn("evil.example.com", uaIPadDesktopMode, campusIP, "lecture", iPadHints)
+	wrongHost := EvaluateCampusCheckIn("evil.example.com", uaIPadDesktopMode, campusIP, "lecture", iPadHints, CampusGuardPolicy{})
 	if !slices.Contains(wrongHost.FailedChecks, "domain") {
 		t.Errorf("an iPad on a non-faculty domain skipped the domain check: failed=%v", wrongHost.FailedChecks)
 	}

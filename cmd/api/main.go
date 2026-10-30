@@ -129,6 +129,7 @@ func main() {
 		&models.AttendanceDisplayAuditLog{},
 		// คิว
 		&models.QueueSession{},
+		&models.QueueSessionAttendanceLink{},
 		&models.QueueBooking{},
 		&models.QueueDeskStatus{},
 		&models.QueueWorker{},
@@ -367,6 +368,26 @@ func main() {
 					continue
 				}
 				handlers.PublishDueExamSettings()
+			}
+		}
+	}()
+	// Background job: เผยแพร่งานฉบับร่างที่อาจารย์ตั้งเวลาไว้ เมื่อถึงเวลา
+	shutdownWG.Add(1)
+	go func() {
+		defer shutdownWG.Done()
+		leader := config.StartLeaderElection("assignments-scheduled-publish", leaderTTL)
+		defer leader.Stop()
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-shutdownCtx.Done():
+				return
+			case <-ticker.C:
+				if !leader.IsLeader() {
+					continue
+				}
+				handlers.PublishDueScheduledAssignments()
 			}
 		}
 	}()
