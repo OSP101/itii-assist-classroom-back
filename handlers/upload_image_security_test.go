@@ -45,7 +45,7 @@ func TestCourseCoverRejectsOversizedImageBeforeSaving(t *testing.T) {
 	}
 	defer response.Body.Close()
 	result, _ := io.ReadAll(response.Body)
-	if response.StatusCode != 400 || !strings.Contains(string(result), "32") {
+	if response.StatusCode != 400 || !strings.Contains(string(result), "25") {
 		t.Fatalf("must reject pixel limit, got %d %s", response.StatusCode, result)
 	}
 }
