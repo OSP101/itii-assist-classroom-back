@@ -17,10 +17,11 @@ import (
 func setupAttendanceRuntimeTest(t *testing.T) (*miniredis.Miniredis, func()) {
 	t.Helper()
 
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqliteTimeDialector{sqlite.Open("file:" + t.Name() + "?mode=memory&cache=shared")}, &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+	t.Cleanup(func() { sqlDB, _ := db.DB(); _ = sqlDB.Close() })
 	if err := db.AutoMigrate(&models.Course{}, &models.AttendanceSession{}, &models.AttendanceRecord{}, &models.AttendancePinHistory{}); err != nil {
 		t.Fatalf("migrate sqlite: %v", err)
 	}
@@ -41,7 +42,7 @@ func setupAttendanceRuntimeTest(t *testing.T) (*miniredis.Miniredis, func()) {
 	}
 	var reloadedProbe models.AttendanceSession
 	if err := db.First(&reloadedProbe, probe.ID).Error; err != nil {
-		t.Skipf("skipping attendance runtime repo tests because local sqlite driver cannot round-trip attendance timestamps in this environment: %v", err)
+		t.Fatalf("round-trip attendance timestamps: %v", err)
 	}
 
 	redisServer, err := miniredis.Run()
@@ -72,6 +73,7 @@ func createAttendanceSessionFixture(t *testing.T, autoRotate bool) models.Attend
 		CourseID:             "CP101",
 		Title:                "Quiz attendance",
 		AutoRotatePin:        &autoRotate,
+		PinMode:              ConfiguredAttendancePinMode(autoRotate),
 		SessionType:          "lecture",
 		StartTime:            now.Add(5 * time.Minute),
 		EndTime:              now.Add(65 * time.Minute),

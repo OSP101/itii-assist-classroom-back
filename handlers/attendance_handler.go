@@ -695,7 +695,7 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 
 	if authStudentID := authenticatedStudentIDFromContext(c); authStudentID > 0 {
 		studentID = authStudentID
-		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("id = ?", studentID).First(&student).Error; err != nil {
+		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("id = ? AND is_active = ?", studentID, true).First(&student).Error; err != nil {
 			return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
 				"success": false,
 				"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
@@ -724,7 +724,7 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 			return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
 		}
 
-		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?)", verifiedEmail).First(&student).Error; err == nil {
+		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?) AND is_active = ?", verifiedEmail, true).First(&student).Error; err == nil {
 			studentID = student.ID
 		}
 	}
@@ -770,7 +770,7 @@ func StudentCheckInHandler(c fiber.Ctx) error {
 		ClientSignals: input.ClientSignals,
 	})
 	if student.ID == 0 {
-		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("id = ?", studentID).First(&student).Error; err != nil {
+		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("id = ? AND is_active = ?", studentID, true).First(&student).Error; err != nil {
 			return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to load student after check-in"})
 		}
 	}
@@ -1519,7 +1519,7 @@ func GetAttendanceSessionSocketTicketHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid ID"})
 	}
 
-	ticket, expiresAt, err := realtime.IssueSocketTicket(fmt.Sprintf("instructor-%d", id), instructorSocketTicketTTL)
+	ticket, expiresAt, err := issueCallerSocketTicket(c, fmt.Sprintf("instructor-%d", id), instructorSocketTicketTTL)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to issue socket ticket"})
 	}
@@ -1638,7 +1638,7 @@ func StudentCheckInByPINHandler(c fiber.Ctx) error {
 	verifiedGoogleID := ""
 	var student models.Student
 	if authStudentID := authenticatedStudentIDFromContext(c); authStudentID > 0 {
-		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("id = ?", authStudentID).First(&student).Error; err != nil {
+		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("id = ? AND is_active = ?", authStudentID, true).First(&student).Error; err != nil {
 			return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
 				"success": false,
 				"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
@@ -1667,7 +1667,7 @@ func StudentCheckInByPINHandler(c fiber.Ctx) error {
 			return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
 		}
 
-		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?)", verifiedEmail).First(&student).Error; err != nil {
+		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?) AND is_active = ?", verifiedEmail, true).First(&student).Error; err != nil {
 			return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
 				"success": false,
 				"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
@@ -1777,7 +1777,7 @@ func VerifyStudentHandler(c fiber.Ctx) error {
 
 	var student models.Student
 	if authStudentID := authenticatedStudentIDFromContext(c); authStudentID > 0 {
-		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("id = ?", authStudentID).First(&student).Error; err != nil {
+		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("id = ? AND is_active = ?", authStudentID, true).First(&student).Error; err != nil {
 			return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
 				"success": false,
 				"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,
@@ -1799,7 +1799,7 @@ func VerifyStudentHandler(c fiber.Ctx) error {
 			return c.Status(403).JSON(fiber.Map{"success": false, "message": "Google account mismatch"})
 		}
 
-		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?)", verifiedEmail).First(&student).Error; err != nil {
+		if err := config.DB.Select("id", "student_id", "full_name", "email").Where("LOWER(email) = LOWER(?) AND is_active = ?", verifiedEmail, true).First(&student).Error; err != nil {
 			return c.Status(repositories.ErrAttendanceStudentNotFoundPublic.HTTPStatus).JSON(fiber.Map{
 				"success": false,
 				"code":    repositories.ErrAttendanceStudentNotFoundPublic.Code,

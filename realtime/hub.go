@@ -1,4 +1,4 @@
-﻿package realtime
+package realtime
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"itii-assist/config"
+	"itii-assist/utils"
 	"log"
 	"strconv"
 	"strings"
@@ -45,11 +46,14 @@ const (
 )
 
 type client struct {
-	id    string
-	hub   *hub
-	conn  *websocket.Conn
-	send  chan outgoingMessage
-	rooms map[string]struct{}
+	securityMu     sync.RWMutex
+	displayGrantID string
+	principal      *utils.TokenClaims
+	id             string
+	hub            *hub
+	conn           *websocket.Conn
+	send           chan outgoingMessage
+	rooms          map[string]struct{}
 
 	// done is closed exactly once when the client is unregistered. The send
 	// channel is deliberately never closed: broadcast() hands messages over
@@ -119,7 +123,7 @@ var upgrader = websocket.FastHTTPUpgrader{
 	// hundred students are connected at once.
 	EnableCompression: false,
 	CheckOrigin: func(ctx *fasthttp.RequestCtx) bool {
-		return true
+		return socketOriginAllowed(string(ctx.Request.Header.Peek("Origin")), string(ctx.Request.Header.Host()))
 	},
 }
 
@@ -129,7 +133,13 @@ func Handler() fiber.Handler {
 			return c.Status(fiber.StatusUpgradeRequired).JSON(fiber.Map{"success": false, "message": "WebSocket upgrade required"})
 		}
 
-		return upgrader.Upgrade(c.RequestCtx(), func(conn *websocket.Conn) {
+		release, allowed := reserveSocketConnection(strings.Clone(c.IP()))
+		if !allowed {
+			c.Set("Retry-After", "1")
+			return c.Status(429).JSON(fiber.Map{"success": false, "message": "การเชื่อมต่อเต็ม กรุณาลองใหม่"})
+		}
+		upgradeErr := upgrader.Upgrade(c.RequestCtx(), func(conn *websocket.Conn) {
+			defer release()
 			client := &client{
 				id:    fmt.Sprintf("go-%d", time.Now().UnixNano()),
 				hub:   defaultHub,
@@ -162,12 +172,17 @@ func Handler() fiber.Handler {
 				client.writePump()
 			}()
 
+			conn.SetReadLimit(64 * 1024)
 			client.readPump()
 
 			// readPump's defer has already closed c.done, so writePump is on
 			// its way out; this only waits for it to actually be out.
 			<-writePumpDone
 		})
+		if upgradeErr != nil {
+			release()
+		}
+		return upgradeErr
 	}
 }
 
@@ -201,6 +216,9 @@ func (h *hub) join(member *client, room string) {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if len(member.rooms) >= 64 || len(room) > 160 {
+		return
+	}
 	if h.rooms[room] == nil {
 		h.rooms[room] = make(map[*client]struct{})
 	}
@@ -280,9 +298,17 @@ func (c *client) readPump() {
 		return c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	})
 
+	windowStart, frames := time.Now(), 0
 	for {
 		var message incomingMessage
 		if err := c.conn.ReadJSON(&message); err != nil {
+			return
+		}
+		if time.Since(windowStart) >= time.Second {
+			windowStart, frames = time.Now(), 0
+		}
+		frames++
+		if frames > 60 {
 			return
 		}
 		_ = c.conn.SetReadDeadline(time.Now().Add(pongWait))
@@ -319,6 +345,9 @@ func (c *client) writePump() {
 				return
 			}
 		case <-ticker.C:
+			if !c.sessionActive() {
+				return
+			}
 			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
@@ -347,37 +376,37 @@ func (c *client) handleMessage(message incomingMessage) {
 			c.sendDirect("instructor-join-rejected", fiber.Map{"reason": "invalid_ticket"})
 			return
 		}
+		if !c.adoptTicketPrincipal(ticket) {
+			return
+		}
 		c.hub.join(c, room)
 	case "leave-instructor":
 		// Leaving needs no ticket — a client can only ever remove itself.
 		c.hub.leave(c, "instructor-"+rawString(message.Data))
 	case "join-user-courses":
-		c.hub.join(c, "user-courses-"+rawString(message.Data))
-		c.hub.join(c, "global-courses")
+		c.joinAuthorizedRoom(message.Data, "user-courses-")
 	case "leave-user-courses":
 		c.hub.leave(c, "user-courses-"+rawString(message.Data))
 		c.hub.leave(c, "global-courses")
 	case "course-change":
-		payload := rawMap(message.Data)
-		payload["timestamp"] = nowMillis()
-		emitToRoomExcept("global-courses", "course-updated", payload, c)
+		return // Only committed server mutations may emit updates.
 	case "join-classroom":
-		c.hub.join(c, "classroom-"+rawString(message.Data))
+		c.joinAuthorizedRoom(message.Data, "classroom-")
 	case "leave-classroom":
 		c.hub.leave(c, "classroom-"+rawString(message.Data))
 	case "classroom-change":
-		payload := rawMap(message.Data)
-		room := "classroom-" + fmt.Sprint(payload["classroomId"])
-		payload["timestamp"] = nowMillis()
-		emitToRoomExcept(room, "classroom-updated", payload, c)
+		return // Only committed server mutations may emit updates.
 	case "join-global-updates":
-		c.hub.join(c, "global-updates")
+		c.joinAuthorizedRoom(message.Data, "global-updates")
 	case "leave-global-updates":
 		c.hub.leave(c, "global-updates")
+	case "join-queue-staff":
+		c.joinAuthorizedRoom(message.Data, "queue-staff-")
 	case "join-queue":
 		c.hub.join(c, "queue-"+rawString(message.Data))
 	case "leave-queue":
 		c.hub.leave(c, "queue-"+rawString(message.Data))
+		c.hub.leave(c, "queue-staff-"+rawString(message.Data))
 	case "join-queue-group":
 		c.hub.join(c, "queue-group-"+rawString(message.Data))
 	case "leave-queue-group":
@@ -398,16 +427,19 @@ func (c *client) handleMessage(message incomingMessage) {
 			c.sendDirect("worker-join-rejected", fiber.Map{"reason": "invalid_ticket"})
 			return
 		}
+		if !c.adoptTicketPrincipal(ticket) {
+			return
+		}
 		c.hub.join(c, room)
 	case "leave-worker":
 		// Leaving needs no ticket — a client can only ever remove itself.
 		c.hub.leave(c, "worker-"+rawString(message.Data))
 	case "join-booking":
-		c.hub.join(c, "booking-"+rawString(message.Data))
+		c.joinAuthorizedRoom(message.Data, "booking-")
 	case "leave-booking":
 		c.hub.leave(c, "booking-"+rawString(message.Data))
 	case "join-user":
-		c.hub.join(c, "user-"+rawString(message.Data))
+		c.joinAuthorizedRoom(message.Data, "user-")
 	case "leave-user":
 		c.hub.leave(c, "user-"+rawString(message.Data))
 	case "join-display":
@@ -418,6 +450,9 @@ func (c *client) handleMessage(message incomingMessage) {
 		// authorised for, so this is not what stops an escalation — it stops a
 		// future room class from silently inheriting this entry point.
 		if room, ok := validateSocketTicket(ticket); ok && strings.HasPrefix(room, "display-") {
+			if !c.adoptTicketPrincipal(ticket) {
+				return
+			}
 			c.hub.join(c, room)
 		}
 	case "leave-display":
@@ -427,21 +462,7 @@ func (c *client) handleMessage(message incomingMessage) {
 			c.hub.leave(c, room)
 		}
 	case "data-change":
-		payload := rawMap(message.Data)
-		resource, _ := payload["resource"].(string)
-		update := fiber.Map{"resource": resource, "action": payload["action"], "id": payload["id"], "data": payload["data"], "timestamp": nowMillis()}
-		emitToRoomExcept("global-updates", "data-updated", update, c)
-		if resource == "course" {
-			actorID := interface{}(nil)
-			if dataPayload, ok := payload["data"].(map[string]interface{}); ok {
-				if value, exists := dataPayload["actor_id"]; exists {
-					actorID = value
-				} else if value, exists := dataPayload["actorId"]; exists {
-					actorID = value
-				}
-			}
-			emitToRoomExcept("global-courses", "course-updated", fiber.Map{"action": payload["action"], "courseId": payload["id"], "actor_id": actorID, "timestamp": nowMillis()}, c)
-		}
+		return
 	}
 }
 
@@ -492,7 +513,8 @@ func EmitToAttendanceDisplay(sessionID interface{}, event string, data interface
 }
 
 func EmitToQueue(sessionID interface{}, event string, data interface{}) {
-	EmitToRoom("queue-"+fmt.Sprint(sessionID), event, data)
+	EmitToRoom("queue-"+fmt.Sprint(sessionID), event, publicQueueEvent(data))
+	EmitToRoom("queue-staff-"+fmt.Sprint(sessionID), event, data)
 }
 
 // EmitToQueueGroup broadcasts an event to every client subscribed to the
@@ -503,7 +525,7 @@ func EmitToQueueGroup(groupID interface{}, event string, data interface{}) {
 	if group == "" || group == "<nil>" {
 		return
 	}
-	EmitToRoom("queue-group-"+group, event, data)
+	EmitToRoom("queue-group-"+group, event, publicQueueEvent(data))
 }
 
 func EmitToBooking(bookingID interface{}, event string, data interface{}) {
@@ -519,7 +541,7 @@ func EmitCourseUpdate(action string, courseID interface{}, userID interface{}) {
 }
 
 func EmitDataUpdate(resource string, action string, id interface{}, data interface{}) {
-	EmitToRoom("global-updates", "data-updated", fiber.Map{"resource": resource, "action": action, "id": id, "data": data, "timestamp": nowMillis()})
+	EmitToRoom("global-updates", "data-updated", fiber.Map{"resource": resource, "action": action, "id": id, "data": publicUpdateData(data), "timestamp": nowMillis()})
 }
 
 func EmitToUser(userID interface{}, event string, data interface{}) {
@@ -568,6 +590,9 @@ func IssueSocketTicket(room string, ttl time.Duration) (string, time.Time, error
 	socketTickets.mu.Lock()
 	defer socketTickets.mu.Unlock()
 	cleanupExpiredTicketsLocked()
+	if len(socketTickets.items) >= 32768 {
+		return "", time.Time{}, fmt.Errorf("socket ticket capacity reached")
+	}
 	socketTickets.items[ticket] = socketTicket{room: room, expiresAt: expiresAt}
 	return ticket, expiresAt, nil
 }
@@ -591,7 +616,7 @@ func IssueDisplaySocketTicket(room string, ttl time.Duration) (string, time.Time
 // re-sends the SAME ticket rather than fetching a new one, and must still
 // get in. A plain GET (matching the pre-existing in-memory behavior byte
 // for byte) is what actually keeps that working once the store is Redis.
-func validateSocketTicket(ticket string) (string, bool) {
+func socketTicketValue(ticket string) (string, bool) {
 	ticket = strings.TrimSpace(ticket)
 	if ticket == "" {
 		return "", false
@@ -672,4 +697,99 @@ func Stats() (clients int, rooms int) {
 	defaultHub.mu.RLock()
 	defer defaultHub.mu.RUnlock()
 	return len(defaultHub.clients), len(defaultHub.rooms)
+}
+
+func validateSocketTicket(ticket string) (string, bool) {
+	value, ok := socketTicketValue(ticket)
+	if !ok {
+		return "", false
+	}
+	room, _, ok := decodePrincipalTicket(value)
+	return room, ok
+}
+
+func (c *client) joinAuthorizedRoom(data json.RawMessage, prefix string) {
+	payload := rawMap(data)
+	ticket, _ := payload["ticket"].(string)
+	value, ok := socketTicketValue(ticket)
+	if !ok {
+		c.sendDirect("room-join-rejected", nil)
+		return
+	}
+	room, principal, ok := decodePrincipalTicket(value)
+	if !ok || principal == nil || (prefix == "global-updates" && room != prefix) || (prefix != "global-updates" && !strings.HasPrefix(room, prefix)) {
+		c.sendDirect("room-join-rejected", nil)
+		return
+	}
+	c.securityMu.Lock()
+	if c.principal != nil && (c.principal.JTI != principal.JTI || c.principal.UserID != principal.UserID || c.principal.Kind != principal.Kind) {
+		c.securityMu.Unlock()
+		return
+	}
+	c.principal = principal
+	c.securityMu.Unlock()
+	c.hub.join(c, room)
+	if strings.HasPrefix(room, "user-courses-") {
+		c.hub.join(c, "global-courses")
+	}
+}
+
+// RoomPermissionCheck is installed at API startup, avoiding a dependency
+// from realtime back into the repositories/observability import graph.
+var RoomPermissionCheck func(string, utils.TokenClaims) bool
+
+func (c *client) sessionActive() bool {
+	c.securityMu.RLock()
+	p, grant := c.principal, c.displayGrantID
+	c.securityMu.RUnlock()
+	if grant != "" && !activeDisplayGrant(grant) {
+		return false
+	}
+	if p == nil {
+		return true
+	}
+	if (!p.ExpiresAt.IsZero() && !p.ExpiresAt.After(time.Now())) || config.ValidateSessionPrincipal(p) != nil {
+		return false
+	}
+	if RoomPermissionCheck != nil {
+		c.hub.mu.RLock()
+		rooms := make([]string, 0, len(c.rooms))
+		for room := range c.rooms {
+			rooms = append(rooms, room)
+		}
+		c.hub.mu.RUnlock()
+		for _, room := range rooms {
+			if !RoomPermissionCheck(room, *p) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (c *client) adoptTicketPrincipal(ticket string) bool {
+	value, ok := socketTicketValue(ticket)
+	if !ok {
+		return false
+	}
+	_, principal, ok := decodePrincipalTicket(value)
+	if !ok {
+		return false
+	}
+	c.securityMu.Lock()
+	defer c.securityMu.Unlock()
+	if principal != nil {
+		if c.principal != nil && (c.principal.JTI != principal.JTI || c.principal.UserID != principal.UserID || c.principal.Kind != principal.Kind) {
+			return false
+		}
+		c.principal = principal
+	}
+	if strings.HasPrefix(value, "display-grant:") {
+		var grant displayGrantTicket
+		if json.Unmarshal([]byte(strings.TrimPrefix(value, "display-grant:")), &grant) != nil {
+			return false
+		}
+		c.displayGrantID = grant.GrantID
+	}
+	return true
 }

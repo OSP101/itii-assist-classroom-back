@@ -3,14 +3,12 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"itii-assist/config"
 	"itii-assist/middlewares"
 	"itii-assist/models"
 	"itii-assist/repositories"
 	"itii-assist/services"
 	"itii-assist/utils"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -201,6 +199,10 @@ func (h *AuthHandler) Login(c fiber.Ctx) error {
 	}
 
 	if user.TwoFactorEnabled {
+		challenge, err := newLoginChallenge(user)
+		if err != nil {
+			return c.Status(503).JSON(fiber.Map{"success": false, "message": "ไม่สามารถเริ่มยืนยันตัวตนได้"})
+		}
 		// Mask email for display
 		maskedEmail := ""
 		if user.Email != "" {
@@ -225,6 +227,7 @@ func (h *AuthHandler) Login(c fiber.Ctx) error {
 			"message": "Two-factor authentication required",
 			"data": fiber.Map{
 				"requiresTwoFactor": true,
+				"challenge":         challenge,
 				"twoFactorMethod":   user.TwoFactorMethod,
 				"userId":            user.ID,
 				"email":             maskedEmail,
@@ -288,6 +291,9 @@ func RefreshHandler(c fiber.Ctx) error {
 
 	refreshToken := input.RefreshToken
 	if refreshToken == "" {
+		if c.Cookies(utils.CSRFCookieName) == "" || c.Cookies(utils.CSRFCookieName) != c.Get(utils.CSRFHeaderName) {
+			return fiber.ErrForbidden
+		}
 		refreshToken = c.Cookies(utils.RefreshTokenCookieName)
 	}
 	if refreshToken == "" {
@@ -424,6 +430,9 @@ func (h *AuthHandler) Logout(c fiber.Ctx) error {
 
 	refreshToken := input.RefreshToken
 	if refreshToken == "" {
+		if c.Cookies(utils.CSRFCookieName) == "" || c.Cookies(utils.CSRFCookieName) != c.Get(utils.CSRFHeaderName) {
+			return fiber.ErrForbidden
+		}
 		refreshToken = c.Cookies(utils.RefreshTokenCookieName)
 	}
 	// provider ของเซสชันนี้ อ่านจาก meta ของ refresh token ก่อนเพิกถอน เพื่อบอก
@@ -909,7 +918,10 @@ func UpdatePreferencesHandler(c fiber.Ctx) error {
 // =============================================================================
 
 func UploadAvatarHandler(c fiber.Ctx) error {
-	userID := c.Locals("user_id").(uint)
+	userID, ok := middlewares.GetUserID(c)
+	if !ok {
+		return fiber.ErrForbidden
+	}
 	user, err := repositories.FindUserByID(userID)
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "User not found"})
@@ -920,44 +932,12 @@ func UploadAvatarHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "No file uploaded"})
 	}
 
-	file, err := fileHeader.Open()
+	content, err := utils.ReadUploadedImage(fileHeader, 5*1024*1024, 512, 512)
 	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Unable to read uploaded file"})
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
-	defer file.Close()
-
-	content, err := io.ReadAll(io.LimitReader(file, 5*1024*1024+1))
-	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Unable to read uploaded file"})
-	}
-	if len(content) == 0 {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "No file uploaded"})
-	}
-	if len(content) > 5*1024*1024 {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไฟล์มีขนาดใหญ่เกินไป สูงสุด 5MB"})
-	}
-
-	contentType := fileHeader.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = http.DetectContentType(content)
-	}
-	if !strings.HasPrefix(contentType, "image/") {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Only image files are allowed"})
-	}
-
-	// Downscale + re-encode as JPEG so large phone-camera uploads (which
-	// otherwise ride along unmodified in every UserBasic embedded in
-	// course/instructor/TA list responses) don't balloon those payloads.
-	// Falls back to the original bytes for formats we can't decode (WebP,
-	// animated GIF) rather than failing the upload.
-	filename := fileHeader.Filename
-	if resized, ok, processErr := utils.ProcessUploadedImage(content, 512, 512, 85); processErr != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": processErr.Error()})
-	} else if ok {
-		content = resized
-		contentType = "image/jpeg"
-		filename = "avatar.jpg"
-	}
+	contentType := "image/jpeg"
+	filename := "avatar.jpg"
 
 	// Saved to disk and referenced by URL, not stored inline as base64: the
 	// avatar rides along in every UserBasic embedded in course/instructor/TA
@@ -1008,10 +988,7 @@ func saveAvatarFile(content []byte, contentType string, originalFilename string)
 		return "", err
 	}
 
-	ext := strings.ToLower(filepath.Ext(originalFilename))
-	if ext == "" {
-		ext = extensionForImageContentType(contentType)
-	}
+	ext := ".jpg"
 	fileName := fmt.Sprintf("avatar-%d%s", time.Now().UnixNano(), ext)
 	filePath := filepath.Join(baseDir, fileName)
 
@@ -1056,7 +1033,10 @@ func deleteLocalAvatarFile(avatarURL string) {
 // =============================================================================
 
 func RemoveAvatarHandler(c fiber.Ctx) error {
-	userID := c.Locals("user_id").(uint)
+	userID, ok := middlewares.GetUserID(c)
+	if !ok {
+		return fiber.ErrForbidden
+	}
 	user, err := repositories.FindUserByID(userID)
 	if err != nil {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "User not found"})

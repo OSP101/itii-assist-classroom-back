@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,6 +85,7 @@ func main() {
 		&models.RefreshToken{},
 		&models.PasswordResetToken{},
 		&models.TwoFactorPending{},
+		&models.LoginChallenge{},
 		// ห้องเรียนและผังที่นั่ง
 		&models.Classroom{},
 		&models.Zone{},
@@ -215,6 +218,14 @@ func main() {
 
 	// 4. รัน Fiber Server
 	app := fiber.New(fiber.Config{
+		ErrorHandler: func(c fiber.Ctx, err error) error {
+			status, message := 500, "เกิดข้อผิดพลาดภายในระบบ"
+			var httpErr *fiber.Error
+			if errors.As(err, &httpErr) {
+				status, message = httpErr.Code, httpErr.Message
+			}
+			return c.Status(status).JSON(fiber.Map{"success": false, "message": message})
+		},
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -225,7 +236,7 @@ func main() {
 		// range — trust it so c.IP() reads nginx's X-Real-IP instead of
 		// falling back to nginx's own container IP (e.g. 172.18.0.6).
 		TrustProxy:       true,
-		TrustProxyConfig: fiber.TrustProxyConfig{Private: true, Loopback: true},
+		TrustProxyConfig: fiber.TrustProxyConfig{Proxies: utils.TrustedProxyCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS")), Loopback: true},
 	})
 	// RequestLogger already emits a structured JSON line per request (and
 	// records the Prometheus metrics, and recovers panics). Fiber's logger.New()
@@ -233,6 +244,7 @@ func main() {
 	// doubling the blocking-write cost on the hot path for no extra
 	// information. Use APP_ENABLE_REQUEST_LOGGER=false to silence access logs.
 	app.Use(middlewares.RequestLogger())
+	app.Use(middlewares.CommittedDataUpdates())
 
 	auditLogger := services.NewAuditLogger(config.DB)
 
@@ -246,41 +258,45 @@ func main() {
 	// OptionalProtected() — see middlewares/auth_middleware.go).
 	corsAllowHeaders := []string{"Origin", "Content-Type", "Accept", "Authorization", utils.WebClientHeader, utils.CSRFHeaderName, utils.DeviceHintsHeader}
 
-	if rawOrigins == "" || rawOrigins == "*" {
-		// Allow all origins via func to avoid Fiber v3 strict URL validation.
-		// AllowCredentials + AllowOriginsFunc is safe (unlike a literal "*"):
-		// Fiber reflects the specific request Origin, not a wildcard.
-		app.Use(cors.New(cors.Config{
-			AllowOriginsFunc: func(origin string) bool { return true },
-			AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-			AllowHeaders:     corsAllowHeaders,
-			AllowCredentials: true,
-		}))
-	} else {
-		for _, o := range strings.Split(rawOrigins, ",") {
-			if trimmed := strings.TrimSpace(o); trimmed != "" {
-				allowedOrigins = append(allowedOrigins, trimmed)
+	allowedOrigins = utils.AllowedWebOrigins(rawOrigins, os.Getenv("FRONTEND_URL"))
+	app.Use(cors.New(cors.Config{
+
+		AllowOriginsFunc: func(origin string) bool {
+			for _, allowed := range allowedOrigins {
+				if origin == allowed {
+					return true
+				}
 			}
-		}
-		app.Use(cors.New(cors.Config{
-			AllowOrigins:     allowedOrigins,
-			AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-			AllowHeaders:     corsAllowHeaders,
-			AllowCredentials: true,
-		}))
-	}
+			return false
+		},
+		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowHeaders:     corsAllowHeaders,
+		ExposeHeaders:    []string{utils.CSRFHeaderName},
+		AllowCredentials: true,
+	}))
 
 	// ไฟล์ใต้ uploads/private (หลักฐานการลา ฯลฯ) ห้ามเสิร์ฟแบบสาธารณะ
 	// ต้องผ่าน route ที่เช็กสิทธิ์เท่านั้น
+	app.Get("/api/uploads/score-edit-requests/:file", middlewares.NoStore(), middlewares.Protected(), handlers.ServeScoreEditEvidenceHandler)
 	app.Use("/api/uploads/private", func(c fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Not found"})
 	})
-	app.Use("/api/uploads", static.New("./uploads"))
+	app.Use("/api/uploads", func(c fiber.Ctx) error {
+		c.Set("X-Content-Type-Options", "nosniff")
+		c.Set("Content-Security-Policy", "sandbox; default-src 'none'")
+		switch strings.ToLower(filepath.Ext(c.Path())) {
+		case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".pdf":
+			return c.Next()
+		default:
+			return fiber.ErrNotFound
+		}
+	}, static.New("./uploads"))
 
 	app.Get("/api/health", func(c fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "success", "message": "API is Running!"})
 	})
 	app.Get("/metrics", middlewares.RestrictMetricsToInternalNetworks(), observability.MetricsHandler)
+	realtime.RoomPermissionCheck = handlers.SocketRoomPermissionAllowed
 	app.Get("/ws", realtime.Handler())
 
 	routes.SetupAuthRoutes(app, auditLogger)
@@ -322,6 +338,8 @@ func main() {
 				if !leader.IsLeader() {
 					continue
 				}
+				_ = config.DB.Where("expires_at < ?", time.Now().Add(-24*time.Hour)).Delete(&models.LoginChallenge{}).Error
+				_ = config.DB.Where("expires_at < ?", time.Now().Add(-time.Hour)).Delete(&models.TwoFactorPending{}).Error
 				deleted, err := repositories.CleanupExpiredRemovals()
 				if err != nil {
 					log.Printf("⚠️  Cleanup expired removals error: %v", err)

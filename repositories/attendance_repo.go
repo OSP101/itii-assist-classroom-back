@@ -186,17 +186,17 @@ type AttendanceStudentSessionStatus struct {
 }
 
 type AttendanceSessionInfo struct {
-	ID                   uint                    `json:"id"`
-	Title                string                  `json:"title"`
-	SessionType          string                  `json:"session_type"`
-	CheckLocation        bool                    `json:"check_location"`
+	ID            uint   `json:"id"`
+	Title         string `json:"title"`
+	SessionType   string `json:"session_type"`
+	CheckLocation bool   `json:"check_location"`
 	// AllowDesktop / AllowAnyNetwork are the session's relaxations of the
 	// check-in guard. Named so the zero value is the strict one: an info
 	// value built or cached before these existed keeps every check on.
-	AllowDesktop         bool                    `json:"allow_desktop"`
-	AllowAnyNetwork      bool                    `json:"allow_any_network"`
-	AutoRotatePin        bool                    `json:"auto_rotate_pin"`
-	PinMode              string                  `json:"pin_mode"`
+	AllowDesktop    bool   `json:"allow_desktop"`
+	AllowAnyNetwork bool   `json:"allow_any_network"`
+	AutoRotatePin   bool   `json:"auto_rotate_pin"`
+	PinMode         string `json:"pin_mode"`
 	// PinCode is for privileged consumers only — the instructor live view and
 	// the paired classroom display. GetSessionInfoHandler blanks it before
 	// answering the public check-in route: the rotating PIN is what forces a
@@ -1503,6 +1503,14 @@ type AttendanceRecordUpdate struct {
 
 // Student check-in (public)
 func StudentCheckIn(sessionID uint, studentID uint, pin string, lat *float64, lng *float64, googleEmail string, googleID string, clientRequestID string) (*AttendanceCheckInResult, error) {
+	var active int64
+	if err := config.DB.Model(&models.Student{}).Where("id = ? AND is_active = ?", studentID, true).Count(&active).Error; err != nil {
+		return nil, err
+	}
+	if active != 1 {
+		return nil, ErrAttendanceStudentNotFoundPublic
+	}
+
 	startedAt := time.Now()
 	observability.RecordAttendanceCheckInAttempt()
 	normalizedRequestID := strings.TrimSpace(clientRequestID)

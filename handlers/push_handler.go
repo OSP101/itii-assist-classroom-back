@@ -136,6 +136,9 @@ func RegisterPushHandler(c fiber.Ctx) error {
 		LastUsedAt: &now,
 	}
 
+	if input.UserType != "worker" && input.UserType != "student" {
+		return fiber.ErrBadRequest
+	}
 	if input.UserType == "worker" {
 		// A worker subscription is tied to a real account and, unlike a
 		// student's (scoped to a booking they hold the PIN for), carries no
@@ -159,6 +162,13 @@ func RegisterPushHandler(c fiber.Ctx) error {
 		bookingID, err := rawMessageToUint(input.TargetID)
 		if err != nil {
 			return c.Status(400).JSON(fiber.Map{"success": false, "error": fiber.Map{"message": "target_id ต้องเป็น booking_id ที่ถูกต้อง"}})
+		}
+		if bookingID == nil {
+			return fiber.ErrBadRequest
+		}
+		booking, err := repositories.GetBookingByID(*bookingID)
+		if err != nil || !queueBookingAllowed(c, booking, repositories.PermissionViewQueue) {
+			return fiber.ErrForbidden
 		}
 		sub.BookingID = bookingID
 		sub.StudentID = rawMessageToString(input.StudentID)

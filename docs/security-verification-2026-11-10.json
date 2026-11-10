@@ -1,0 +1,121 @@
+{
+  "date_utc": "2026-11-10T06:19:49.030640+00:00",
+  "checks": [
+    {
+      "name": "utils",
+      "status": "passed",
+      "passed_tests_including_subtests": 25,
+      "passed_top_level_tests": 17,
+      "test_names": [
+        "TestIPadInDesktopModeIsAllowed",
+        "TestIPadUserAgentWithoutHintsStillFailsDeviceCheck",
+        "TestTouchHintsDoNotLetANonMacDesktopThrough/windows_touchscreen_laptop",
+        "TestTouchHintsDoNotLetANonMacDesktopThrough",
+        "TestPartialHintsDoNotUpgradeAMac/touch_only",
+        "TestPartialHintsDoNotUpgradeAMac/coarse_only",
+        "TestPartialHintsDoNotUpgradeAMac/touch_and_coarse_only",
+        "TestPartialHintsDoNotUpgradeAMac/touch_points_only",
+        "TestPartialHintsDoNotUpgradeAMac/zero_touch_points",
+        "TestPartialHintsDoNotUpgradeAMac",
+        "TestAndroidPhoneUnaffectedByHints/full",
+        "TestAndroidPhoneUnaffectedByHints/none",
+        "TestAndroidPhoneUnaffectedByHints",
+        "TestIPadStillSubjectToNetworkAndDomainChecks",
+        "TestParseDeviceHints",
+        "TestCampusGuardPolicy",
+        "TestInsideKKUCampus",
+        "TestAllowedWebOriginsNeverExpandsWildcard",
+        "TestAllowedWebOriginsRejectsCredentialsPathsAndInvalidSchemes",
+        "TestTrustedProxyCIDRsDoNotTrustAllPrivateNetworks",
+        "TestAccessTokensRequireValidSubjectExpiryAndExactAlgorithm",
+        "TestUserAndStudentTokenPairsRemainCompatible",
+        "TestNormalizeUploadedImageRejectsActiveContentAndCorruptImages",
+        "TestNormalizeUploadedImagePreservesPixelsAndStripsTrailingContent",
+        "TestNormalizeUploadedImageRejectsPixelBombBeforeDecode"
+      ],
+      "scope": "actual source with temporary module replacements; entire utils package"
+    },
+    {
+      "name": "realtime",
+      "status": "passed",
+      "passed_tests_including_subtests": 15,
+      "passed_top_level_tests": 15,
+      "test_names": [
+        "TestBroadcastDuringConcurrentUnregisterDoesNotPanic",
+        "TestUnregisterIsIdempotent",
+        "TestBroadcastSkipsDoneClient",
+        "TestPrivateRoomsRejectBareIDsAndUnboundTickets",
+        "TestClientCannotForgeServerUpdates",
+        "TestPublicQueueEventsDoNotDiscloseBookingOrReportData",
+        "TestGlobalUpdatesPreserveCourseRoutingWithoutPrivateRows",
+        "TestSocketRoomLimitBoundsAnonymousSubscriptions",
+        "TestSocketOrigins",
+        "TestSocketConnectionLimitsAndRelease",
+        "TestJoinInstructorRejectsClientWithoutTicket",
+        "TestJoinInstructorAcceptsIssuedTicket",
+        "TestInstructorRoomRejectsDisplayTicket",
+        "TestExpiredTicketIsRejected",
+        "TestTicketIsReusableWithinTTL"
+      ],
+      "scope": "actual source with temporary module replacements; selected non-Redis tests only"
+    },
+    {
+      "name": "core_build",
+      "status": "passed",
+      "packages": [
+        "config",
+        "models",
+        "repositories",
+        "utils",
+        "realtime"
+      ],
+      "scope": "temporary module replacements from prior verification, not production dependency verification"
+    },
+    {
+      "name": "upload_inventory",
+      "status": "passed",
+      "result": {
+        "findings": [],
+        "modified_files": 0,
+        "scanned": 164
+      }
+    },
+    {
+      "name": "static_checks",
+      "status": "passed",
+      "checks": [
+        "Go parse/import/context scan",
+        "workflow YAML parse",
+        "package/lock dependency maps",
+        "bash script syntax",
+        "git diff --check"
+      ]
+    }
+  ],
+  "blocked": [
+    {
+      "name": "full_go_test",
+      "status": "setup_failed",
+      "reason": "Required modules absent from read-only cache; external DNS unavailable. Full suite retried and failed before compilation of handlers/routes."
+    },
+    {
+      "name": "frontend_verification",
+      "status": "not_run",
+      "reason": "verify-security.sh stops: npm: command not found; Node also unavailable. Includes the six new client regression tests, typecheck, production build and audit."
+    },
+    {
+      "name": "go_race",
+      "status": "not_run",
+      "reason": "C compiler unavailable"
+    },
+    {
+      "name": "container_browser_e2e_load",
+      "status": "not_run",
+      "reason": "Docker socket access denied; browser runtime absent; no isolated staging stack available"
+    }
+  ],
+  "production_deployed": false,
+  "pushed": false,
+  "ready_for_production": false,
+  "ci_workflows_added_but_not_executed": true
+}

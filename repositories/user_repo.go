@@ -1,6 +1,7 @@
 package repositories
 
 import (
+	"gorm.io/gorm"
 	"itii-assist/config"
 	"itii-assist/models"
 	"strings"
@@ -125,7 +126,15 @@ func GetUsers(params UserListParams) (*UserListResult, error) {
 }
 
 func UpdateUser(user *models.User) error {
-	return config.DB.Save(user).Error
+	return config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(user).Error; err != nil {
+			return err
+		}
+		if !user.IsActive {
+			return tx.Model(&models.RefreshToken{}).Where("user_id = ? AND kind = ?", user.ID, "u").Update("revoked", true).Error
+		}
+		return nil
+	})
 }
 
 func ToggleUserStatus(id uint) (*models.User, error) {
@@ -134,7 +143,7 @@ func ToggleUserStatus(id uint) (*models.User, error) {
 		return nil, err
 	}
 	user.IsActive = !user.IsActive
-	if err := config.DB.Save(user).Error; err != nil {
+	if err := UpdateUser(user); err != nil {
 		return nil, err
 	}
 	return user, nil

@@ -9,6 +9,7 @@ import (
 	"itii-assist/realtime"
 	"itii-assist/repositories"
 	"itii-assist/services"
+	"itii-assist/utils"
 	"log"
 	"os"
 	"path/filepath"
@@ -291,24 +292,20 @@ func UploadAnnouncementImageHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไฟล์มีขนาดใหญ่เกินไป สูงสุด 8MB"})
 	}
 
-	contentType := strings.ToLower(strings.TrimSpace(fileHeader.Header.Get("Content-Type")))
-	if !strings.HasPrefix(contentType, "image/") {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "รองรับเฉพาะไฟล์รูปภาพ"})
+	content, err := utils.ReadUploadedImage(fileHeader, 8*1024*1024, 2000, 2000)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
-
 	baseDir := filepath.Join("uploads", "system-announcements")
 	if mkdirErr := os.MkdirAll(baseDir, 0o755); mkdirErr != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ไม่สามารถสร้างโฟลเดอร์จัดเก็บรูปได้"})
 	}
 
-	ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
-	if ext == "" {
-		ext = ".jpg"
-	}
+	ext := ".jpg"
 	fileName := fmt.Sprintf("announcement-%d%s", time.Now().UnixNano(), ext)
 	filePath := filepath.Join(baseDir, fileName)
 
-	if saveErr := c.SaveFile(fileHeader, filePath); saveErr != nil {
+	if saveErr := os.WriteFile(filePath, content, 0o644); saveErr != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ไม่สามารถบันทึกรูปประกาศได้"})
 	}
 

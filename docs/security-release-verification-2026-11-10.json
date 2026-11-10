@@ -1,0 +1,426 @@
+{
+  "date": "2026-11-10",
+  "code_verification": "passed",
+  "production_deployed": false,
+  "production_data_modified": false,
+  "source_comparison": [
+    {
+      "repository": "itii-assist-classroom-front",
+      "source_files": 456,
+      "mismatches": []
+    },
+    {
+      "repository": "itii-assist-classroom-back",
+      "source_files": 234,
+      "mismatches": []
+    }
+  ],
+  "npm_audit": {
+    "all": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    },
+    "production": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    }
+  },
+  "backend": {
+    "top_level_passed": 257,
+    "cases_with_subtests_passed": 364,
+    "skipped": [
+      "TestTouchHintsDoNotLetANonMacDesktopThrough/macbook_running_chrome"
+    ],
+    "module_verification": "passed",
+    "vet": "passed",
+    "race_packages": [
+      "handlers",
+      "utils",
+      "realtime",
+      "routes",
+      "repositories"
+    ]
+  },
+  "frontend": {
+    "security_tests_passed": 11,
+    "typecheck": "passed",
+    "production_build": "passed"
+  },
+  "runtime_checks": {
+    "runtime": {
+      "results": [
+        {
+          "name": "API health through nginx",
+          "pass": true
+        },
+        {
+          "name": "Anonymous queue mutation denied",
+          "pass": true
+        },
+        {
+          "name": "2FA cannot complete without challenge",
+          "pass": true
+        },
+        {
+          "name": "Private evidence is not public or cacheable",
+          "pass": true
+        },
+        {
+          "name": "Active upload extension denied",
+          "pass": true
+        },
+        {
+          "name": "Web login issues secure HTTP-only cookies",
+          "pass": true
+        },
+        {
+          "name": "Cookie-authenticated profile works",
+          "pass": true
+        },
+        {
+          "name": "Cookie refresh rejects missing CSRF",
+          "pass": true
+        },
+        {
+          "name": "Cookie refresh rotates CSRF and session",
+          "pass": true
+        },
+        {
+          "name": "Logout rejects missing CSRF",
+          "pass": true
+        },
+        {
+          "name": "Logout revokes cookie session",
+          "pass": true
+        },
+        {
+          "name": "Mobile bearer login/refresh/logout stays usable",
+          "pass": true
+        },
+        {
+          "name": "Unlisted CORS origin is not allowed",
+          "pass": true
+        },
+        {
+          "name": "Login page renders and hydrates",
+          "pass": true
+        },
+        {
+          "name": "Browser password login reaches admin",
+          "pass": true
+        },
+        {
+          "name": "Classroom page renders after login",
+          "pass": true
+        },
+        {
+          "name": "Twenty concurrent authenticated profile reads succeed",
+          "pass": true
+        },
+        {
+          "name": "WebSocket upgrade works through nginx",
+          "pass": true
+        },
+        {
+          "name": "Anonymous booking preserves return path when requesting login",
+          "pass": true
+        },
+        {
+          "name": "Anonymous projector stays available without a login redirect",
+          "pass": true
+        },
+        {
+          "name": "No browser exceptions or failed application chunks",
+          "pass": true
+        }
+      ],
+      "pageErrors": [],
+      "failedAssets": []
+    },
+    "flow": {
+      "results": [
+        {
+          "name": "Authorized instructor starts attendance with real Redis",
+          "pass": true
+        },
+        {
+          "name": "Wrong attendance PIN is rejected",
+          "pass": true
+        },
+        {
+          "name": "Enrolled active student checks in successfully",
+          "pass": true
+        },
+        {
+          "name": "Attendance retry is idempotent",
+          "pass": true
+        },
+        {
+          "name": "Student cannot check in as another identity",
+          "pass": true
+        },
+        {
+          "name": "Enrolled student creates a queue booking",
+          "pass": true
+        },
+        {
+          "name": "Booking owner reads own status",
+          "pass": true
+        },
+        {
+          "name": "Another student cannot read or cancel the booking",
+          "pass": true
+        },
+        {
+          "name": "Public desk status hides student identity",
+          "pass": true
+        },
+        {
+          "name": "Booking owner cancels own booking",
+          "pass": true
+        },
+        {
+          "name": "Instructor pauses queue intake",
+          "pass": true
+        },
+        {
+          "name": "Paused queue rejects new bookings",
+          "pass": true
+        },
+        {
+          "name": "Instructor resumes queue intake",
+          "pass": true
+        },
+        {
+          "name": "Anonymous push registration is rejected",
+          "pass": true
+        }
+      ]
+    },
+    "evidence": {
+      "results": [
+        {
+          "name": "Authorized reviewer reads private evidence through nginx",
+          "pass": true
+        },
+        {
+          "name": "Authorized response cannot warm private evidence for anonymous users",
+          "pass": true
+        },
+        {
+          "name": "Student cannot read score-review evidence",
+          "pass": true
+        },
+        {
+          "name": "Next upload proxy forwards Bearer identity and no-store headers",
+          "pass": true
+        },
+        {
+          "name": "Next upload proxy forwards cookie identity",
+          "pass": true
+        },
+        {
+          "name": "Next upload proxy denies anonymous evidence access",
+          "pass": true
+        }
+      ]
+    },
+    "auth": {
+      "results": [
+        {
+          "name": "TOTP setup encrypts a secret and confirms with an authenticator code",
+          "pass": true
+        },
+        {
+          "name": "Browser password login requires 2FA without granting a session early",
+          "pass": true
+        },
+        {
+          "name": "Browser authenticator verification completes login and clears the challenge",
+          "pass": true
+        },
+        {
+          "name": "Completed challenge cannot be replayed",
+          "pass": true
+        },
+        {
+          "name": "A TOTP cannot be reused across different login challenges",
+          "pass": true
+        },
+        {
+          "name": "Recovery code completes a separate challenge once",
+          "pass": true
+        },
+        {
+          "name": "Consumed recovery code is rejected on a new challenge",
+          "pass": true
+        },
+        {
+          "name": "Five incorrect codes lock the login challenge",
+          "pass": true
+        },
+        {
+          "name": "Two-factor UI has no uncaught browser exceptions",
+          "pass": true
+        },
+        {
+          "name": "Disabling the fixture TOTP requires password and valid second factor",
+          "pass": true
+        }
+      ]
+    },
+    "oauth": {
+      "results": [
+        {
+          "name": "google starts a browser-bound expiring flow on the public HTTPS origin",
+          "pass": true
+        },
+        {
+          "name": "google rejects a callback in another browser",
+          "pass": true
+        },
+        {
+          "name": "google rejects a correctly signed but expired state",
+          "pass": true
+        },
+        {
+          "name": "google handles cancellation for the initiating browser and clears its nonce",
+          "pass": true
+        },
+        {
+          "name": "google rejects callback replay after clearing the nonce",
+          "pass": true
+        },
+        {
+          "name": "github starts a browser-bound expiring flow on the public HTTPS origin",
+          "pass": true
+        },
+        {
+          "name": "github rejects a callback in another browser",
+          "pass": true
+        },
+        {
+          "name": "github rejects a correctly signed but expired state",
+          "pass": true
+        },
+        {
+          "name": "github handles cancellation for the initiating browser and clears its nonce",
+          "pass": true
+        },
+        {
+          "name": "github rejects callback replay after clearing the nonce",
+          "pass": true
+        },
+        {
+          "name": "KKU starts a signed nonce flow on its configured callback domain",
+          "pass": true
+        },
+        {
+          "name": "KKU rejects callbacks without the initiating nonce",
+          "pass": true
+        },
+        {
+          "name": "google refuses anonymous account linking",
+          "pass": true
+        },
+        {
+          "name": "google refuses student account linking",
+          "pass": true
+        },
+        {
+          "name": "github refuses anonymous account linking",
+          "pass": true
+        },
+        {
+          "name": "github refuses student account linking",
+          "pass": true
+        },
+        {
+          "name": "kku refuses anonymous account linking",
+          "pass": true
+        },
+        {
+          "name": "kku refuses student account linking",
+          "pass": true
+        }
+      ]
+    }
+  },
+  "runtime_check_count": 69,
+  "load": {
+    "peak_virtual_users": 50,
+    "ramp_duration_seconds": 30,
+    "requests": 485,
+    "failure_rate": 0,
+    "p95_ms": 8.0729432,
+    "thresholds": "passed"
+  },
+  "key_rotation": {
+    "fixture_dry_run": {
+      "dry_run": true,
+      "scanned": 1,
+      "needs_rotation": 1,
+      "rotated": 0
+    },
+    "fixture_apply": {
+      "dry_run": false,
+      "scanned": 1,
+      "needs_rotation": 1,
+      "rotated": 1
+    },
+    "fixture_primary_only": {
+      "dry_run": true,
+      "scanned": 1,
+      "needs_rotation": 0,
+      "rotated": 0
+    },
+    "production_read_only": {
+      "dry_run": true,
+      "scanned": 5,
+      "needs_rotation": 5,
+      "rotated": 0
+    },
+    "production_rotation_applied": false,
+    "private_configuration_prepared": true,
+    "private_file_mode": "0600"
+  },
+  "images": {
+    "backend": "sha256:6d2920cb30d2284c104f9b09bcb2d44c227da75138a3c280060f007464227bf3",
+    "frontend": "sha256:3461e18813df230d7623a3da8bb3c61e4e35afb3ee31620aa51fe2fd208c9d75"
+  },
+  "live_identity_provider_acceptance": {
+    "status": "not_run",
+    "reason": "User confirmed no staging URL or live test accounts available",
+    "controlled_callback_exchange_tests": "passed"
+  },
+  "artifacts": {
+    "frontend": "/tmp/itii-release-20261110",
+    "backend": "/tmp/itii-release-backend",
+    "runtime": "/tmp/itii-release-runtime"
+  },
+  "oauth_link_security": {
+    "staff_principal_only": true,
+    "session_revalidated_at_initiation_and_callback": true,
+    "student_id_collision_and_revoked_disabled_role_changed_regressions": "passed"
+  },
+  "cleanup": {
+    "isolated_stack_removed": true,
+    "test_network_removed": true,
+    "temporary_build_caches_removed": true,
+    "reports_logs_screenshots_and_images_preserved": true
+  },
+  "production_post_verification": {
+    "health_http": 200,
+    "login_http": 200,
+    "active_services_healthy": true,
+    "containers_restarted": false
+  }
+}

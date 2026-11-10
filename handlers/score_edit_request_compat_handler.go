@@ -169,7 +169,7 @@ func saveScoreEditRequestImages(c fiber.Ctx) ([]string, error) {
 		return nil, fmt.Errorf("too many files. maximum 3 images allowed")
 	}
 
-	dir := filepath.Join("uploads", "score-edit-requests")
+	dir := filepath.Join("uploads", "private", "score-edit-requests")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
@@ -179,17 +179,14 @@ func saveScoreEditRequestImages(c fiber.Ctx) ([]string, error) {
 		if file.Size > 10*1024*1024 {
 			return nil, fmt.Errorf("file size too large. maximum 10MB per file")
 		}
-		contentType := strings.ToLower(file.Header.Get("Content-Type"))
-		if !strings.HasPrefix(contentType, "image/") {
-			return nil, fmt.Errorf("only image files are allowed")
+		content, err := utils.ReadUploadedImage(file, 10*1024*1024, 2000, 2000)
+		if err != nil {
+			return nil, err
 		}
-		ext := strings.ToLower(filepath.Ext(file.Filename))
-		if ext == "" {
-			ext = ".jpg"
-		}
+		ext := ".jpg"
 		filename := fmt.Sprintf("edit-request-%d-%d%s", time.Now().UnixNano(), index, ext)
 		destination := filepath.Join(dir, filename)
-		if err := c.SaveFile(file, destination); err != nil {
+		if err := os.WriteFile(destination, content, 0o644); err != nil {
 			return nil, err
 		}
 		paths = append(paths, filepath.ToSlash(filepath.Join("api/uploads", "score-edit-requests", filename)))

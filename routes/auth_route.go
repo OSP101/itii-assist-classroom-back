@@ -10,10 +10,11 @@ import (
 
 func SetupAuthRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	authHandler := handlers.NewAuthHandler(auditLogger)
+	app.Post("/api/realtime/room-ticket", middlewares.NoStore(), middlewares.Protected(), handlers.GetRealtimeRoomTicketHandler)
 	api := app.Group("/api/auth")
 
 	// Public
-	api.Post("/login", authHandler.Login)
+	api.Post("/login", middlewares.AuthAttemptGuard(), authHandler.Login)
 	api.Post("/refresh", handlers.RefreshHandler)
 	api.Post("/logout", authHandler.Logout)
 	api.Post("/forgot-password", handlers.ForgotPasswordHandler)
@@ -48,9 +49,9 @@ func SetupAuthRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 
 	// 2FA — public endpoints (login flow)
 	twofa := app.Group("/api/auth/2fa")
-	twofa.Post("/verify-login", handlers.VerifyLoginWith2FAHandler)
-	twofa.Post("/send-login-code", handlers.SendLoginCodeHandler)
-	twofa.Post("/complete-login", handlers.CompleteTwoFALoginHandler)
+	twofa.Post("/verify-login", middlewares.AuthAttemptGuard(), handlers.VerifyLoginWith2FAHandler)
+	twofa.Post("/send-login-code", middlewares.AuthAttemptGuard(), handlers.SendLoginCodeHandler)
+	twofa.Post("/complete-login", middlewares.AuthAttemptGuard(), handlers.CompleteTwoFALoginHandler)
 	twofa.Post("/step-up/challenge", middlewares.Protected(), handlers.RequestStepUpChallengeHandler)
 	twofa.Post("/step-up/verify", middlewares.Protected(), handlers.VerifyStepUpChallengeHandler)
 

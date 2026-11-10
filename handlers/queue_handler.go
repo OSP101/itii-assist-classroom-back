@@ -773,6 +773,27 @@ func (h *QueueHandler) CreateBooking(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "student_id, desk_id, booking_type required"})
 	}
 
+	if err := queueRequireSessionStudent(c, session.CourseID); err != nil {
+		return err
+	}
+	if sid, ok := middlewares.GetStudentID(c); ok && sid != input.StudentID {
+		return fiber.ErrForbidden
+	}
+	var student models.Student
+	if err := config.DB.Where("id = ? AND is_active = ?", input.StudentID, true).First(&student).Error; err != nil {
+		return fiber.ErrForbidden
+	}
+	var desk models.Desk
+	if err := config.DB.First(&desk, "id = ?", input.DeskID).Error; err != nil {
+		return fiber.ErrBadRequest
+	}
+	_, _, existing, problems, _, err := validateQueueBookingCompatibility(session, student.StudentID, desk.Number, input.BookingType, queueBookingValidationCreate)
+	if err != nil {
+		return fiber.ErrInternalServerError
+	}
+	if existing != nil || len(problems) > 0 {
+		return fiber.NewError(400, "ไม่สามารถจองคิวนี้ได้ กรุณาตรวจสอบสิทธิ์และสถานะเช็กชื่อ")
+	}
 	booking, err := repositories.CreateBooking(sessionID, repositories.BookingInput{
 		StudentID:   input.StudentID,
 		DeskID:      input.DeskID,
@@ -785,7 +806,7 @@ func (h *QueueHandler) CreateBooking(c fiber.Ctx) error {
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}
-	actorID := c.Locals("user_id").(uint)
+	actorID, _ := middlewares.GetUserID(c)
 	logCourseActivity(c, session.CourseID, actorID, "create_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"queue_session_id": booking.QueueSessionID, "student_id": booking.StudentID, "desk_number": booking.DeskNumber, "booking_type": booking.BookingType})
 	emitQueueBookingChanged(sessionID, "new-booking", booking)
 	dispatchWaitingBookingsToAvailableWorkers(sessionID)
@@ -1219,6 +1240,9 @@ func queueBookingDeviceLabel(userAgent string) string {
 
 // GET /api/courses/:courseId/queue/sessions/:sessionId/bookings/student/:studentId
 func GetStudentBookingHandler(c fiber.Ctx) error {
+	if err := queueRequireStudentParam(c); err != nil {
+		return fiber.ErrForbidden
+	}
 	sessionID := c.Params("sessionId")
 	studentIDStr := c.Params("studentId")
 	studentID, err := strconv.ParseUint(studentIDStr, 10, 64)
@@ -1233,34 +1257,8 @@ func GetStudentBookingHandler(c fiber.Ctx) error {
 }
 
 // DELETE /api/courses/:courseId/queue/sessions/:sessionId/bookings/:bookingId
-func CancelBookingHandler(c fiber.Ctx) error {
-	bookingIDStr := c.Params("bookingId")
-	bookingID, err := strconv.ParseUint(bookingIDStr, 10, 64)
-	if err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid booking ID"})
-	}
-	studentID, _ := middlewares.GetStudentID(c)
-	booking, _ := repositories.GetBookingByID(uint(bookingID))
-	if booking != nil {
-		if session, sessionErr := repositories.GetQueueSessionByID(booking.QueueSessionID); sessionErr == nil {
-			if err := queueEnsureCourseWritable(c, session.CourseID); err != nil {
-				return err
-			}
-		}
-	}
-	if err := repositories.CancelBooking(uint(bookingID), studentID); err != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
-	}
-	if booking != nil {
-		if session, sessionErr := repositories.GetQueueSessionByID(booking.QueueSessionID); sessionErr == nil {
-			logCourseActivity(c, session.CourseID, studentID, "cancel_queue_booking", "queue", "queue_booking", booking.ID, session.Title, fiber.Map{"booking_type": booking.BookingType, "desk_number": booking.DeskNumber})
-		}
-		emitQueueBookingChanged(booking.QueueSessionID, "booking-cancelled", booking)
-	}
-	return c.JSON(fiber.Map{"success": true, "message": "Booking cancelled"})
-}
+func CancelBookingHandler(c fiber.Ctx) error { return CancelQueueBookingPublicHandler(c) }
 
-// GET /api/courses/:courseId/queue/sessions/:sessionId/desks
 func GetDeskStatusesHandler(c fiber.Ctx) error {
 	sessionID := c.Params("sessionId")
 	statuses, err := repositories.GetDeskStatuses(sessionID)
@@ -1294,7 +1292,7 @@ func GetWorkerSocketTicketHandler(c fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"success": false, "message": "unauthorized"})
 	}
 
-	ticket, expiresAt, err := realtime.IssueSocketTicket(fmt.Sprintf("worker-%d", userID), workerSocketTicketTTL)
+	ticket, expiresAt, err := issueCallerSocketTicket(c, fmt.Sprintf("worker-%d", userID), workerSocketTicketTTL)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to issue socket ticket"})
 	}
@@ -1814,44 +1812,7 @@ func queueOptionalActorID(c fiber.Ctx) (uint, bool) {
 }
 
 func resolveQueueStudentCodeFromAuth(c fiber.Ctx, fallbackStudentCode string) (string, error) {
-	effectiveStudentCode := strings.TrimSpace(fallbackStudentCode)
-	authHeader := strings.TrimSpace(c.Get("Authorization"))
-	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-		return effectiveStudentCode, nil
-	}
-
-	tokenString := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
-	if tokenString == "" {
-		return effectiveStudentCode, nil
-	}
-
-	claims, err := utils.ValidateAccessToken(tokenString)
-	if err != nil {
-		return effectiveStudentCode, nil
-	}
-	if claims.Kind != "s" || claims.UserID == 0 {
-		return effectiveStudentCode, nil
-	}
-
-	if claims.JTI != "" {
-		if _, err := repositories.FindRefreshTokenByJTI(claims.JTI); err != nil {
-			return effectiveStudentCode, nil
-		}
-	}
-
-	var student models.Student
-	if err := config.DB.Select("id", "student_id").Where("id = ?", claims.UserID).First(&student).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return effectiveStudentCode, nil
-		}
-		return "", err
-	}
-
-	if strings.TrimSpace(student.StudentID) != "" {
-		return strings.TrimSpace(student.StudentID), nil
-	}
-
-	return effectiveStudentCode, nil
+	return queueStudentCode(c, fallbackStudentCode)
 }
 
 func loadQueueSessionByPIN(pinCode string, statuses ...string) (*models.QueueSession, error) {
@@ -2840,9 +2801,12 @@ func ValidateQueueBookingInfoPublicHandler(c fiber.Ctx) error {
 		return queueLegacyError(c, 400, "ปิดรับการจองคิวชั่วคราว กรุณารอสักครู่", fiber.Map{"code": "SESSION_PAUSED"})
 	}
 
+	if err := queueRequireSessionStudent(c, session.CourseID); err != nil {
+		return err
+	}
 	effectiveStudentCode, err := resolveQueueStudentCodeFromAuth(c, input.StudentCode)
 	if err != nil {
-		return queueLegacyError(c, 500, err.Error())
+		return err
 	}
 
 	student, desk, _, validationErrors, warnings, err := validateQueueBookingCompatibility(session, effectiveStudentCode, int(input.DeskNumber), input.BookingType, queueBookingValidationPreview)
@@ -2910,9 +2874,12 @@ func CheckExistingQueueBookingPublicHandler(c fiber.Ctx) error {
 		return queueLegacyError(c, 404, "PIN ไม่ถูกต้อง หรือไม่มีการเปิดรับจองคิว")
 	}
 
+	if err := queueRequireSessionStudent(c, session.CourseID); err != nil {
+		return err
+	}
 	effectiveStudentCode, err := resolveQueueStudentCodeFromAuth(c, input.StudentCode)
 	if err != nil {
-		return queueLegacyError(c, 500, err.Error())
+		return err
 	}
 	if strings.TrimSpace(effectiveStudentCode) == "" {
 		return c.JSON(fiber.Map{"success": true, "data": fiber.Map{"has_booking": false}})
@@ -2987,9 +2954,12 @@ func CreateQueueBookingPublicHandler(c fiber.Ctx) error {
 		return queueLegacyError(c, 400, "ปิดรับการจองคิวชั่วคราว กรุณารอสักครู่", fiber.Map{"code": "SESSION_PAUSED"})
 	}
 
+	if err := queueRequireSessionStudent(c, session.CourseID); err != nil {
+		return err
+	}
 	effectiveStudentCode, err := resolveQueueStudentCodeFromAuth(c, input.StudentCode)
 	if err != nil {
-		return queueLegacyError(c, 500, err.Error())
+		return err
 	}
 	if strings.TrimSpace(effectiveStudentCode) == "" {
 		return queueLegacyError(c, 400, "กรุณากรอกรหัสนักศึกษา")
@@ -3059,6 +3029,9 @@ func GetQueueBookingStatusPublicHandler(c fiber.Ctx) error {
 		return queueLegacyError(c, 500, err.Error())
 	}
 
+	if err := queueRequireBookingAccess(c, booking, repositories.PermissionViewQueue); err != nil {
+		return err
+	}
 	session, err := repositories.GetQueueSessionByID(booking.QueueSessionID)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return queueLegacyError(c, 404, "ไม่พบข้อมูลการจอง")
@@ -3176,6 +3149,9 @@ func CancelQueueBookingPublicHandler(c fiber.Ctx) error {
 		return queueLegacyError(c, 500, err.Error())
 	}
 
+	if err := queueRequireBookingAccess(c, booking, repositories.PermissionManageQueueBookings); err != nil {
+		return err
+	}
 	session, err := repositories.GetQueueSessionByID(booking.QueueSessionID)
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return queueLegacyError(c, 500, err.Error())
@@ -3198,8 +3174,12 @@ func CancelQueueBookingPublicHandler(c fiber.Ctx) error {
 		"status":       "cancelled",
 		"completed_at": &now,
 	}
-	if err := config.DB.Model(&models.QueueBooking{}).Where("id = ?", booking.ID).Updates(updates).Error; err != nil {
-		return queueLegacyError(c, 500, err.Error())
+	changed := config.DB.Model(&models.QueueBooking{}).Where("id = ? AND status = ?", booking.ID, "waiting").Updates(updates)
+	if changed.Error != nil {
+		return queueLegacyError(c, 500, "ไม่สามารถยกเลิกคิวได้")
+	}
+	if changed.RowsAffected != 1 {
+		return fiber.NewError(409, "คิวนี้เปลี่ยนสถานะแล้ว กรุณาโหลดข้อมูลใหม่")
 	}
 
 	if booking.BookingType == "grading" {
@@ -3207,7 +3187,7 @@ func CancelQueueBookingPublicHandler(c fiber.Ctx) error {
 			"grading_status":     "not_started",
 			"grading_booking_id": nil,
 		}
-		if err := config.DB.Model(&models.QueueDeskStatus{}).Where("queue_session_id = ? AND desk_id = ?", booking.QueueSessionID, booking.DeskID).Updates(resetStatus).Error; err != nil {
+		if err := config.DB.Model(&models.QueueDeskStatus{}).Where("queue_session_id = ? AND desk_id = ? AND grading_booking_id = ?", booking.QueueSessionID, booking.DeskID, booking.ID).Updates(resetStatus).Error; err != nil {
 			return queueLegacyError(c, 500, err.Error())
 		}
 	} else {
@@ -3368,8 +3348,8 @@ func GetQueueDeskStatusesPublicHandler(c fiber.Ctx) error {
 			"queue_number": booking.QueueNumber,
 			"booking_type": booking.BookingType,
 			"status":       booking.Status,
-			"student_name": student.FullName,
-			"student_code": student.StudentID,
+			"student_name": queueProjectorName(c, session.CourseID, student.FullName),
+			"student_code": queueProjectorName(c, session.CourseID, student.StudentID),
 		}
 		if booking.Status == "in_progress" && booking.AssignedWorkerID != nil {
 			if worker, ok := workerMap[*booking.AssignedWorkerID]; ok {
@@ -3392,8 +3372,8 @@ func GetQueueDeskStatusesPublicHandler(c fiber.Ctx) error {
 			"queue_number": booking.QueueNumber,
 			"booking_type": booking.BookingType,
 			"status":       booking.Status,
-			"student_name": student.FullName,
-			"student_code": student.StudentID,
+			"student_name": queueProjectorName(c, session.CourseID, student.FullName),
+			"student_code": queueProjectorName(c, session.CourseID, student.StudentID),
 		}
 		if booking.AssignedWorkerID != nil {
 			if worker, ok := workerMap[*booking.AssignedWorkerID]; ok {
@@ -3572,7 +3552,7 @@ func GetGroupDeskStatusesPublicHandler(c fiber.Ctx) error {
 
 	sessionViews := make([]fiber.Map, 0, len(sessions))
 	for _, session := range sessions {
-		view, err := buildQueueDeskStatusesSessionView(&session)
+		view, err := buildQueueDeskStatusesSessionView(c, &session)
 		if err != nil {
 			return queueLegacyError(c, 500, err.Error())
 		}
@@ -3603,7 +3583,7 @@ func GetGroupDeskStatusesPublicHandler(c fiber.Ctx) error {
 // buildQueueDeskStatusesSessionView returns the per-session portion of a
 // projector view (session summary, desks-with-status, queueStats). Shared by
 // GetGroupDeskStatusesPublicHandler which composes one entry per linked session.
-func buildQueueDeskStatusesSessionView(session *models.QueueSession) (fiber.Map, error) {
+func buildQueueDeskStatusesSessionView(c fiber.Ctx, session *models.QueueSession) (fiber.Map, error) {
 	if session == nil {
 		return nil, fmt.Errorf("nil session")
 	}
@@ -3719,8 +3699,8 @@ func buildQueueDeskStatusesSessionView(session *models.QueueSession) (fiber.Map,
 			"queue_number": booking.QueueNumber,
 			"booking_type": booking.BookingType,
 			"status":       booking.Status,
-			"student_name": student.FullName,
-			"student_code": student.StudentID,
+			"student_name": queueProjectorName(c, session.CourseID, student.FullName),
+			"student_code": queueProjectorName(c, session.CourseID, student.StudentID),
 		}
 		if booking.AssignedWorkerID != nil {
 			if worker, ok := workerMap[*booking.AssignedWorkerID]; ok {
@@ -3971,10 +3951,10 @@ func buildQueueDeskStatusesSnapshotData(sessionID string) (fiber.Map, error) {
 		bookingMap[deskID] = entry
 	}
 	for deskID, booking := range completedDeskBookings {
+		student := studentMap[booking.StudentID]
 		if _, exists := bookingMap[deskID]; exists {
 			continue
 		}
-		student := studentMap[booking.StudentID]
 		entry := fiber.Map{
 			"id":           booking.ID,
 			"queue_number": booking.QueueNumber,

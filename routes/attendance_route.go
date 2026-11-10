@@ -53,7 +53,7 @@ func SetupAttendanceRoutes(app *fiber.App, auditLogger *services.AuditLogger) {
 	api.Get("/leave-requests/:id/evidence/:file", middlewares.RequireCourseAccess(leaveReq, "instructor", "ta"), middlewares.RequireCoursePermission(leaveReq, repositories.PermissionViewAttendance, "instructor", "ta"), handlers.GetLeaveEvidenceHandler)
 	api.Post("/leave-requests/:id/review", middlewares.RequireCourseAccess(leaveReq, "instructor", "ta"), middlewares.RequireCoursePermission(leaveReq, repositories.PermissionReviewLeaveRequests, "instructor", "ta"), attendanceHandler.ReviewLeaveRequest)
 	api.Post("/leave-requests/:id/revoke", middlewares.RequireCourseAccess(leaveReq, "instructor", "ta"), middlewares.RequireCoursePermission(leaveReq, repositories.PermissionReviewLeaveRequests, "instructor", "ta"), attendanceHandler.RevokeLeaveRequest)
-	api.Post("/sessions/start", handlers.StartAttendanceSessionHandler)
+	api.Post("/sessions/start", middlewares.RequireCourseAccess(middlewares.CourseIDFromAttendanceSessionBody("attendance_session_id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromAttendanceSessionBody("attendance_session_id"), repositories.PermissionUpdateAttendanceSessions, "instructor", "ta"), handlers.StartAttendanceSessionHandler)
 	api.Get("/sessions/:id/pin", middlewares.RequireCourseAccess(middlewares.CourseIDFromAttendanceSessionParam("id"), "instructor", "ta"), middlewares.RequireCoursePermission(middlewares.CourseIDFromAttendanceSessionParam("id"), repositories.PermissionViewAttendance, "instructor", "ta"), handlers.GetAttendanceSessionPinHandler)
 	// Same guards as /sessions/:id/pin — holding this ticket must prove exactly
 	// what being allowed to open the live view proves, since the room it opens

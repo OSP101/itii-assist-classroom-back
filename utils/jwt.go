@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -69,15 +70,16 @@ func generateTokenPairWithKind(id uint, role string, kind string) (string, strin
 }
 
 type TokenClaims struct {
-	UserID uint
-	Role   string
-	JTI    string
-	Kind   string // "u" = user, "s" = student
+	ExpiresAt time.Time
+	UserID    uint
+	Role      string
+	JTI       string
+	Kind      string // "u" = user, "s" = student
 }
 
 func ValidateAccessToken(tokenString string) (*TokenClaims, error) {
 	token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+		if t.Method != jwt.SigningMethodHS256 {
 			return nil, jwt.ErrSignatureInvalid
 		}
 		return getJWTSecret(), nil
@@ -86,19 +88,27 @@ func ValidateAccessToken(tokenString string) (*TokenClaims, error) {
 		return nil, err
 	}
 	claims := token.Claims.(jwt.MapClaims)
-	userID := uint(claims["sub"].(float64))
+	sub, ok := claims["sub"].(float64)
+	if !ok || sub <= 0 || sub != float64(uint(sub)) {
+		return nil, fmt.Errorf("invalid token subject")
+	}
+	userID := uint(sub)
+	expiry, err := claims.GetExpirationTime()
+	if err != nil || expiry == nil {
+		return nil, fmt.Errorf("token expiry required")
+	}
 	role, _ := claims["role"].(string)
 	jti, _ := claims["jti"].(string)
 	kind, _ := claims["kind"].(string)
 	if kind == "" {
 		kind = "u"
 	}
-	return &TokenClaims{UserID: userID, Role: role, JTI: jti, Kind: kind}, nil
+	return &TokenClaims{ExpiresAt: expiry.Time, UserID: userID, Role: role, JTI: jti, Kind: kind}, nil
 }
 
 func ValidateRefreshToken(tokenString string) (*TokenClaims, error) {
 	token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+		if t.Method != jwt.SigningMethodHS256 {
 			return nil, jwt.ErrSignatureInvalid
 		}
 		return getRefreshSecret(), nil
@@ -107,13 +117,21 @@ func ValidateRefreshToken(tokenString string) (*TokenClaims, error) {
 		return nil, err
 	}
 	claims := token.Claims.(jwt.MapClaims)
-	userID := uint(claims["sub"].(float64))
+	sub, ok := claims["sub"].(float64)
+	if !ok || sub <= 0 || sub != float64(uint(sub)) {
+		return nil, fmt.Errorf("invalid token subject")
+	}
+	userID := uint(sub)
+	expiry, err := claims.GetExpirationTime()
+	if err != nil || expiry == nil {
+		return nil, fmt.Errorf("token expiry required")
+	}
 	jti, _ := claims["jti"].(string)
 	kind, _ := claims["kind"].(string)
 	if kind == "" {
 		kind = "u"
 	}
-	return &TokenClaims{UserID: userID, JTI: jti, Kind: kind}, nil
+	return &TokenClaims{ExpiresAt: expiry.Time, UserID: userID, JTI: jti, Kind: kind}, nil
 }
 
 // GenerateToken ใช้สำหรับ backward compat (access token เดิม 24 ชั่วโมง)

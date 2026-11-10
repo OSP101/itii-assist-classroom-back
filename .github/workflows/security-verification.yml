@@ -1,0 +1,25 @@
+name: Security verification
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      JWT_SECRET: ci-test-access-key-never-use-in-production
+      JWT_REFRESH_SECRET: ci-test-refresh-key-never-use-in-production
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Dependencies, all tests, vet, production binaries and race checks
+        run: bash scripts/verify-security.sh
+      - name: Verify deployment image builds
+        run: docker build --tag itii-backend:verification .

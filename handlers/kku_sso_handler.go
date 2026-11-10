@@ -298,7 +298,10 @@ func KKULoginHandler(c fiber.Ctx) error {
 	if action != "link" {
 		action = ""
 	}
-	linkToken := linkTokenForRequest(c, action)
+	linkToken, err := authorizedOAuthLinkToken(c, action)
+	if err != nil {
+		return err
+	}
 
 	if err := setKKUSSONonce(c, audience, action, linkToken); err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -390,7 +393,7 @@ func KKUCallbackHandler(c fiber.Ctx) error {
 		if nonce.LinkToken == "" {
 			return redirectErr("/auth/link-callback", "ไม่พบข้อมูลเซสชันสำหรับการผูกบัญชี")
 		}
-		claims, err := utils.ValidateAccessToken(nonce.LinkToken)
+		claims, err := validateOAuthLinkToken(nonce.LinkToken)
 		if err != nil || claims.UserID == 0 {
 			return redirectErr("/auth/link-callback", "เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่แล้วลองอีกครั้ง")
 		}
@@ -475,8 +478,13 @@ func KKUCallbackHandler(c fiber.Ctx) error {
 
 	// 2FA gate — เหมือน flow ของ Google/GitHub
 	if user.TwoFactorEnabled {
+		challenge, err := newLoginChallenge(user)
+		if err != nil {
+			return redirectErr("/login", "Failed to start two-factor verification")
+		}
 		twoFactorJSON, _ := json.Marshal(map[string]interface{}{
 			"requiresTwoFactor": true,
+			"challenge":         challenge,
 			"twoFactorMethod":   user.TwoFactorMethod,
 			"userId":            user.ID,
 		})

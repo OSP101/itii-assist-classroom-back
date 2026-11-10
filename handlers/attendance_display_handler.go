@@ -236,7 +236,7 @@ func GetAttendanceDisplaySocketTicketHandler(c fiber.Ctx) error {
 		}
 		return c.Status(status).JSON(fiber.Map{"success": false, "message": message})
 	}
-	ticket, expiresAt, err := realtime.IssueDisplaySocketTicket(fmt.Sprintf("display-attendance-%d", grant.AttendanceSessionID), attendanceDisplaySocketTicketTTL)
+	ticket, expiresAt, err := realtime.IssueGrantSocketTicket(fmt.Sprintf("display-attendance-%d", grant.AttendanceSessionID), grant.ID, attendanceDisplaySocketTicketTTL)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to issue display socket ticket"})
 	}

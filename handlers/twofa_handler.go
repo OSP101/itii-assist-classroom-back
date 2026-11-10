@@ -1,13 +1,10 @@
 package handlers
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"itii-assist/config"
 	"itii-assist/middlewares"
 	"itii-assist/models"
@@ -23,67 +20,19 @@ import (
 	qrcode "github.com/skip2/go-qrcode"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 // =============================================================================
 // 2FA encryption helpers (AES-256-GCM using TWO_FACTOR_ENCRYPTION_KEY env)
 // =============================================================================
 
-func get2FAKey() []byte {
-	k := os.Getenv("TWO_FACTOR_ENCRYPTION_KEY")
-	if k == "" {
-		k = "00000000000000000000000000000000" // 32-byte fallback for dev
-	}
-	b := []byte(k)
-	if len(b) >= 32 {
-		return b[:32]
-	}
-	padded := make([]byte, 32)
-	copy(padded, b)
-	return padded
-}
-
 func encryptSecret(plaintext string) (string, error) {
-	key := get2FAKey()
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return "", err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
-		return "", err
-	}
-	sealed := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
-	return base64.StdEncoding.EncodeToString(sealed), nil
+	return utils.EncryptTwoFactorSecret(plaintext)
 }
 
 func decryptSecret(ciphertext string) (string, error) {
-	key := get2FAKey()
-	data, err := base64.StdEncoding.DecodeString(ciphertext)
-	if err != nil {
-		return "", err
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return "", err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-	if len(data) < gcm.NonceSize() {
-		return "", fmt.Errorf("ciphertext too short")
-	}
-	nonce, ct := data[:gcm.NonceSize()], data[gcm.NonceSize():]
-	plain, err := gcm.Open(nil, nonce, ct, nil)
-	if err != nil {
-		return "", err
-	}
-	return string(plain), nil
+	return utils.DecryptTwoFactorSecret(ciphertext)
 }
 
 // =============================================================================
@@ -614,8 +563,9 @@ func RegenerateBackupCodesHandler(c fiber.Ctx) error {
 // =============================================================================
 
 type VerifyLoginWith2FAInput struct {
-	UserID uint   `json:"userId"`
-	Code   string `json:"code"`
+	Challenge string `json:"challenge"`
+	UserID    uint   `json:"userId"`
+	Code      string `json:"code"`
 }
 
 func verify2FACodeForLogin(user *models.User, code string) (bool, bool) {
@@ -662,25 +612,13 @@ func verify2FACodeForLogin(user *models.User, code string) (bool, bool) {
 func VerifyLoginWith2FAHandler(c fiber.Ctx) error {
 	var input VerifyLoginWith2FAInput
 	if err := c.Bind().JSON(&input); err != nil || input.UserID == 0 || input.Code == "" {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ครบถ้วน"})
+		return fiber.ErrBadRequest
 	}
-
-	var user models.User
-	if err := config.DB.First(&user, input.UserID).Error; err != nil || !user.TwoFactorEnabled {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูลผู้ใช้หรือไม่ได้เปิดใช้งาน 2FA"})
+	_, backup, err := verifyLoginChallenge(input.Challenge, input.UserID, input.Code, false)
+	if err != nil {
+		return err
 	}
-
-	isValid, usedBackupCode := verify2FACodeForLogin(&user, input.Code)
-
-	if !isValid {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "รหัสยืนยันไม่ถูกต้อง"})
-	}
-
-	return c.JSON(fiber.Map{
-		"success":        true,
-		"verified":       true,
-		"usedBackupCode": usedBackupCode,
-	})
+	return c.JSON(fiber.Map{"success": true, "verified": true, "usedBackupCode": backup})
 }
 
 // =============================================================================
@@ -688,8 +626,9 @@ func VerifyLoginWith2FAHandler(c fiber.Ctx) error {
 // =============================================================================
 
 type CompleteTwoFALoginInput struct {
-	UserID uint   `json:"userId"`
-	Code   string `json:"code"`
+	Challenge string `json:"challenge"`
+	UserID    uint   `json:"userId"`
+	Code      string `json:"code"`
 }
 
 func CompleteTwoFALoginHandler(c fiber.Ctx) error {
@@ -698,14 +637,9 @@ func CompleteTwoFALoginHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ข้อมูลไม่ครบถ้วน"})
 	}
 
-	var user models.User
-	if err := config.DB.First(&user, input.UserID).Error; err != nil || !user.TwoFactorEnabled {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูลผู้ใช้หรือไม่ได้เปิดใช้งาน 2FA"})
-	}
-
-	isValid, usedBackupCode := verify2FACodeForLogin(&user, input.Code)
-	if !isValid {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "รหัสยืนยันไม่ถูกต้อง"})
+	user, usedBackupCode, err := consumeLoginChallenge(input.Challenge, input.UserID, input.Code)
+	if err != nil {
+		return err
 	}
 
 	accessToken, refreshToken, jti, err := utils.GenerateTokenPair(user.ID, user.Role)
@@ -753,7 +687,7 @@ func CompleteTwoFALoginHandler(c fiber.Ctx) error {
 		"success": true,
 		"message": "Login successful",
 		"data": fiber.Map{
-			"user":               safeUser(&user),
+			"user":               safeUser(user),
 			"accessToken":        accessToken,
 			"refreshToken":       refreshToken,
 			"mustChangePassword": user.MustChangePassword,
@@ -767,7 +701,8 @@ func CompleteTwoFALoginHandler(c fiber.Ctx) error {
 // =============================================================================
 
 type SendLoginCodeInput struct {
-	UserID uint `json:"userId"`
+	Challenge string `json:"challenge"`
+	UserID    uint   `json:"userId"`
 }
 
 func SendLoginCodeHandler(c fiber.Ctx) error {
@@ -777,7 +712,7 @@ func SendLoginCodeHandler(c fiber.Ctx) error {
 	}
 
 	var user models.User
-	if err := config.DB.First(&user, input.UserID).Error; err != nil {
+	if err := config.DB.First(&user, input.UserID).Error; err != nil || !user.IsActive {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไม่พบข้อมูลผู้ใช้"})
 	}
 
@@ -791,17 +726,29 @@ func SendLoginCodeHandler(c fiber.Ctx) error {
 
 	emailCode := generateNumericCode(6)
 	emailCodeExp := time.Now().Add(5 * time.Minute)
-	expiresAt := time.Now().Add(15 * time.Minute)
-
-	config.DB.Where("user_id = ? AND method = ?", input.UserID, "email").Delete(&models.TwoFactorPending{})
-	config.DB.Create(&models.TwoFactorPending{
-		UserID:             input.UserID,
-		Method:             "email",
-		Secret:             "login",
-		EmailCode:          emailCode,
-		EmailCodeExpiresAt: &emailCodeExp,
-		ExpiresAt:          expiresAt,
+	err := config.DB.Transaction(func(tx *gorm.DB) error {
+		challenge, err := lockLoginChallenge(tx, input.Challenge, input.UserID)
+		if err != nil {
+			return err
+		}
+		if challenge.Method != "email" {
+			return fiber.ErrForbidden
+		}
+		now := time.Now()
+		if challenge.LastSentAt != nil && now.Sub(*challenge.LastSentAt) < time.Minute {
+			return fiber.NewError(429, "กรุณารอก่อนขอรหัสใหม่")
+		}
+		if err := tx.Where("user_id = ? AND secret = ?", user.ID, "login:"+challenge.ID).Delete(&models.TwoFactorPending{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&models.TwoFactorPending{UserID: user.ID, Method: "email", Secret: "login:" + challenge.ID, EmailCode: emailCode, EmailCodeExpiresAt: &emailCodeExp, ExpiresAt: challenge.ExpiresAt}).Error; err != nil {
+			return err
+		}
+		return tx.Model(challenge).Update("last_sent_at", now).Error
 	})
+	if err != nil {
+		return err
+	}
 
 	if err := services.SendTwoFactorCodeEmail(&user, emailCode, "login"); err != nil {
 		services.LogEmailDeliveryError("2fa login code", err)

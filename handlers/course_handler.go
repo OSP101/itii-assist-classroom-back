@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"itii-assist/config"
 	"itii-assist/middlewares"
 	"itii-assist/models"
@@ -357,41 +356,16 @@ func UploadCourseCoverHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไฟล์มีขนาดใหญ่เกินไป สูงสุด 2MB"})
 	}
 
-	contentType := strings.ToLower(strings.TrimSpace(fileHeader.Header.Get("Content-Type")))
-	if !strings.HasPrefix(contentType, "image/") {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "รองรับเฉพาะไฟล์รูปภาพ"})
-	}
-
-	file, openErr := fileHeader.Open()
-	if openErr != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไม่สามารถอ่านไฟล์รูปภาพได้"})
-	}
-	content, readErr := io.ReadAll(file)
-	file.Close()
+	content, readErr := utils.ReadUploadedImage(fileHeader, 2*1024*1024, 1920, 960)
 	if readErr != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไม่สามารถอ่านไฟล์รูปภาพได้"})
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": readErr.Error()})
 	}
-
 	baseDir := filepath.Join("uploads", "course-covers")
 	if mkdirErr := os.MkdirAll(baseDir, 0o755); mkdirErr != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "ไม่สามารถสร้างโฟลเดอร์จัดเก็บรูปได้"})
 	}
 
-	// Downscale + re-encode as JPEG: covers only ever display at
-	// COURSE_COVER_RECOMMENDED_WIDTH/HEIGHT (1600x400) in the UI, so a raw
-	// phone-camera upload gains nothing by staying full resolution. Falls
-	// back to the original bytes for formats we can't decode.
-	ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
-	if ext == "" {
-		ext = ".jpg"
-	}
-	if resized, ok, processErr := utils.ProcessUploadedImage(content, 1920, 960, 85); processErr != nil {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": processErr.Error()})
-	} else if ok {
-		content = resized
-		ext = ".jpg"
-	}
-
+	ext := ".jpg"
 	fileName := fmt.Sprintf("course-cover-%d%s", time.Now().UnixNano(), ext)
 	filePath := filepath.Join(baseDir, fileName)
 

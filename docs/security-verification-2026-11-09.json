@@ -1,0 +1,95 @@
+{
+  "date_utc": "2026-11-09T15:19:48.287576+00:00",
+  "go_version": "go version go1.27.3 linux/amd64",
+  "dependency_mode": "Official tagged source trees via temporary modfile replaces for seven upgraded modules; normal module zip download and sumdb verification NOT completed. Production go.mod has no replaces.",
+  "checks": [
+    {
+      "name": "core_build",
+      "exit_code": 0,
+      "status": "passed"
+    },
+    {
+      "name": "utils",
+      "exit_code": 0,
+      "status": "passed",
+      "passed_tests": 25,
+      "test_names": [
+        "TestIPadInDesktopModeIsAllowed",
+        "TestIPadUserAgentWithoutHintsStillFailsDeviceCheck",
+        "TestTouchHintsDoNotLetANonMacDesktopThrough/windows_touchscreen_laptop",
+        "TestTouchHintsDoNotLetANonMacDesktopThrough",
+        "TestPartialHintsDoNotUpgradeAMac/zero_touch_points",
+        "TestPartialHintsDoNotUpgradeAMac/touch_only",
+        "TestPartialHintsDoNotUpgradeAMac/coarse_only",
+        "TestPartialHintsDoNotUpgradeAMac/touch_and_coarse_only",
+        "TestPartialHintsDoNotUpgradeAMac/touch_points_only",
+        "TestPartialHintsDoNotUpgradeAMac",
+        "TestAndroidPhoneUnaffectedByHints/none",
+        "TestAndroidPhoneUnaffectedByHints/full",
+        "TestAndroidPhoneUnaffectedByHints",
+        "TestIPadStillSubjectToNetworkAndDomainChecks",
+        "TestParseDeviceHints",
+        "TestCampusGuardPolicy",
+        "TestInsideKKUCampus",
+        "TestAllowedWebOriginsNeverExpandsWildcard",
+        "TestAllowedWebOriginsRejectsCredentialsPathsAndInvalidSchemes",
+        "TestTrustedProxyCIDRsDoNotTrustAllPrivateNetworks",
+        "TestAccessTokensRequireValidSubjectExpiryAndExactAlgorithm",
+        "TestUserAndStudentTokenPairsRemainCompatible",
+        "TestNormalizeUploadedImageRejectsActiveContentAndCorruptImages",
+        "TestNormalizeUploadedImagePreservesPixelsAndStripsTrailingContent",
+        "TestNormalizeUploadedImageRejectsPixelBombBeforeDecode"
+      ]
+    },
+    {
+      "name": "realtime_without_redis",
+      "exit_code": 0,
+      "status": "passed",
+      "passed_tests": 15,
+      "test_names": [
+        "TestBroadcastDuringConcurrentUnregisterDoesNotPanic",
+        "TestUnregisterIsIdempotent",
+        "TestBroadcastSkipsDoneClient",
+        "TestJoinInstructorRejectsClientWithoutTicket",
+        "TestJoinInstructorAcceptsIssuedTicket",
+        "TestInstructorRoomRejectsDisplayTicket",
+        "TestExpiredTicketIsRejected",
+        "TestTicketIsReusableWithinTTL",
+        "TestPrivateRoomsRejectBareIDsAndUnboundTickets",
+        "TestClientCannotForgeServerUpdates",
+        "TestPublicQueueEventsDoNotDiscloseBookingOrReportData",
+        "TestGlobalUpdatesPreserveCourseRoutingWithoutPrivateRows",
+        "TestSocketRoomLimitBoundsAnonymousSubscriptions",
+        "TestSocketOrigins",
+        "TestSocketConnectionLimitsAndRelease"
+      ]
+    },
+    {
+      "name": "upload_inventory",
+      "exit_code": 0,
+      "status": "passed",
+      "inventory": {
+        "findings": [],
+        "modified_files": 0,
+        "scanned": 164
+      }
+    }
+  ],
+  "blocked": [
+    "Full go test ./... (missing dependencies; shell network unavailable)",
+    "Frontend npm ci, typecheck, production build (Node/npm absent)",
+    "Go race checks (C compiler absent)",
+    "Nginx/container runtime and browser/E2E tests (runtime unavailable)",
+    "Live staging load and proxy network verification"
+  ],
+  "production_deployed": false,
+  "static_checks": {
+    "go_parse_import_context": "passed",
+    "compose_main_config_quiet": "passed with unset tunnel token warning",
+    "compose_backend_config_quiet": "passed",
+    "yaml_parse": "passed",
+    "frontend_package_lock_consistency": "passed (10 Next/env/SWC entries)",
+    "shell_script_syntax": "passed",
+    "git_diff_check": "passed"
+  }
+}

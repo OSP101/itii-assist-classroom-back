@@ -53,6 +53,7 @@ func RequireCourseAccess(resolver CourseAccessResolver, allowedCourseRoles ...st
 		}
 
 		if userRole == "admin" {
+			c.Locals("validated_course_ids", uniqueCourseIDs(courseIDs))
 			return c.Next()
 		}
 
@@ -74,6 +75,7 @@ func RequireCourseAccess(resolver CourseAccessResolver, allowedCourseRoles ...st
 			}
 		}
 
+		c.Locals("validated_course_ids", uniqueCourseIDs(courseIDs))
 		return c.Next()
 	}
 }
@@ -579,6 +581,20 @@ func CourseIDFromQueueSessionParam(param string) CourseAccessResolver {
 		}
 		if scopedCourseID := strings.TrimSpace(c.Params("courseId")); scopedCourseID != "" && scopedCourseID != courseID {
 			return nil, newCourseAccessError(404, "Queue session not found")
+		}
+		return []string{courseID}, nil
+	}
+}
+
+func CourseIDFromAttendanceSessionBody(field string) CourseAccessResolver {
+	return func(c fiber.Ctx) ([]string, error) {
+		id, err := requiredUintField(c, field)
+		if err != nil {
+			return nil, err
+		}
+		courseID, err := repositories.GetCourseIDByAttendanceSessionID(id)
+		if err != nil {
+			return nil, err
 		}
 		return []string{courseID}, nil
 	}

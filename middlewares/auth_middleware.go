@@ -97,20 +97,14 @@ func Protected() fiber.Handler {
 		}
 
 		claims, err := utils.ValidateAccessToken(tokenString)
+		if err == nil {
+			err = repositories.ValidateSessionPrincipal(claims)
+		}
 		if err != nil {
 			return c.Status(401).JSON(fiber.Map{
 				"success": false,
 				"message": "Token ไม่ถูกต้องหรือหมดอายุแล้ว",
 			})
-		}
-
-		if claims.JTI != "" {
-			if _, err := repositories.FindRefreshTokenByJTI(claims.JTI); err != nil {
-				return c.Status(401).JSON(fiber.Map{
-					"success": false,
-					"message": "Session ถูกยกเลิกหรือหมดอายุแล้ว กรุณาเข้าสู่ระบบใหม่",
-				})
-			}
 		}
 
 		if viaCookie && !csrfOK(c) {
@@ -121,6 +115,7 @@ func Protected() fiber.Handler {
 		}
 
 		c.Locals("jti", claims.JTI)
+		c.Locals("access_expires_at", claims.ExpiresAt)
 
 		// For student sessions: set student_id instead of user_id
 		if claims.Kind == "s" {
@@ -146,14 +141,11 @@ func OptionalProtected() fiber.Handler {
 		}
 
 		claims, err := utils.ValidateAccessToken(tokenString)
+		if err == nil {
+			err = repositories.ValidateSessionPrincipal(claims)
+		}
 		if err != nil {
 			return c.Next()
-		}
-
-		if claims.JTI != "" {
-			if _, err := repositories.FindRefreshTokenByJTI(claims.JTI); err != nil {
-				return c.Next()
-			}
 		}
 
 		// Unlike Protected(), an optional session that fails CSRF just
@@ -165,6 +157,7 @@ func OptionalProtected() fiber.Handler {
 		}
 
 		c.Locals("jti", claims.JTI)
+		c.Locals("access_expires_at", claims.ExpiresAt)
 		if claims.Kind == "s" {
 			c.Locals("student_id", claims.UserID)
 		} else {

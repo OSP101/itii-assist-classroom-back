@@ -144,27 +144,34 @@ func buildFrontendRedirectWithQuery(baseURL, path string, params map[string]stri
 }
 
 // =============================================================================
-// Stateless CSRF — encode action + nonce in the state parameter and sign
-// with HMAC-SHA256 using JWT_SECRET.  No cookies needed, works across any
-// hostname combination (10.x proxy → localhost callback).
+// Signed state is scoped to the provider, expires after five minutes, and
+// must match the initiating browser's HttpOnly nonce cookie. The proxy keeps
+// initiation and callback on the same public origin.
 //
 // state = base64url(JSON payload) + "." + base64url(HMAC)
 // payload = { nonce, action, linkToken }
 // =============================================================================
 
 type oauthStatePayload struct {
+	Provider  string `json:"p"`
+	ExpiresAt int64  `json:"exp"`
 	Nonce     string `json:"n"`
 	Action    string `json:"a"` // "" | "link"
 	LinkToken string `json:"l"`
 	Audience  string `json:"u,omitempty"` // "" | "student"
 }
 
-func signOAuthState(action, linkToken, audience string) (string, error) {
+func signOAuthState(provider, action, linkToken, audience string) (string, error) {
+	if os.Getenv("JWT_SECRET") == "" || (provider != "google" && provider != "github") {
+		return "", fmt.Errorf("OAuth state signing is not configured")
+	}
 	nonce := make([]byte, 12)
 	if _, err := rand.Read(nonce); err != nil {
 		return "", err
 	}
 	payload := oauthStatePayload{
+		Provider:  provider,
+		ExpiresAt: time.Now().Add(5 * time.Minute).Unix(),
 		Nonce:     base64.RawURLEncoding.EncodeToString(nonce),
 		Action:    action,
 		LinkToken: linkToken,
@@ -208,7 +215,46 @@ func verifyOAuthState(state string) (*oauthStatePayload, bool) {
 	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
 		return nil, false
 	}
+	if os.Getenv("JWT_SECRET") == "" || payload.ExpiresAt <= time.Now().Unix() || payload.Nonce == "" || (payload.Provider != "google" && payload.Provider != "github") {
+		return nil, false
+	}
 	return &payload, true
+}
+
+func writeOAuthNonceCookie(c fiber.Ctx, provider, nonce string, maxAge int) {
+	c.Set("Cache-Control", "no-store")
+	c.Cookie(&fiber.Cookie{
+		Name:     "oauth_state_" + provider,
+		Value:    nonce,
+		Path:     "/api/auth/" + provider,
+		HTTPOnly: true,
+		Secure:   strings.HasPrefix(getRequestPublicBaseURL(c), "https://"),
+		SameSite: "Lax",
+		MaxAge:   maxAge,
+	})
+}
+
+func issueOAuthState(c fiber.Ctx, provider, action, linkToken, audience string) (string, error) {
+	state, err := signOAuthState(provider, action, linkToken, audience)
+	if err != nil {
+		return "", err
+	}
+	payload, ok := verifyOAuthState(state)
+	if !ok {
+		return "", fmt.Errorf("OAuth state verification failed")
+	}
+	writeOAuthNonceCookie(c, provider, payload.Nonce, 300)
+	return state, nil
+}
+
+func consumeOAuthState(c fiber.Ctx, provider, state string) (*oauthStatePayload, bool) {
+	nonce := c.Cookies("oauth_state_" + provider)
+	writeOAuthNonceCookie(c, provider, "", -1)
+	payload, ok := verifyOAuthState(state)
+	if !ok || payload.Provider != provider || nonce == "" || !hmac.Equal([]byte(nonce), []byte(payload.Nonce)) {
+		return nil, false
+	}
+	return payload, true
 }
 
 func findUserByOAuthAccount(provider, providerUserID, providerEmail string) (*models.User, *models.UserOAuthAccount) {
@@ -414,6 +460,33 @@ func linkTokenForRequest(c fiber.Ctx, action string) string {
 	return c.Cookies(utils.AccessTokenCookieName)
 }
 
+func validateOAuthLinkToken(token string) (*utils.TokenClaims, error) {
+	claims, err := utils.ValidateAccessToken(token)
+	if err != nil || claims.UserID == 0 {
+		return nil, fiber.ErrUnauthorized
+	}
+	// Students and staff have separate ID spaces. A student ID must never
+	// resolve to a same-numbered privileged row in the users table.
+	if claims.Kind != "u" || claims.Role == "student" {
+		return nil, fiber.ErrForbidden
+	}
+	if err := repositories.ValidateSessionPrincipal(claims); err != nil {
+		return nil, fiber.ErrUnauthorized
+	}
+	return claims, nil
+}
+
+func authorizedOAuthLinkToken(c fiber.Ctx, action string) (string, error) {
+	if action != "link" {
+		return "", nil
+	}
+	token := linkTokenForRequest(c, action)
+	if _, err := validateOAuthLinkToken(token); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
 // =============================================================================
 // GET /api/auth/google
 // Redirects browser to Google's consent screen.
@@ -433,13 +506,16 @@ func GoogleLoginHandler(c fiber.Ctx) error {
 	}
 
 	action := c.Query("action")
-	linkToken := linkTokenForRequest(c, action)
+	linkToken, err := authorizedOAuthLinkToken(c, action)
+	if err != nil {
+		return err
+	}
 	audience := strings.ToLower(strings.TrimSpace(c.Query("audience")))
 	if audience != "student" {
 		audience = ""
 	}
 
-	stateStr, err := signOAuthState(action, linkToken, audience)
+	stateStr, err := issueOAuthState(c, "google", action, linkToken, audience)
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to generate state"})
 	}
@@ -459,9 +535,9 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 		return c.Redirect().To(frontendURL + path + "?error=" + url.QueryEscape(msg))
 	}
 
-	// --- Verify signed state (CSRF protection without cookies) ---
+	// Reject callbacks that did not originate in this browser/provider flow.
 	stateParam := c.Query("state")
-	payload, ok := verifyOAuthState(stateParam)
+	payload, ok := consumeOAuthState(c, "google", stateParam)
 	if !ok {
 		return redirectErr("/login", "Invalid OAuth state")
 	}
@@ -513,7 +589,7 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 		if payload.LinkToken == "" {
 			return redirectErr("/auth/link-callback", "Missing link_token")
 		}
-		claims, err := utils.ValidateAccessToken(payload.LinkToken)
+		claims, err := validateOAuthLinkToken(payload.LinkToken)
 		if err != nil || claims.UserID == 0 {
 			return redirectErr("/auth/link-callback", "Invalid or expired session")
 		}
@@ -605,8 +681,13 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 
 	// 2FA gate
 	if user.TwoFactorEnabled {
+		challenge, err := newLoginChallenge(user)
+		if err != nil {
+			return redirectErr("/login", "Failed to start two-factor verification")
+		}
 		twoFactorJSON, _ := json.Marshal(map[string]interface{}{
 			"requiresTwoFactor": true,
+			"challenge":         challenge,
 			"twoFactorMethod":   user.TwoFactorMethod,
 			"userId":            user.ID,
 		})

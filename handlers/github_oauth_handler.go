@@ -131,9 +131,12 @@ func GitHubLoginHandler(c fiber.Ctx) error {
 	}
 
 	action := c.Query("action")
-	linkToken := linkTokenForRequest(c, action)
+	linkToken, err := authorizedOAuthLinkToken(c, action)
+	if err != nil {
+		return err
+	}
 
-	stateStr, err := signOAuthState(action, linkToken, "")
+	stateStr, err := issueOAuthState(c, "github", action, linkToken, "")
 	if err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to generate state"})
 	}
@@ -151,7 +154,7 @@ func GitHubCallbackHandler(c fiber.Ctx) error {
 	}
 
 	stateParam := c.Query("state")
-	payload, ok := verifyOAuthState(stateParam)
+	payload, ok := consumeOAuthState(c, "github", stateParam)
 	if !ok {
 		return redirectErr("/login", "Invalid OAuth state")
 	}
@@ -198,7 +201,7 @@ func GitHubCallbackHandler(c fiber.Ctx) error {
 		if payload.LinkToken == "" {
 			return redirectErr("/auth/link-callback", "Missing link_token")
 		}
-		claims, err := utils.ValidateAccessToken(payload.LinkToken)
+		claims, err := validateOAuthLinkToken(payload.LinkToken)
 		if err != nil || claims.UserID == 0 {
 			return redirectErr("/auth/link-callback", "Invalid or expired session")
 		}
@@ -267,8 +270,13 @@ func GitHubCallbackHandler(c fiber.Ctx) error {
 	}
 
 	if user.TwoFactorEnabled {
+		challenge, err := newLoginChallenge(user)
+		if err != nil {
+			return redirectErr("/login", "Failed to start two-factor verification")
+		}
 		twoFactorJSON, _ := json.Marshal(map[string]interface{}{
 			"requiresTwoFactor": true,
+			"challenge":         challenge,
 			"twoFactorMethod":   user.TwoFactorMethod,
 			"userId":            user.ID,
 		})

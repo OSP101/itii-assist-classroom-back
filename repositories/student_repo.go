@@ -991,7 +991,15 @@ func CreateStudent(s *models.Student) error {
 }
 
 func UpdateStudent(s *models.Student) error {
-	return config.DB.Save(s).Error
+	return config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(s).Error; err != nil {
+			return err
+		}
+		if !s.IsActive {
+			return tx.Model(&models.RefreshToken{}).Where("user_id = ? AND kind = ?", s.ID, "s").Update("revoked", true).Error
+		}
+		return nil
+	})
 }
 
 func DeleteStudent(id uint) error {
@@ -1004,7 +1012,7 @@ func ToggleStudentStatus(id uint) (*models.Student, error) {
 		return nil, err
 	}
 	s.IsActive = !s.IsActive
-	if err := config.DB.Save(s).Error; err != nil {
+	if err := UpdateStudent(s); err != nil {
 		return nil, err
 	}
 	return s, nil
