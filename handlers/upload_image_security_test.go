@@ -4,14 +4,97 @@ import (
 	"bytes"
 	"encoding/binary"
 	"hash/crc32"
+	"image"
+	"image/png"
 	"io"
 	"mime/multipart"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gofiber/fiber/v3"
 )
+
+func TestSmallImageUploadsSaveCourseCoverScoreAndLeaveEvidence(t *testing.T) {
+	t.Chdir(t.TempDir())
+	var source bytes.Buffer
+	if err := png.Encode(&source, image.NewRGBA(image.Rect(0, 0, 32, 16))); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"image", "images", "evidence"} {
+		t.Run(field, func(t *testing.T) {
+			var body bytes.Buffer
+			writer := multipart.NewWriter(&body)
+			part, err := writer.CreateFormFile(field, "small.png")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = part.Write(source.Bytes())
+			_ = writer.Close()
+			app := fiber.New()
+			app.Post("/upload", func(c fiber.Ctx) error {
+				switch field {
+				case "image":
+					return UploadCourseCoverHandler(c)
+				case "images":
+					paths, err := saveScoreEditRequestImages(c)
+					if err != nil {
+						return err
+					}
+					if len(paths) != 1 {
+						t.Fatalf("expected saved score evidence, got %v", paths)
+					}
+				case "evidence":
+					form, err := c.MultipartForm()
+					if err != nil {
+						return err
+					}
+					paths, err := saveLeaveEvidenceFiles("test-course", form.File[field])
+					if err != nil {
+						return err
+					}
+					if len(paths) != 1 {
+						t.Fatalf("expected saved leave evidence, got %v", paths)
+					}
+				}
+				return c.SendStatus(200)
+			})
+			req := httptest.NewRequest("POST", "/upload", &body)
+			req.Header.Set("Content-Type", writer.FormDataContentType())
+			response, err := app.Test(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			result, _ := io.ReadAll(response.Body)
+			if response.StatusCode != 200 {
+				t.Fatalf("small upload failed: %d %s", response.StatusCode, result)
+			}
+		})
+	}
+	files := 0
+	err := filepath.WalkDir("uploads", func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if _, format, err := image.DecodeConfig(bytes.NewReader(content)); err != nil || format != "jpeg" {
+				t.Fatalf("invalid saved image %s: format=%s err=%v", path, format, err)
+			}
+			files++
+		}
+		return nil
+	})
+	if err != nil || files != 3 {
+		t.Fatalf("expected 3 saved JPEGs: files=%d err=%v", files, err)
+	}
+}
 
 func TestCourseCoverRejectsOversizedImageBeforeSaving(t *testing.T) {
 	// Valid PNG dimensions over the pixel budget, without a pixel body.

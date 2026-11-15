@@ -218,6 +218,9 @@ func main() {
 
 	// 4. รัน Fiber Server
 	app := fiber.New(fiber.Config{
+		// Match nginx's 25 MiB request ceiling, including multipart overhead.
+		// Fiber's 4 MiB default rejects otherwise valid images/evidence bundles.
+		BodyLimit: 25 * 1024 * 1024,
 		ErrorHandler: func(c fiber.Ctx, err error) error {
 			status, message := 500, "เกิดข้อผิดพลาดภายในระบบ"
 			var httpErr *fiber.Error
