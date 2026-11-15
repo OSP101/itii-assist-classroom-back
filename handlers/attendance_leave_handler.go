@@ -31,7 +31,7 @@ import (
 
 const (
 	leaveEvidenceMaxFiles    = 3
-	leaveEvidenceMaxFileSize = 2 * 1024 * 1024
+	leaveEvidenceMaxFileSize = utils.MaxUploadedImageBytes
 	// เก็บใต้ uploads/private ซึ่งถูกกันไม่ให้ static เสิร์ฟ (ดู cmd/api/main.go)
 	leaveEvidenceDir = "uploads/private/leave-evidence"
 )
@@ -142,7 +142,7 @@ func saveLeaveEvidenceFiles(courseID string, files []*multipart.FileHeader) ([]s
 	for _, fh := range files {
 		if fh.Size > leaveEvidenceMaxFileSize {
 			cleanup()
-			return nil, fmt.Errorf("ไฟล์ %s ใหญ่เกิน 5 MB", fh.Filename)
+			return nil, fmt.Errorf("ไฟล์ %s ใหญ่เกิน 10 MB ต่อไฟล์", fh.Filename)
 		}
 		f, err := fh.Open()
 		if err != nil {
@@ -157,7 +157,7 @@ func saveLeaveEvidenceFiles(courseID string, files []*multipart.FileHeader) ([]s
 		}
 		if len(content) > leaveEvidenceMaxFileSize {
 			cleanup()
-			return nil, fmt.Errorf("ไฟล์ %s ใหญ่เกิน 5 MB", fh.Filename)
+			return nil, fmt.Errorf("ไฟล์ %s ใหญ่เกิน 10 MB ต่อไฟล์", fh.Filename)
 		}
 		// ตรวจชนิดจากเนื้อไฟล์จริง ไม่เชื่อ header ที่ client ส่งมา
 		detected := http.DetectContentType(content)

@@ -3,10 +3,12 @@ package handlers
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 	"image"
 	"image/png"
 	"io"
+	"itii-assist/utils"
 	"mime/multipart"
 	"net/http/httptest"
 	"os"
@@ -130,5 +132,91 @@ func TestCourseCoverRejectsOversizedImageBeforeSaving(t *testing.T) {
 	result, _ := io.ReadAll(response.Body)
 	if response.StatusCode != 400 || !strings.Contains(string(result), "25") {
 		t.Fatalf("must reject pixel limit, got %d %s", response.StatusCode, result)
+	}
+}
+
+func TestUploadsTenMiBBoundaryAndThreeFileBundles(t *testing.T) {
+	t.Chdir(t.TempDir())
+	var pngBytes bytes.Buffer
+	if err := png.Encode(&pngBytes, image.NewRGBA(image.Rect(0, 0, 8, 8))); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"cover", "announcement", "score", "leave"} {
+		for _, over := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/over=%v", kind, over), func(t *testing.T) {
+				fileSize := utils.MaxUploadedImageBytes
+				if over {
+					fileSize++
+				}
+				payload := make([]byte, fileSize)
+				copy(payload, pngBytes.Bytes())
+				var body bytes.Buffer
+				writer := multipart.NewWriter(&body)
+				field, count := "image", 1
+				if kind == "score" {
+					field, count = "images", 3
+				}
+				if kind == "leave" {
+					field, count = "evidence", 3
+				}
+				for i := 0; i < count; i++ {
+					part, err := writer.CreateFormFile(field, "boundary.png")
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := part.Write(payload); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := writer.Close(); err != nil {
+					t.Fatal(err)
+				}
+				app := fiber.New(fiber.Config{BodyLimit: utils.MaxUploadRequestBytes})
+				app.Post("/upload", func(c fiber.Ctx) error {
+					if kind == "cover" {
+						return UploadCourseCoverHandler(c)
+					}
+					if kind == "announcement" {
+						return UploadAnnouncementImageHandler(c)
+					}
+					var paths []string
+					var err error
+					if kind == "score" {
+						paths, err = saveScoreEditRequestImages(c)
+					} else {
+						var form *multipart.Form
+						form, err = c.MultipartForm()
+						if err == nil {
+							paths, err = saveLeaveEvidenceFiles("boundary-course", form.File[field])
+						}
+					}
+					if err != nil {
+						return c.Status(400).SendString(err.Error())
+					}
+					if len(paths) != count {
+						return c.Status(500).SendString("missing saved evidence")
+					}
+					return c.SendStatus(200)
+				})
+				req := httptest.NewRequest("POST", "/upload", &body)
+				req.Header.Set("Content-Type", writer.FormDataContentType())
+				response, err := app.Test(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer response.Body.Close()
+				result, _ := io.ReadAll(response.Body)
+				want := 200
+				if over {
+					want = 400
+				}
+				if response.StatusCode != want {
+					t.Fatalf("want %d got %d: %s", want, response.StatusCode, result)
+				}
+				if over && !strings.Contains(string(result), "10") {
+					t.Fatalf("missing size limit: %s", result)
+				}
+			})
+		}
 	}
 }

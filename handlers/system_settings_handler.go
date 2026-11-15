@@ -288,11 +288,11 @@ func UploadAnnouncementImageHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไฟล์รูปภาพไม่ถูกต้อง"})
 	}
 
-	if fileHeader.Size > 8*1024*1024 {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไฟล์มีขนาดใหญ่เกินไป สูงสุด 8MB"})
+	if fileHeader.Size > utils.MaxUploadedImageBytes {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไฟล์มีขนาดใหญ่เกินไป สูงสุด 10 MB ต่อไฟล์"})
 	}
 
-	content, err := utils.ReadUploadedImage(fileHeader, 8*1024*1024, 2000, 2000)
+	content, err := utils.ReadUploadedImage(fileHeader, utils.MaxUploadedImageBytes, 2000, 2000)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}

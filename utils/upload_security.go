@@ -3,6 +3,7 @@ package utils
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"image"
 	"io"
 	"mime/multipart"
@@ -11,6 +12,10 @@ import (
 )
 
 const MaxUploadedImagePixels = 25_000_000
+const MaxUploadedImageBytes = 10 * 1024 * 1024
+
+// Three 10 MiB evidence files plus multipart fields and framing; matches nginx.
+const MaxUploadRequestBytes = 35 * 1024 * 1024
 
 // NormalizeUploadedImage trusts decoded pixels, not the client MIME or suffix.
 // Re-encoding removes active content and metadata/polyglot tails.
@@ -30,8 +35,11 @@ func NormalizeUploadedImage(content []byte, width, height int) ([]byte, error) {
 }
 
 func ReadUploadedImage(file *multipart.FileHeader, maxBytes int64, width, height int) ([]byte, error) {
-	if file == nil || file.Size <= 0 || file.Size > maxBytes {
+	if file == nil || file.Size <= 0 {
 		return nil, errors.New("ขนาดไฟล์รูปภาพไม่ถูกต้อง")
+	}
+	if file.Size > maxBytes {
+		return nil, fmt.Errorf("ไฟล์ %s มีขนาด %.2f MB เกินกำหนดสูงสุด %d MB ต่อไฟล์", file.Filename, float64(file.Size)/(1024*1024), maxBytes/(1024*1024))
 	}
 	f, err := file.Open()
 	if err != nil {
@@ -43,7 +51,7 @@ func ReadUploadedImage(file *multipart.FileHeader, maxBytes int64, width, height
 		return nil, err
 	}
 	if int64(len(content)) > maxBytes {
-		return nil, errors.New("ไฟล์รูปภาพใหญ่เกินกำหนด")
+		return nil, fmt.Errorf("ไฟล์รูปภาพใหญ่เกินกำหนดสูงสุด %d MB ต่อไฟล์", maxBytes/(1024*1024))
 	}
 	return NormalizeUploadedImage(content, width, height)
 }

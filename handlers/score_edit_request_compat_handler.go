@@ -176,10 +176,10 @@ func saveScoreEditRequestImages(c fiber.Ctx) ([]string, error) {
 
 	paths := make([]string, 0, len(files))
 	for index, file := range files {
-		if file.Size > 10*1024*1024 {
+		if file.Size > utils.MaxUploadedImageBytes {
 			return nil, fmt.Errorf("file size too large. maximum 10MB per file")
 		}
-		content, err := utils.ReadUploadedImage(file, 10*1024*1024, 2000, 2000)
+		content, err := utils.ReadUploadedImage(file, utils.MaxUploadedImageBytes, 2000, 2000)
 		if err != nil {
 			return nil, err
 		}

@@ -932,7 +932,7 @@ func UploadAvatarHandler(c fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "No file uploaded"})
 	}
 
-	content, err := utils.ReadUploadedImage(fileHeader, 5*1024*1024, 512, 512)
+	content, err := utils.ReadUploadedImage(fileHeader, utils.MaxUploadedImageBytes, 512, 512)
 	if err != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": err.Error()})
 	}

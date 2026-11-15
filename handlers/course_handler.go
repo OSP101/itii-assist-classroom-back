@@ -352,11 +352,11 @@ func UploadCourseCoverHandler(c fiber.Ctx) error {
 	if fileHeader.Size <= 0 {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไฟล์รูปภาพไม่ถูกต้อง"})
 	}
-	if fileHeader.Size > 2*1024*1024 {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไฟล์มีขนาดใหญ่เกินไป สูงสุด 2MB"})
+	if fileHeader.Size > utils.MaxUploadedImageBytes {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "ไฟล์มีขนาดใหญ่เกินไป สูงสุด 10 MB ต่อไฟล์"})
 	}
 
-	content, readErr := utils.ReadUploadedImage(fileHeader, 2*1024*1024, 1920, 960)
+	content, readErr := utils.ReadUploadedImage(fileHeader, utils.MaxUploadedImageBytes, 1920, 960)
 	if readErr != nil {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": readErr.Error()})
 	}
