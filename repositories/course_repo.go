@@ -1170,7 +1170,7 @@ func AddStudentToSection(sectionID uint, studentID uint) error {
 			return err
 		}
 
-		return nil
+		return syncSectionAttendanceRoster(tx, sectionID, []uint{studentID})
 	})
 }
 
@@ -1315,7 +1315,7 @@ func BulkAddStudentsToSection(courseID string, sectionID uint, studentIDs []uint
 				}
 			}
 
-			return nil
+			return syncSectionAttendanceRoster(tx, sectionID, addedIDs)
 		})
 		if err != nil {
 			return result, err
@@ -1387,6 +1387,10 @@ func MoveStudentBetweenSections(courseID string, fromSectionID uint, toSectionID
 
 		if err := tx.Where("course_section_id = ? AND student_id = ?", fromSectionID, studentID).
 			Delete(&models.CourseSectionStudent{}).Error; err != nil {
+			return err
+		}
+
+		if err := syncSectionAttendanceRoster(tx, toSectionID, []uint{studentID}); err != nil {
 			return err
 		}
 
@@ -1568,6 +1572,10 @@ func RestoreStudentToSection(sectionID uint, studentID uint) (bool, error) {
 
 		// คืนคำขอลาที่ถูกยกเลิกอัตโนมัติตอนถอดออกกลับเป็น pending ด้วย
 		if err := RestorePendingLeaveRequestsByRemoval(tx, removal.ID); err != nil {
+			return err
+		}
+
+		if err := syncSectionAttendanceRoster(tx, sectionID, []uint{studentID}); err != nil {
 			return err
 		}
 
