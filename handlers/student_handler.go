@@ -250,9 +250,6 @@ func CreateStudentHandler(c fiber.Ctx) error {
 	if repositories.IsStudentIDExists(input.StudentID, 0) {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "รหัสนักศึกษานี้มีอยู่ในระบบแล้ว"})
 	}
-	if repositories.IsStudentEmailExists(input.Email, 0) {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "อีเมลนี้มีอยู่ในระบบแล้ว"})
-	}
 
 	student := models.Student{
 		StudentID: input.StudentID,
@@ -371,9 +368,6 @@ func UpdateStudentHandler(c fiber.Ctx) error {
 
 	if input.StudentID != student.StudentID && repositories.IsStudentIDExists(input.StudentID, student.ID) {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "รหัสนักศึกษานี้มีอยู่ในระบบแล้ว"})
-	}
-	if input.Email != student.Email && repositories.IsStudentEmailExists(input.Email, student.ID) {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "อีเมลนี้มีอยู่ในระบบแล้ว"})
 	}
 
 	before := fiber.Map{"student_id": student.StudentID, "full_name": student.FullName, "email": student.Email, "is_active": student.IsActive}

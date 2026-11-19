@@ -370,49 +370,12 @@ func findGeneralUserByGoogle(profile googleProfile) (*models.User, *models.UserO
 	return nil, nil
 }
 
-func findOrProvisionStudentByGoogle(profile googleProfile) *models.Student {
-	trimmedEmail := strings.ToLower(strings.TrimSpace(profile.Email))
-	if !profile.EmailVerified || trimmedEmail == "" {
-		return nil
-	}
-
-	student, err := repositories.FindStudentByEmail(trimmedEmail)
-	if err != nil || student == nil || !student.IsActive {
-		return nil
-	}
-
-	return student
-}
-
 func findUserByGoogle(profile googleProfile, audience string) (*models.User, *models.UserOAuthAccount) {
 	if audience == "student" {
 		return nil, nil
 	}
 
 	return findGeneralUserByGoogle(profile)
-}
-
-// issueStudentOAuthSession สร้าง session สำหรับ Student (ไม่มี User record)
-func issueStudentOAuthSession(c fiber.Ctx, student *models.Student) (at, rt string, err error) {
-	at, rt, jti, err := utils.GenerateStudentTokenPair(student.ID)
-	if err != nil {
-		return
-	}
-	meta := sessionMeta{
-		IP:               c.IP(),
-		UserAgent:        string(c.Request().Header.UserAgent()),
-		Provider:         "google",
-		SessionStartedAt: time.Now(),
-	}
-	metaJSON, _ := json.Marshal(meta)
-	err = repositories.CreateRefreshToken(&models.RefreshToken{
-		JTI:       jti,
-		UserID:    student.ID,
-		Kind:      "s",
-		ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
-		Meta:      datatypes.JSON(metaJSON),
-	})
-	return
 }
 
 // =============================================================================
@@ -513,6 +476,8 @@ func GoogleLoginHandler(c fiber.Ctx) error {
 	audience := strings.ToLower(strings.TrimSpace(c.Query("audience")))
 	if audience != "student" {
 		audience = ""
+	} else {
+		writeStudentSelectionCookie(c, "", -1)
 	}
 
 	stateStr, err := issueOAuthState(c, "google", action, linkToken, audience)
@@ -641,25 +606,11 @@ func GoogleCallbackHandler(c fiber.Ctx) error {
 
 	// Student audience — bypass user table entirely
 	if payload.Audience == "student" {
-		student := findOrProvisionStudentByGoogle(profile)
-		if student == nil {
+		email := strings.ToLower(strings.TrimSpace(profile.Email))
+		if !profile.EmailVerified || email == "" {
 			return redirectErr(loginPath, "ไม่พบบัญชีนักศึกษาที่ใช้งานได้สำหรับอีเมลนี้")
 		}
-		at, rt, err := issueStudentOAuthSession(c, student)
-		if err != nil {
-			return redirectErr(loginPath, "Failed to create student session")
-		}
-		recordAuthLoginSystemLog(c, nil, "google_student", map[string]any{
-			"student_id": student.ID,
-			"student_no": student.StudentID,
-			"full_name":  student.FullName,
-			"email":      student.Email,
-			"provider":   "google",
-		})
-		utils.SetAuthCookies(c, at, rt)
-		return c.Redirect().To(buildFrontendRedirectWithQuery(frontendURL, "/auth/callback", map[string]string{
-			"login": "success",
-		}))
+		return studentOAuthCallback(c, email, "google", nil)
 	}
 
 	user, oauthAccount := findUserByGoogle(profile, payload.Audience)

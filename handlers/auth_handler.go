@@ -435,6 +435,7 @@ func (h *AuthHandler) Logout(c fiber.Ctx) error {
 		}
 		refreshToken = c.Cookies(utils.RefreshTokenCookieName)
 	}
+	writeStudentSelectionCookie(c, "", -1)
 	// provider ของเซสชันนี้ อ่านจาก meta ของ refresh token ก่อนเพิกถอน เพื่อบอก
 	// หน้าเว็บว่าต้องพาผู้ใช้ไปปิดเซสชันกลางที่ KKU SSO ต่อหรือไม่
 	sessionProvider := ""

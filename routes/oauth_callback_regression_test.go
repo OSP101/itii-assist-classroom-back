@@ -128,12 +128,14 @@ func TestOAuthCallbacksExchangeIdentityAndRespectTwoFactor(t *testing.T) {
 
 func TestGoogleStudentOAuthRequiresVerifiedActiveRegisteredIdentity(t *testing.T) {
 	for _, tc := range []struct {
-		name             string
-		active, verified bool
+		name                    string
+		active, verified, multi bool
 	}{
-		{"active verified student", true, true},
-		{"disabled student", false, true},
-		{"unverified email", true, false},
+		{name: "active verified student", active: true, verified: true},
+		{name: "disabled student", verified: true},
+		{name: "unverified email", active: true},
+		{name: "verified email shared by two active codes", active: true, verified: true, multi: true},
+		{name: "unverified email shared by two active codes", active: true, multi: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			app, db, _ := securityFixture(t)
@@ -141,6 +143,11 @@ func TestGoogleStudentOAuthRequiresVerifiedActiveRegisteredIdentity(t *testing.T
 			t.Setenv("GOOGLE_CLIENT_SECRET", "fixture-secret")
 			if err := db.Model(&models.Student{}).Where("id = ?", 11).Update("is_active", tc.active).Error; err != nil {
 				t.Fatal(err)
+			}
+			if tc.multi {
+				if err := db.Model(&models.Student{}).Where("id = ?", 12).Update("email", "a@example.test").Error; err != nil {
+					t.Fatal(err)
+				}
 			}
 			previous := http.DefaultTransport
 			http.DefaultTransport = fixtureOAuthTransport(func(r *http.Request) (*http.Response, error) {
@@ -174,15 +181,29 @@ func TestGoogleStudentOAuthRequiresVerifiedActiveRegisteredIdentity(t *testing.T
 				t.Fatal(err)
 			}
 			response.Body.Close()
+			redirect, err := url.Parse(response.Header.Get("Location"))
+			if err != nil {
+				t.Fatal(err)
+			}
 			access := ""
+			pending := false
 			for _, cookie := range response.Cookies() {
 				if cookie.Name == utils.AccessTokenCookieName {
 					access = cookie.Value
 				}
+				if cookie.Name == "student_login_selection" && cookie.Value != "" {
+					pending = true
+				}
 			}
 			if !tc.active || !tc.verified {
-				if access != "" {
-					t.Fatal("ineligible student received a session")
+				if access != "" || pending {
+					t.Fatal("ineligible student received a session or choices")
+				}
+				return
+			}
+			if tc.multi {
+				if access != "" || !pending || redirect.Query().Get("selectStudent") != "1" {
+					t.Fatalf("expected student selection without an access token: %s", redirect)
 				}
 				return
 			}
@@ -192,6 +213,162 @@ func TestGoogleStudentOAuthRequiresVerifiedActiveRegisteredIdentity(t *testing.T
 			}
 			if status, body := securityRequest(t, app, "GET", "/api/auth/me", "", access); status != 200 {
 				t.Fatalf("student session failed: %d %s", status, body)
+			}
+		})
+	}
+}
+
+func TestKKUStudentOAuthSelectsActiveRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		oldActive bool
+		newEmail  string
+		wantID    uint
+		choice    string
+	}{
+		{name: "inactive old code and active new code share email", newEmail: " A@EXAMPLE.TEST ", wantID: 12},
+		{name: "selects the old code", oldActive: true, newEmail: "a@example.test", wantID: 11, choice: "student-a"},
+		{name: "selects the new code", oldActive: true, newEmail: "a@example.test", wantID: 12, choice: "student-b"},
+		{name: "only inactive code matches", newEmail: "other@example.test"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, db, _ := securityFixture(t)
+			if err := db.Model(&models.Student{}).Where("id = ?", 11).Update("is_active", tc.oldActive).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Model(&models.Student{}).Where("id = ?", 12).Update("email", tc.newEmail).Error; err != nil {
+				t.Fatal(err)
+			}
+
+			sso := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/auth.token":
+					fmt.Fprint(w, `{"ok":true,"accessToken":"fixture-token","email":"a@example.test"}`)
+				case "/user.profile":
+					fmt.Fprint(w, `{"ok":true,"profile":{"email":"a@example.test"}}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(sso.Close)
+			t.Setenv("KKU_SSO_API_BASE_URL", sso.URL)
+			t.Setenv("KKU_SSO_WEB_BASE_URL", sso.URL)
+			t.Setenv("KKU_SSO_CLIENT_ID", "fixture-kku")
+			t.Setenv("KKU_SSO_CLIENT_SECRET", "fixture-secret")
+			t.Setenv("KKU_SSO_REDIRECT_URL", "https://app.test/api/auth/kku/callback")
+
+			start, err := app.Test(httptest.NewRequest("GET", "https://app.test/api/auth/kku?audience=student", nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			start.Body.Close()
+			if start.Header.Get("Location") != sso.URL+"/login?app=fixture-kku" {
+				t.Fatalf("SSO login did not start: %s", start.Status)
+			}
+			req := httptest.NewRequest("GET", "https://app.test/api/auth/kku/callback?code=fixture", nil)
+			req.Header.Set("X-Forwarded-Proto", "https")
+			for _, cookie := range start.Cookies() {
+				req.AddCookie(cookie)
+			}
+			response, err := app.Test(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			redirect, err := url.Parse(response.Header.Get("Location"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var access string
+			var selectionCookie *http.Cookie
+			for _, cookie := range response.Cookies() {
+				if cookie.Name == utils.AccessTokenCookieName {
+					access = cookie.Value
+				}
+				if cookie.Name == "student_login_selection" && cookie.Value != "" {
+					selectionCookie = cookie
+				}
+			}
+			if tc.choice != "" {
+				if redirect.Query().Get("selectStudent") != "1" || access != "" || selectionCookie == nil || !selectionCookie.HttpOnly || !selectionCookie.Secure {
+					t.Fatalf("expected a pending selection without an access token: %s", redirect)
+				}
+				const endpoint = "https://app.test/api/auth/student-selection"
+				get := httptest.NewRequest("GET", endpoint, nil)
+				withoutCookie, err := app.Test(get)
+				if err != nil {
+					t.Fatal(err)
+				}
+				withoutCookie.Body.Close()
+				if withoutCookie.StatusCode != 401 {
+					t.Fatalf("unauthenticated choices response: %d", withoutCookie.StatusCode)
+				}
+				get.AddCookie(selectionCookie)
+				choices, err := app.Test(get)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var data struct {
+					ID      string `json:"selection_id"`
+					Choices []struct {
+						StudentID string `json:"student_id"`
+					} `json:"choices"`
+				}
+				err = json.NewDecoder(choices.Body).Decode(&data)
+				choices.Body.Close()
+				if err != nil || choices.StatusCode != 200 || len(data.Choices) != 2 || data.Choices[0].StudentID != "student-a" || data.Choices[1].StudentID != "student-b" || data.ID == "" {
+					t.Fatalf("unexpected student choices: status %d, %#v (%v)", choices.StatusCode, data, err)
+				}
+				post := func(studentID, origin string, want int) string {
+					t.Helper()
+					body := fmt.Sprintf(`{"student_id":%q,"selection_id":%q}`, studentID, data.ID)
+					request := httptest.NewRequest("POST", endpoint, strings.NewReader(body))
+					request.Header.Set("Content-Type", "application/json")
+					request.Header.Set("Origin", origin)
+					request.Header.Set("X-Forwarded-Proto", "https")
+					request.AddCookie(selectionCookie)
+					result, err := app.Test(request)
+					if err != nil {
+						t.Fatal(err)
+					}
+					result.Body.Close()
+					if result.StatusCode != want {
+						t.Fatalf("selection status = %d, want %d", result.StatusCode, want)
+					}
+					for _, cookie := range result.Cookies() {
+						if cookie.Name == utils.AccessTokenCookieName {
+							return cookie.Value
+						}
+					}
+					return ""
+				}
+				if err := db.Create(&models.Student{StudentID: "student-c", FullName: "C", Email: "unrelated@example.test"}).Error; err != nil {
+					t.Fatal(err)
+				}
+				post(tc.choice, "https://other.test", 403)
+				post("student-c", "https://app.test", 409)
+				if err := db.Model(&models.Student{}).Where("id = ?", tc.wantID).Update("is_active", false).Error; err != nil {
+					t.Fatal(err)
+				}
+				post(tc.choice, "https://app.test", 409)
+				if err := db.Model(&models.Student{}).Where("id = ?", tc.wantID).Update("is_active", true).Error; err != nil {
+					t.Fatal(err)
+				}
+				access = post(tc.choice, "https://app.test", 204)
+				post(tc.choice, "https://app.test", 401)
+			}
+			if tc.wantID == 0 {
+				if access != "" || redirect.Path != "/student/login" || !strings.Contains(redirect.Query().Get("error"), "ไม่พบบัญชีนักศึกษา") {
+					t.Fatalf("expected student lookup to refuse login: %s", redirect)
+				}
+				return
+			}
+			claims, err := utils.ValidateAccessToken(access)
+			if err != nil || claims.Kind != "s" || claims.UserID != tc.wantID || (tc.choice == "" && redirect.Query().Get("login") != "success") {
+				t.Fatalf("expected a session for student %d: %s (%v)", tc.wantID, redirect, err)
+			}
+			if status, _ := securityRequest(t, app, "GET", "/api/auth/me", "", access); status != 200 {
+				t.Fatalf("student session failed: %d", status)
 			}
 		})
 	}

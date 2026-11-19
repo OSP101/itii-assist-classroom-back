@@ -86,6 +86,7 @@ func main() {
 		&models.PasswordResetToken{},
 		&models.TwoFactorPending{},
 		&models.LoginChallenge{},
+		&models.StudentLoginSelection{},
 		// ห้องเรียนและผังที่นั่ง
 		&models.Classroom{},
 		&models.Zone{},
@@ -342,6 +343,7 @@ func main() {
 					continue
 				}
 				_ = config.DB.Where("expires_at < ?", time.Now().Add(-24*time.Hour)).Delete(&models.LoginChallenge{}).Error
+				_ = config.DB.Where("expires_at <= ?", time.Now()).Delete(&models.StudentLoginSelection{}).Error
 				_ = config.DB.Where("expires_at < ?", time.Now().Add(-time.Hour)).Delete(&models.TwoFactorPending{}).Error
 				deleted, err := repositories.CleanupExpiredRemovals()
 				if err != nil {

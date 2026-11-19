@@ -292,6 +292,8 @@ func KKULoginHandler(c fiber.Ctx) error {
 	audience := strings.ToLower(strings.TrimSpace(c.Query("audience")))
 	if audience != "student" {
 		audience = ""
+	} else {
+		writeStudentSelectionCookie(c, "", -1)
 	}
 
 	action := strings.ToLower(strings.TrimSpace(c.Query("action")))
@@ -429,25 +431,7 @@ func KKUCallbackHandler(c fiber.Ctx) error {
 	// Student path — นักศึกษาไม่มีแถวในตาราง users
 	// =========================================================================
 	if nonce.Audience == "student" {
-		student, err := repositories.FindStudentByEmail(email)
-		if err != nil || student == nil || !student.IsActive {
-			return redirectErr(loginPath, "ไม่พบบัญชีนักศึกษาที่ใช้งานได้สำหรับอีเมลนี้")
-		}
-		at, rt, err := issueStudentOAuthSession(c, student)
-		if err != nil {
-			return redirectErr(loginPath, "สร้างเซสชันนักศึกษาไม่สำเร็จ")
-		}
-		detail := kkuProfileMetadata(profile)
-		detail["student_id"] = student.ID
-		detail["student_no"] = student.StudentID
-		detail["full_name"] = student.FullName
-		detail["email"] = email
-		detail["provider"] = "kku"
-		recordAuthLoginSystemLog(c, nil, "kku_student", detail)
-		utils.SetAuthCookies(c, at, rt)
-		return c.Redirect().To(buildFrontendRedirectWithQuery(frontendURL, "/auth/callback", map[string]string{
-			"login": "success",
-		}))
+		return studentOAuthCallback(c, email, "kku", kkuProfileMetadata(profile))
 	}
 
 	// =========================================================================

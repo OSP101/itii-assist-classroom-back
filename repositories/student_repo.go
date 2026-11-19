@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ─── List / Search ───────────────────────────────────────────────────────────
@@ -112,6 +113,23 @@ func FindStudentByEmail(email string) (*models.Student, error) {
 	var s models.Student
 	err := config.DB.Where("LOWER(email) = LOWER(?)", strings.TrimSpace(email)).First(&s).Error
 	return &s, err
+}
+
+func FindActiveStudentsByLoginEmail(email string) ([]models.Student, error) {
+	var students []models.Student
+	err := studentLoginEmailQuery(config.DB, email).Order("student_id").Find(&students).Error
+	return students, err
+}
+
+func LockActiveStudentLoginChoice(tx *gorm.DB, email, studentID string) (*models.Student, error) {
+	var student models.Student
+	err := studentLoginEmailQuery(tx, email).Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("student_id = ?", studentID).First(&student).Error
+	return &student, err
+}
+
+func studentLoginEmailQuery(db *gorm.DB, email string) *gorm.DB {
+	return db.Where("is_active = ? AND LOWER(TRIM(email)) = ?", true, strings.ToLower(strings.TrimSpace(email)))
 }
 
 func ResolveStudentFromUser(user *models.User) (*models.Student, error) {
@@ -967,16 +985,6 @@ func fallbackString(value string, fallback string) string {
 func IsStudentIDExists(studentID string, excludeID uint) bool {
 	var count int64
 	db := config.DB.Model(&models.Student{}).Where("student_id = ?", studentID)
-	if excludeID > 0 {
-		db = db.Where("id != ?", excludeID)
-	}
-	db.Count(&count)
-	return count > 0
-}
-
-func IsStudentEmailExists(email string, excludeID uint) bool {
-	var count int64
-	db := config.DB.Model(&models.Student{}).Where("email = ?", email)
 	if excludeID > 0 {
 		db = db.Where("id != ?", excludeID)
 	}

@@ -34,6 +34,9 @@ func securityFixture(t *testing.T) (*fiber.App, *gorm.DB, map[string]string) {
 	if err = db.AutoMigrate(&models.User{}, &models.UserOAuthAccount{}, &models.Student{}, &models.RefreshToken{}, &models.AppConfig{}, &models.Course{}, &models.CourseInstructor{}, &models.CourseTA{}, &models.CourseMember{}, &models.AttendanceSession{}, &models.QueueSession{}, &models.QueueBooking{}, &models.Classroom{}, &models.Zone{}, &models.Desk{}, &models.QueueDeskStatus{}, &models.LoginChallenge{}, &models.TwoFactorPending{}, &models.SystemLog{}); err != nil {
 		t.Fatal(err)
 	}
+	if err = db.AutoMigrate(&models.StudentLoginSelection{}); err != nil {
+		t.Fatal(err)
+	}
 	// Match the existing SQLite fixtures: SQLite otherwise gives Postgres
 	// timestamptz columns NUMERIC affinity and cannot scan them into time.Time.
 	var tables []struct{ Name, SQL string }
