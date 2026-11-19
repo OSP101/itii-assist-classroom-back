@@ -666,10 +666,18 @@ func CreateCourse(course *models.Course) error {
 	return config.DB.Create(course).Error
 }
 
-func UpdateCourse(course *models.Course) error {
+func UpdateCourse(course *models.Course, instructorIDs []uint) error {
 	defer InvalidateMyCoursesCache()
 
-	return config.DB.Save(course).Error
+	if instructorIDs == nil {
+		return config.DB.Save(course).Error
+	}
+	return config.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(course).Error; err != nil {
+			return err
+		}
+		return replaceAllCourseInstructors(tx, course.ID, instructorIDs)
+	})
 }
 
 func DeleteCourse(id string) error {
@@ -919,19 +927,47 @@ func GetCourseInstructorCount(courseID string) int64 {
 func ReplaceAllCourseInstructors(courseID string, userIDs []uint) error {
 	defer InvalidateMyCoursesCache()
 
-	db := config.DB
-	db.Where("course_id = ?", courseID).Delete(&models.CourseInstructor{})
+	return config.DB.Transaction(func(tx *gorm.DB) error {
+		return replaceAllCourseInstructors(tx, courseID, userIDs)
+	})
+}
+
+func replaceAllCourseInstructors(db *gorm.DB, courseID string, userIDs []uint) error {
+	memberships := db.Model(&models.CourseInstructor{}).Where("course_id = ?", courseID)
 	if len(userIDs) == 0 {
-		return nil
+		return memberships.Delete(&models.CourseInstructor{}).Error
 	}
-	toCreate := make([]models.CourseInstructor, len(userIDs))
+
+	if err := memberships.Session(&gorm.Session{}).Where("user_id NOT IN ?", userIDs).Delete(&models.CourseInstructor{}).Error; err != nil {
+		return err
+	}
+	var existingIDs []uint
+	if err := memberships.Session(&gorm.Session{}).Pluck("user_id", &existingIDs).Error; err != nil {
+		return err
+	}
+	existing := make(map[uint]bool, len(existingIDs))
+	for _, id := range existingIDs {
+		existing[id] = true
+	}
+	if err := memberships.Session(&gorm.Session{}).Update("is_primary", gorm.Expr("user_id = ?", userIDs[0])).Error; err != nil {
+		return err
+	}
+
+	var toCreate []models.CourseInstructor
 	for i, uid := range userIDs {
-		toCreate[i] = models.CourseInstructor{
+		if existing[uid] {
+			continue
+		}
+		existing[uid] = true
+		toCreate = append(toCreate, models.CourseInstructor{
 			CourseID: courseID, UserID: uid,
 			IsPrimary:   i == 0,
 			Permissions: EncodeCourseMemberPermissions("instructor", nil),
 			AssignedAt:  time.Now(),
-		}
+		})
+	}
+	if len(toCreate) == 0 {
+		return nil
 	}
 	return db.Create(&toCreate).Error
 }

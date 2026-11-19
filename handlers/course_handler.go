@@ -654,15 +654,12 @@ func UpdateCourseHandler(c fiber.Ctx) error {
 		updated.LeaveAutoExpireDays = *input.LeaveAutoExpireDays
 	}
 
-	// Update instructors
-	shouldUpdateInstructors := len(input.InstructorIDs) > 0 || input.InstructorID != nil
-	var instructorIDs []uint
-	if len(input.InstructorIDs) > 0 {
-		instructorIDs = input.InstructorIDs
-	} else if input.InstructorID != nil {
+	// An omitted list leaves the roster alone. An explicit empty list clears it.
+	instructorIDs := input.InstructorIDs
+	if len(instructorIDs) == 0 && input.InstructorID != nil {
 		instructorIDs = []uint{*input.InstructorID}
 	}
-	if shouldUpdateInstructors && actorRole == "instructor" {
+	if instructorIDs != nil && actorRole == "instructor" {
 		found := false
 		for _, uid := range instructorIDs {
 			if uid == actorID {
@@ -670,20 +667,22 @@ func UpdateCourseHandler(c fiber.Ctx) error {
 				break
 			}
 		}
-		if !found && repositories.IsUserCourseInstructor(id, actorID) {
+		if !found {
 			instructorIDs = append([]uint{actorID}, instructorIDs...)
 		}
 	}
-	if shouldUpdateInstructors && actorRole == "ta" {
+	if instructorIDs != nil && actorRole == "ta" {
 		return c.Status(403).JSON(fiber.Map{"success": false, "message": "ผู้ช่วยสอนไม่มีสิทธิ์แก้ไขรายชื่ออาจารย์ผู้สอน"})
 	}
 
-	if shouldUpdateInstructors && len(instructorIDs) > 0 {
-		updated.InstructorID = &instructorIDs[0]
-		repositories.ReplaceAllCourseInstructors(id, instructorIDs)
+	if instructorIDs != nil {
+		updated.InstructorID = nil
+		if len(instructorIDs) > 0 {
+			updated.InstructorID = &instructorIDs[0]
+		}
 	}
 
-	if err := repositories.UpdateCourse(&updated); err != nil {
+	if err := repositories.UpdateCourse(&updated, instructorIDs); err != nil {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "อัปเดตรายวิชาไม่สำเร็จ"})
 	}
 
@@ -694,7 +693,7 @@ func UpdateCourseHandler(c fiber.Ctx) error {
 		"is_active":           updated.IsActive,
 		"attention_threshold": updated.AttentionThreshold,
 	}
-	if shouldUpdateInstructors {
+	if instructorIDs != nil {
 		logDetail["instructor_ids"] = instructorIDs
 	}
 	// course.Course is the row as it was loaded, before the field-by-field
@@ -712,7 +711,7 @@ func UpdateCourseHandler(c fiber.Ctx) error {
 			"is_active":           updated.IsActive,
 			"attention_threshold": updated.AttentionThreshold,
 		},
-		"updated_instructors": shouldUpdateInstructors,
+		"updated_instructors": instructorIDs != nil,
 	})
 
 	detail, _ := repositories.FindCourseByID(id)
